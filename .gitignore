@@ -1,0 +1,15 @@
+/bin/
+/dist/
+*.exe
+.env
+.env.*
+*.pem
+recordings/
+data/
+*.mp3
+*.ogg
+*.wav
+*.m4a
+.idea/
+.vscode/
+*.log
