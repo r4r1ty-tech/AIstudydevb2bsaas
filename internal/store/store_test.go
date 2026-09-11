@@ -100,6 +100,29 @@ func TestOpenTempDBAndUserUpsert(t *testing.T) {
 		t.Fatalf("setters: %+v", got)
 	}
 
+	if err := st.SetExtraWords(u.TelegramID, []string{"лаба", "Тест", "лаба"}); err != nil {
+		t.Fatalf("SetExtraWords: %v", err)
+	}
+	if err := st.SetOnboardStage(u.TelegramID, model.StageDone); err != nil {
+		t.Fatalf("SetOnboardStage: %v", err)
+	}
+	got, err = st.GetUser(u.TelegramID)
+	if err != nil || got == nil {
+		t.Fatalf("GetUser after words: (%v, %v)", got, err)
+	}
+	if got.OnboardStage != model.StageDone || len(got.ExtraWords) != 2 || got.ExtraWords[0] != "лаба" || got.ExtraWords[1] != "тест" {
+		t.Fatalf("extra words: %+v", got)
+	}
+	got.FIO = "Сидоров Сидор"
+	got.Username = "admin"
+	if err := st.UpsertUser(got); err != nil {
+		t.Fatalf("UpsertUser keep extras: %v", err)
+	}
+	got, err = st.GetUser(u.TelegramID)
+	if err != nil || got == nil || len(got.ExtraWords) != 2 || got.ExtraWords[0] != "лаба" {
+		t.Fatalf("extras lost on upsert: %+v %v", got, err)
+	}
+
 	users, err := st.ListUsers()
 	if err != nil {
 		t.Fatalf("ListUsers: %v", err)

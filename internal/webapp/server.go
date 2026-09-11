@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -108,7 +109,7 @@ func (s *Server) Listen(ctx context.Context) error {
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
-	mux.Handle("GET /static/", http.FileServer(http.FS(staticFS)))
+	mux.Handle("GET /static/", noCache(http.FileServer(http.FS(staticFS))))
 
 	api := http.NewServeMux()
 	api.HandleFunc("GET /api/now", s.handleNow)
@@ -122,8 +123,15 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("GET /api/settings", s.handleSettingsGet)
 	api.HandleFunc("POST /api/settings", s.handleSettingsPost)
 
-	mux.Handle("/api/", s.requireAdmin(api))
+	mux.Handle("/api/", s.requirePassword(api))
 	return mux
+}
+
+func noCache(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		h.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -138,24 +146,15 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-func (s *Server) requireAdmin(next http.Handler) http.Handler {
+func (s *Server) requirePassword(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw := initDataFromRequest(r.Header.Get)
-		if raw == "" {
-			writeErr(w, http.StatusUnauthorized, "missing init data")
-			return
+		want := ""
+		if s.cfg != nil {
+			want = s.cfg.PanelPassword
 		}
-		_, err := ValidateInitData(raw, s.cfg.BotToken, time.Now(), s.cfg.AdminID)
-		if err != nil {
-			code := http.StatusUnauthorized
-			msg := "unauthorized"
-			if errors.Is(err, ErrNotAdmin) {
-				code = http.StatusForbidden
-				msg = "forbidden"
-			} else if errors.Is(err, ErrExpiredInitData) {
-				msg = "expired"
-			}
-			writeErr(w, code, msg)
+		if !passwordOK(passwordFromRequest(r), want) {
+			log.Printf("webapp auth: bad password %s", r.URL.Path)
+			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
 		next.ServeHTTP(w, r)

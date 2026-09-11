@@ -39,6 +39,7 @@ type Config struct {
 	RecordingsDir string
 	ChromeBin     string
 	BBBDryRun     bool
+	PanelPassword string
 	Whitelist     []int64
 }
 
@@ -57,6 +58,7 @@ func Load() (*Config, error) {
 		RecordingsDir: strEnv("RECORDINGS_DIR", DefaultRecordings),
 		ChromeBin:     strEnv("CHROME_BIN", ""),
 		BBBDryRun:     os.Getenv("BBB_DRY_RUN") == "1",
+		PanelPassword: strEnv("PANEL_PASSWORD", ""),
 		Whitelist:     append([]int64(nil), DefaultWhitelist...),
 	}
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {

@@ -38,6 +38,7 @@ type peoplePatch struct {
 	FIO          *string `json:"fio"`
 	Subgroup     *int    `json:"subgroup"`
 	SOCKS5       *string `json:"socks5"`
+	ExtraWords   *string `json:"extra_words"`
 	DisableToday *bool   `json:"disable_today"`
 }
 
@@ -207,6 +208,12 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.SOCKS5 != nil {
 		if err := s.st.SetSOCKS5(id, *patch.SOCKS5); err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+	}
+	if patch.ExtraWords != nil {
+		if err := s.st.SetExtraWords(id, model.ParseWakeWords(*patch.ExtraWords)); err != nil {
 			writeStoreErr(w, err)
 			return
 		}

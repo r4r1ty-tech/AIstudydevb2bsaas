@@ -17,8 +17,11 @@ const (
 	introText   = "Этот бот заходит на онлайн-лекции вместо тебя: в BBB в списке будет твоё ФИО, как в журнале. На паре слушает вейкворды и пишет в личку. Это не публичный сервис — только наша группа.\n\nКак тебя записать в BBB? Строка как в журнале (Фамилия Имя Отчество)."
 	askFIO      = "Как тебя записать в BBB? Строка как в журнале (Фамилия Имя Отчество)."
 	askSub      = "Какая подгруппа? 1 или 2, по умолчанию 1."
-	whitelisted = "Ты в вайтлисте, профиль есть."
+	askWords    = "Свои вейкворды через запятую. Общие уже есть: тест, контрольная, мудл, moodle + фамилия. Или «-» если своих не надо. Потом можно /words."
+	whitelisted = "Ты в вайтлисте. /words — вейкворды, /link — ссылки BBB. Кинь bbb.ssau.ru/b/… сюда, привяжу к паре."
 	askBBBLink  = "Кинь ссылку на подключение (bbb.ssau.ru/b/…). Без неё не зайду."
+	doneHint    = "На паре пиши Да/Нет. Ссылку bbb.ssau.ru/b/… кидай сюда. /words — вейкворды, /link — какие ссылки уже есть."
+	noBBBTarget = "не понял к какой паре. Ближайших online без ссылки нет. Напиши /link и кинь bbb.ssau.ru/b/… ещё раз ближе к паре."
 )
 
 func (b *Bot) onStart(_ *gotgbot.Bot, ctx *ext.Context) error {
@@ -65,6 +68,9 @@ func (b *Bot) onStart(_ *gotgbot.Bot, ctx *ext.Context) error {
 	if strings.TrimSpace(u.FIO) == "" {
 		return b.send(chatID, askFIO, nil)
 	}
+	if u.OnboardStage == model.StageWords {
+		return b.send(chatID, askWords, nil)
+	}
 	return b.send(chatID, askSub, nil)
 }
 
@@ -94,7 +100,7 @@ func (b *Bot) onPanel(_ *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	mk := b.panelMarkup()
 	b.setAdminMenuButton()
-	return b.send(chatID, "Панель", &gotgbot.SendMessageOpts{ReplyMarkup: *mk})
+	return b.send(chatID, "Жми кнопку «Панель» под этим сообщением. Ссылку в браузере не открывай.", &gotgbot.SendMessageOpts{ReplyMarkup: *mk})
 }
 
 func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
@@ -131,7 +137,14 @@ func (b *Bot) continueOnboarding(u *model.User, chatID int64, text string) error
 		if err := b.st.SetFIO(u.TelegramID, fio); err != nil {
 			return err
 		}
+		if err := b.st.SetOnboardStage(u.TelegramID, model.StageSub); err != nil {
+			return err
+		}
 		return b.send(chatID, askSub, nil)
+	}
+
+	if u.OnboardStage == model.StageWords {
+		return b.finishOnboarding(u, chatID, text)
 	}
 
 	n, ok := parseSubgroup(text)
@@ -141,15 +154,33 @@ func (b *Bot) continueOnboarding(u *model.User, chatID int64, text string) error
 	if err := b.st.SetSubgroup(u.TelegramID, n); err != nil {
 		return err
 	}
+	if err := b.st.SetOnboardStage(u.TelegramID, model.StageWords); err != nil {
+		return err
+	}
+	return b.send(chatID, askWords, nil)
+}
+
+func (b *Bot) finishOnboarding(u *model.User, chatID int64, text string) error {
+	words := []string(nil)
+	if !model.SkipWakeWords(text) {
+		words = model.ParseWakeWords(text)
+	}
+	if err := b.st.SetExtraWords(u.TelegramID, words); err != nil {
+		return err
+	}
+	if err := b.st.SetOnboardStage(u.TelegramID, model.StageDone); err != nil {
+		return err
+	}
 	fresh, err := b.st.GetUser(u.TelegramID)
 	if err != nil {
 		return err
 	}
 	if fresh == nil {
 		fresh = u
-		fresh.Subgroup = n
+		fresh.ExtraWords = words
 	}
 	fresh.Onboarded = true
+	fresh.OnboardStage = model.StageDone
 	if err := b.st.UpsertUser(fresh); err != nil {
 		return err
 	}
@@ -161,7 +192,138 @@ func (b *Bot) continueOnboarding(u *model.User, chatID int64, text string) error
 	}); err != nil {
 		return err
 	}
-	return b.send(chatID, fmt.Sprintf("Ок, %s, подгруппа %d.", fresh.FIO, n), nil)
+	return b.send(chatID, fmt.Sprintf("Ок, %s, подгруппа %d.\n%s\n\n%s", fresh.FIO, fresh.Subgroup, formatWakeReply(*fresh), doneHint), nil)
+}
+
+func formatWakeReply(u model.User) string {
+	list := u.WakeList()
+	extra := model.FormatWakeWords(u.ExtraWords)
+	if extra == "" {
+		extra = "нет"
+	}
+	return fmt.Sprintf("Слушаю: %s\nСвои: %s", strings.Join(list, ", "), extra)
+}
+
+func commandPayload(text string) string {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return text
+	}
+	i := strings.IndexAny(text, " \n")
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(text[i+1:])
+}
+
+func isClearWords(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "clear", "очистить", "-", "—":
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *Bot) onWords(_ *gotgbot.Bot, ctx *ext.Context) error {
+	from := b.allowed(ctx)
+	if from == nil || ctx.EffectiveMessage == nil {
+		return nil
+	}
+	chatID := ctx.EffectiveMessage.Chat.Id
+	u, err := b.st.GetUser(from.Id)
+	if err != nil {
+		return err
+	}
+	if u == nil {
+		return b.send(chatID, askFIO, nil)
+	}
+
+	payload := commandPayload(ctx.EffectiveMessage.GetText())
+	if payload != "" {
+		var words []string
+		if !isClearWords(payload) {
+			words = model.MergeWakeWords(u.ExtraWords, model.ParseWakeWords(payload))
+		}
+		if err := b.st.SetExtraWords(u.TelegramID, words); err != nil {
+			return err
+		}
+		u.ExtraWords = words
+	}
+
+	if !u.Onboarded && u.OnboardStage == model.StageWords && payload != "" {
+		return b.finishOnboarding(u, chatID, payload)
+	}
+	return b.send(chatID, formatWakeReply(*u)+"\n\nДобавить: /words лаба, зачёт\nСбросить свои: /words clear", nil)
+}
+
+func (b *Bot) onLink(_ *gotgbot.Bot, ctx *ext.Context) error {
+	from := b.allowed(ctx)
+	if from == nil || ctx.EffectiveMessage == nil {
+		return nil
+	}
+	chatID := ctx.EffectiveMessage.Chat.Id
+	u, err := b.st.GetUser(from.Id)
+	if err != nil {
+		return err
+	}
+	if u == nil {
+		u = &model.User{TelegramID: from.Id, Subgroup: 1}
+	}
+	text, err := b.formatLinkReply(u)
+	if err != nil {
+		return err
+	}
+	return b.send(chatID, text, nil)
+}
+
+func (b *Bot) formatLinkReply(u *model.User) (string, error) {
+	lessons, err := b.st.ListLessons()
+	if err != nil {
+		return "", err
+	}
+	saved, err := b.st.ListBBB()
+	if err != nil {
+		return "", err
+	}
+	now := b.now()
+	var bld strings.Builder
+	bld.WriteString("Ближайшие online:\n")
+	n := 0
+	for _, l := range lessons {
+		if !l.Online || !l.MatchesSubgroup(u.Subgroup) || !l.Begin.After(now) {
+			continue
+		}
+		n++
+		if n > 8 {
+			break
+		}
+		mark := "нет ссылки"
+		if url := b.lookupBBB(l.Discipline, l.Teacher); url != "" {
+			mark = url
+		}
+		fmt.Fprintf(&bld, "• %s %s — %s\n", l.Discipline, l.SlotLabel(), mark)
+	}
+	if n == 0 {
+		bld.WriteString("нет ближайших\n")
+	}
+	if len(saved) > 0 {
+		bld.WriteString("\nЗапомнил:\n")
+		for _, link := range saved {
+			fmt.Fprintf(&bld, "• %s\n", link.URL)
+		}
+	}
+	bld.WriteString("\nКинь bbb.ssau.ru/b/… сюда — привяжу к ближайшей паре без ссылки.")
+	return bld.String(), nil
+}
+
+func (b *Bot) lookupBBB(discipline, teacher string) string {
+	link, err := b.st.GetBBB(model.BBBKey(b.cfg.GroupID, discipline, teacher))
+	if err != nil || link == nil {
+		return ""
+	}
+	return strings.TrimSpace(link.URL)
 }
 
 func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
@@ -174,7 +336,7 @@ func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
 	}
 	lesson := b.pickBBBTarget(u, b.now())
 	if lesson == nil {
-		return nil
+		return b.send(chatID, noBBBTarget, nil)
 	}
 	key := model.BBBKey(b.cfg.GroupID, lesson.Discipline, lesson.Teacher)
 	if err := b.st.SetBBB(key, url); err != nil {

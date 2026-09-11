@@ -1,6 +1,6 @@
 [Unit]
 Description=SSAU lecture stack
-Wants=ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service
+Wants=ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service ssau-tunnel.service
 After=network-online.target
 
 [Install]

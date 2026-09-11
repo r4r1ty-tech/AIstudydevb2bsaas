@@ -8,34 +8,57 @@
   var currentTab = "now";
   var nowTimer = null;
   var toastT = null;
+  var booted = false;
+  var PW_KEY = "panel_pw";
 
-  function initData() {
-    return (tg && tg.initData) || "";
+  function password() {
+    try { return sessionStorage.getItem(PW_KEY) || ""; } catch (e) { return ""; }
+  }
+
+  function setPassword(v) {
+    try {
+      if (v) sessionStorage.setItem(PW_KEY, v);
+      else sessionStorage.removeItem(PW_KEY);
+    } catch (e) {}
   }
 
   function showGate(msg) {
     app.hidden = true;
     gate.hidden = false;
-    var p = gate.querySelector(".gate-msg");
-    if (p && msg) p.textContent = msg;
+    var p = document.getElementById("gate-msg");
+    if (p) {
+      p.hidden = !msg;
+      p.textContent = msg || "";
+    }
   }
 
-  if (tg) {
-    tg.ready();
-    tg.expand();
-    try {
-      tg.setHeaderColor("#0c0f14");
-      tg.setBackgroundColor("#0c0f14");
-    } catch (e) {}
+  function boot() {
+    if (booted) return;
+    if (!password()) {
+      showGate();
+      return;
+    }
+    api("/api/settings").then(function (s) {
+      if (booted) return;
+      booted = true;
+      tg = window.Telegram && window.Telegram.WebApp;
+      if (tg) {
+        try {
+          tg.ready();
+          tg.expand();
+          tg.setHeaderColor("#0c0f14");
+          tg.setBackgroundColor("#0c0f14");
+        } catch (e) {}
+      }
+      gate.hidden = true;
+      app.hidden = false;
+      if (s) {
+        var el = document.getElementById("hdr-meta");
+        el.textContent = (s.group_code || "группа") + " · " + (s.group_id || "") + " · " + (s.timezone || "");
+      }
+      showTab("now");
+    }).catch(function () {});
   }
-
-  if (!initData()) {
-    showGate("Открой из бота");
-    return;
-  }
-
-  gate.hidden = true;
-  app.hidden = false;
 
   function toast(msg) {
     toastEl.hidden = false;
@@ -47,7 +70,7 @@
   function api(path, opts) {
     opts = opts || {};
     var headers = {
-      "X-Telegram-Init-Data": initData(),
+      "X-Panel-Password": password(),
       Accept: "application/json",
     };
     if (opts.headers) {
@@ -68,12 +91,10 @@
         if (text) {
           try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
         }
-        if (res.status === 403) {
-          showGate("Нет доступа");
-          throw new Error("forbidden");
-        }
         if (res.status === 401) {
-          showGate("Открой из бота");
+          booted = false;
+          setPassword("");
+          showGate("неверный пароль");
           throw new Error("unauthorized");
         }
         if (!res.ok) {
@@ -193,6 +214,7 @@
           '<label class="field">ФИО <input class="fio" value="' + esc(u.fio || "") + '"></label>' +
           '<label class="field">Подгруппа <input class="sub" type="number" min="0" max="4" value="' + esc(u.subgroup || 0) + '"></label>' +
           '<label class="field">SOCKS5 <input class="socks" value="' + esc(u.socks5 || "") + '" placeholder="user:pass@host:port"></label>' +
+          '<label class="field">Вейкворды <input class="words" value="' + esc((u.extra_words || []).join(", ")) + '" placeholder="лаба, зачёт"></label>' +
           '<div class="actions">' +
             '<button type="button" class="act save">Сохранить</button>' +
             '<button type="button" class="act off-today">Выключить на сегодня</button>' +
@@ -224,6 +246,7 @@
         fio: card.querySelector(".fio").value,
         subgroup: Number(card.querySelector(".sub").value || 0),
         socks5: card.querySelector(".socks").value,
+        extra_words: card.querySelector(".words").value,
       }).then(function () { toast("сохранено"); }).catch(function (e) { toast(e.message); });
     } else if (ev.target.classList.contains("off-today")) {
       patchPerson(id, { disable_today: true }).then(function () { toast("выключен на сегодня"); }).catch(function (e) { toast(e.message); });
@@ -415,11 +438,24 @@
     if (document.visibilityState === "visible" && currentTab === "now") loadNow();
   });
 
-  api("/api/settings").then(function (s) {
-    if (!s) return;
-    var el = document.getElementById("hdr-meta");
-    el.textContent = (s.group_code || "группа") + " · " + (s.group_id || "") + " · " + (s.timezone || "");
-  }).catch(function () {});
+  document.getElementById("login-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var inp = document.getElementById("pw");
+    var v = (inp && inp.value) ? inp.value.trim() : "";
+    if (!v) {
+      showGate("введи пароль");
+      return;
+    }
+    setPassword(v);
+    boot();
+  });
 
-  showTab("now");
+  (function kickoff() {
+    tg = window.Telegram && window.Telegram.WebApp;
+    if (tg) {
+      try { tg.ready(); } catch (e) {}
+    }
+    if (password()) boot();
+    else showGate();
+  })();
 })();
