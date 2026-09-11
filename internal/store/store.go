@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -62,7 +63,9 @@ func (s *Store) migrate() error {
 			disabled_until TEXT NULL,
 			socks5 TEXT,
 			onboarded INTEGER DEFAULT 0,
-			created_at TEXT
+			created_at TEXT,
+			wake_words TEXT,
+			onboard_stage INTEGER DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS lessons (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +136,25 @@ func (s *Store) migrate() error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: migrate commit: %w", err)
 	}
+	return s.ensureUserColumns()
+}
+
+func (s *Store) ensureUserColumns() error {
+	alters := []string{
+		`ALTER TABLE users ADD COLUMN wake_words TEXT`,
+		`ALTER TABLE users ADD COLUMN onboard_stage INTEGER DEFAULT 0`,
+	}
+	for _, q := range alters {
+		if _, err := s.db.Exec(q); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("store: migrate users: %w", err)
+			}
+		}
+	}
+	_, err := s.db.Exec(`UPDATE users SET onboard_stage = 3 WHERE onboarded = 1 AND IFNULL(onboard_stage, 0) = 0`)
+	if err != nil {
+		return fmt.Errorf("store: backfill onboard_stage: %w", err)
+	}
 	return nil
 }
 
@@ -196,9 +218,9 @@ func btoi(b bool) int {
 
 func scanUser(sc scanner) (*model.User, error) {
 	var u model.User
-	var username, firstName, lastName, fio, socks5, createdAt sql.NullString
+	var username, firstName, lastName, fio, socks5, createdAt, wakeWords sql.NullString
 	var disabledUntil sql.NullString
-	var subgroup, enabled, onboarded sql.NullInt64
+	var subgroup, enabled, onboarded, onboardStage sql.NullInt64
 	if err := sc.Scan(
 		&u.TelegramID,
 		&username,
@@ -211,6 +233,8 @@ func scanUser(sc scanner) (*model.User, error) {
 		&socks5,
 		&onboarded,
 		&createdAt,
+		&wakeWords,
+		&onboardStage,
 	); err != nil {
 		return nil, err
 	}
@@ -219,8 +243,12 @@ func scanUser(sc scanner) (*model.User, error) {
 	u.LastName = nullStr(lastName)
 	u.FIO = nullStr(fio)
 	u.SOCKS5 = nullStr(socks5)
+	u.ExtraWords = model.ParseWakeWords(nullStr(wakeWords))
 	if subgroup.Valid {
 		u.Subgroup = int(subgroup.Int64)
+	}
+	if onboardStage.Valid {
+		u.OnboardStage = int(onboardStage.Int64)
 	}
 	u.Enabled = enabled.Valid && enabled.Int64 != 0
 	u.Onboarded = onboarded.Valid && onboarded.Int64 != 0

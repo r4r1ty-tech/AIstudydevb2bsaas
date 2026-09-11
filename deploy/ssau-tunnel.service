@@ -1,0 +1,18 @@
+[Unit]
+Description=SSAU Mini App HTTPS tunnel
+PartOf=ssau.target
+After=ssau-panel.service network-online.target
+Wants=ssau-panel.service network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ssau-bot
+ExecStart=/opt/ssau-bot/tunnel.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+User=root
+Group=root
+
+[Install]
+WantedBy=ssau.target

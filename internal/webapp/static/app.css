@@ -26,7 +26,22 @@ body {
   justify-content: center;
   padding: 24px;
 }
-.gate-msg { font-size: 20px; font-weight: 600; color: var(--muted); }
+.gate-form {
+  width: min(280px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gate-form input {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+}
+.gate-err { margin: 0; color: var(--bad); font-size: 13px; }
 
 #app { max-width: 720px; margin: 0 auto; padding: 10px 10px 28px; }
 

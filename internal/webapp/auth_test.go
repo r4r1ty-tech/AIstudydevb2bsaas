@@ -1,105 +1,84 @@
 package webapp
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
-	"fmt"
-	"net/url"
-	"sort"
-	"strconv"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 )
 
-const (
-	testBotToken = "123456:TEST_TOKEN_FOR_HMAC"
-	testAdminID  = int64(1074442235)
-)
-
-func signInitData(botToken string, fields map[string]string) string {
-	keys := make([]string, 0, len(fields))
-	for k := range fields {
-		if k == "hash" {
-			continue
-		}
-		keys = append(keys, k)
+func TestPasswordOK(t *testing.T) {
+	if !passwordOK("secret", "secret") {
+		t.Fatal("same password should pass")
 	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, k+"="+fields[k])
+	if passwordOK("secret", "Secret") {
+		t.Fatal("mismatch should fail")
 	}
-	dataCheck := strings.Join(parts, "\n")
-
-	mac1 := hmac.New(sha256.New, []byte("WebAppData"))
-	_, _ = mac1.Write([]byte(botToken))
-	secret := mac1.Sum(nil)
-
-	mac2 := hmac.New(sha256.New, secret)
-	_, _ = mac2.Write([]byte(dataCheck))
-	fields["hash"] = hex.EncodeToString(mac2.Sum(nil))
-
-	q := url.Values{}
-	for k, v := range fields {
-		q.Set(k, v)
+	if passwordOK("secret", "") {
+		t.Fatal("empty configured password should fail")
 	}
-	return q.Encode()
-}
-
-func TestValidateInitData_OK(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	raw := signInitData(testBotToken, map[string]string{
-		"auth_date": strconv.FormatInt(now.Unix(), 10),
-		"query_id":  "AAEtest",
-		"user":      fmt.Sprintf(`{"id":%d,"first_name":"Admin","username":"boss"}`, testAdminID),
-	})
-	uid, err := ValidateInitData(raw, testBotToken, now, testAdminID)
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
+	if passwordOK("", "secret") {
+		t.Fatal("empty input should fail")
 	}
-	if uid != testAdminID {
-		t.Fatalf("user id = %d, want %d", uid, testAdminID)
+	if passwordOK("ab", "abc") {
+		t.Fatal("different length should fail")
 	}
 }
 
-func TestValidateInitData_WrongHash(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	raw := signInitData(testBotToken, map[string]string{
-		"auth_date": strconv.FormatInt(now.Unix(), 10),
-		"user":      fmt.Sprintf(`{"id":%d,"first_name":"Admin"}`, testAdminID),
-	})
-	vals, err := url.ParseQuery(raw)
-	if err != nil {
-		t.Fatal(err)
+func TestPasswordFromRequest(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/api/now", nil)
+	r.Header.Set("X-Panel-Password", "  abc  ")
+	if got := passwordFromRequest(r); got != "abc" {
+		t.Fatalf("header = %q", got)
 	}
-	vals.Set("hash", strings.Repeat("ab", 32))
-	_, err = ValidateInitData(vals.Encode(), testBotToken, now, testAdminID)
-	if err == nil {
-		t.Fatal("expected error for wrong hash")
+
+	r = httptest.NewRequest(http.MethodGet, "/api/now", nil)
+	r.Header.Set("Authorization", "Bearer xyz")
+	if got := passwordFromRequest(r); got != "xyz" {
+		t.Fatalf("bearer = %q", got)
 	}
-	if !errors.Is(err, ErrInvalidInitData) {
-		t.Fatalf("err = %v, want ErrInvalidInitData", err)
+
+	r = httptest.NewRequest(http.MethodGet, "/api/now", nil)
+	if got := passwordFromRequest(r); got != "" {
+		t.Fatalf("empty = %q", got)
 	}
 }
 
-func TestValidateInitData_WrongUser(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	other := testAdminID + 1
-	raw := signInitData(testBotToken, map[string]string{
-		"auth_date": strconv.FormatInt(now.Unix(), 10),
-		"user":      fmt.Sprintf(`{"id":%d,"first_name":"Kent"}`, other),
-	})
-	uid, err := ValidateInitData(raw, testBotToken, now, testAdminID)
-	if err == nil {
-		t.Fatal("expected error for non-admin user")
+func TestRequirePassword(t *testing.T) {
+	s := New(&config.Config{
+		ListenAddr:    config.DefaultListen,
+		Timezone:      config.DefaultTimezone,
+		PanelPassword: "panel-secret",
+		GroupCode:     "6301-090301D",
+	}, nil, nil, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no password: %d", rec.Code)
 	}
-	if !errors.Is(err, ErrNotAdmin) {
-		t.Fatalf("err = %v, want ErrNotAdmin", err)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.Header.Set("X-Panel-Password", "wrong")
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong password: %d", rec.Code)
 	}
-	if uid != other {
-		t.Fatalf("user id = %d, want parsed %d", uid, other)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	req.Header.Set("X-Panel-Password", "panel-secret")
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		body, _ := io.ReadAll(rec.Body)
+		t.Fatalf("ok password: %d %s", rec.Code, body)
+	}
+	if !strings.Contains(rec.Body.String(), "6301-090301D") {
+		t.Fatalf("body = %s", rec.Body.String())
 	}
 }

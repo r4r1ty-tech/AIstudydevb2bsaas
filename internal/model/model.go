@@ -24,6 +24,8 @@ type User struct {
 	Enabled       bool       `json:"enabled"`
 	DisabledUntil *time.Time `json:"disabled_until,omitempty"`
 	SOCKS5        string     `json:"socks5"`
+	ExtraWords    []string   `json:"extra_words"`
+	OnboardStage  int        `json:"onboard_stage"`
 	Onboarded     bool       `json:"onboarded"`
 	CreatedAt     time.Time  `json:"created_at"`
 }
@@ -44,6 +46,67 @@ func (u User) Surname() string {
 		return ""
 	}
 	return strings.Fields(f)[0]
+}
+
+const (
+	StageFIO   = 0
+	StageSub   = 1
+	StageWords = 2
+	StageDone  = 3
+)
+
+var CommonWakeWords = []string{"тест", "контрольная", "мудл", "moodle"}
+
+func ParseWakeWords(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	for _, sep := range []string{",", ";", "\n"} {
+		s = strings.ReplaceAll(s, sep, " ")
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, p := range strings.Fields(s) {
+		p = strings.Trim(p, ".,!?«»\"'")
+		p = strings.ToLower(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out
+}
+
+func SkipWakeWords(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "", "-", "—", ".", "нет", "не надо", "пропуск", "skip", "/skip", "clear", "очистить":
+		return true
+	default:
+		return false
+	}
+}
+
+func FormatWakeWords(words []string) string {
+	return strings.Join(ParseWakeWords(strings.Join(words, " ")), ", ")
+}
+
+func MergeWakeWords(old, add []string) []string {
+	return ParseWakeWords(strings.Join(append(append([]string{}, old...), add...), " "))
+}
+
+func (u User) WakeList() []string {
+	add := append([]string{}, CommonWakeWords...)
+	if s := u.Surname(); s != "" {
+		add = append(add, s)
+	}
+	add = append(add, u.ExtraWords...)
+	return ParseWakeWords(strings.Join(add, " "))
 }
 
 type Lesson struct {

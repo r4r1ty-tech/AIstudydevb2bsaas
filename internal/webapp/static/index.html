@@ -8,8 +8,12 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-  <div id="gate" class="gate" hidden>
-    <p class="gate-msg">Открой из бота</p>
+  <div id="gate" class="gate">
+    <form id="login-form" class="gate-form">
+      <input id="pw" type="password" name="password" autocomplete="current-password" placeholder="пароль" required>
+      <button type="submit">войти</button>
+      <p id="gate-msg" class="gate-err" hidden></p>
+    </form>
   </div>
   <div id="app" hidden>
     <header class="top">

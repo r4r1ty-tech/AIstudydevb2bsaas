@@ -1,6 +1,7 @@
 package tg
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -72,6 +73,24 @@ func TestParseSubgroup(t *testing.T) {
 	}
 	if _, ok := parseSubgroup("нет"); ok {
 		t.Fatal("expected reject")
+	}
+}
+
+func TestCommandPayloadAndWakeReply(t *testing.T) {
+	t.Parallel()
+	if got := commandPayload("/words лаба, зачёт"); got != "лаба, зачёт" {
+		t.Fatalf("payload: %q", got)
+	}
+	if got := commandPayload("/words@bot"); got != "" {
+		t.Fatalf("empty payload: %q", got)
+	}
+	if !isClearWords("очистить") || isClearWords("лаба") {
+		t.Fatal("clear")
+	}
+	u := model.User{FIO: "Иванов Иван", ExtraWords: []string{"лаба"}}
+	got := formatWakeReply(u)
+	if !strings.Contains(got, "лаба") || !strings.Contains(got, "тест") || !strings.Contains(got, "иванов") {
+		t.Fatalf("reply: %s", got)
 	}
 }
 

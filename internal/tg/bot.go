@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,6 +69,8 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
+	dispatcher.AddHandler(handlers.NewCommand("words", b.onWords))
+	dispatcher.AddHandler(handlers.NewCommand("link", b.onLink))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("j:"), b.onJoinCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
@@ -94,6 +97,8 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 
 	b.setAdminMenuButton()
+	log.Printf("webapp=%s", b.webAppURL())
+	b.pingAdminPanel()
 
 	t15Ctx, cancelT15 := context.WithCancel(ctx)
 	defer cancelT15()
@@ -134,28 +139,52 @@ func (b *Bot) send(chatID int64, text string, opts *gotgbot.SendMessageOpts) err
 	return err
 }
 
+func (b *Bot) webAppURL() string {
+	u := strings.TrimRight(strings.TrimSpace(b.cfg.WebAppURL), "/")
+	if u == "" {
+		return ""
+	}
+	return u + "/"
+}
+
 func (b *Bot) setAdminMenuButton() {
-	if b.cfg.WebAppURL == "" {
+	url := b.webAppURL()
+	if url == "" {
 		return
 	}
 	admin := b.cfg.AdminID
-	_, _ = b.api.SetChatMenuButton(&gotgbot.SetChatMenuButtonOpts{
+	_, err := b.api.SetChatMenuButton(&gotgbot.SetChatMenuButtonOpts{
 		ChatId: &admin,
 		MenuButton: gotgbot.MenuButtonWebApp{
 			Text:   "Панель",
-			WebApp: gotgbot.WebAppInfo{Url: b.cfg.WebAppURL},
+			WebApp: gotgbot.WebAppInfo{Url: url},
 		},
 	})
+	if err != nil {
+		log.Printf("tg: setChatMenuButton: %v", err)
+	}
+}
+
+func (b *Bot) pingAdminPanel() {
+	mk := b.panelMarkup()
+	if mk == nil {
+		return
+	}
+	_, err := b.api.SendMessage(b.cfg.AdminID, "Пульт: жми кнопку ниже. Ссылку в браузере не открывай — Telegram тогда не даёт сессию.", &gotgbot.SendMessageOpts{ReplyMarkup: *mk})
+	if err != nil {
+		log.Printf("tg: panel ping: %v", err)
+	}
 }
 
 func (b *Bot) panelMarkup() *gotgbot.InlineKeyboardMarkup {
-	if b.cfg.WebAppURL == "" {
+	url := b.webAppURL()
+	if url == "" {
 		return nil
 	}
 	return &gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{{
 			Text:   "Панель",
-			WebApp: &gotgbot.WebAppInfo{Url: b.cfg.WebAppURL},
+			WebApp: &gotgbot.WebAppInfo{Url: url},
 		}}},
 	}
 }
