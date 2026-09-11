@@ -1,0 +1,84 @@
+package bbb
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestParseSOCKS5(t *testing.T) {
+	host, user, pass, err := parseSOCKS5("user:secret@10.0.0.1:1080")
+	if err != nil || host != "10.0.0.1:1080" || user != "user" || pass != "secret" {
+		t.Fatalf("got %s %s %s %v", host, user, pass, err)
+	}
+	host, user, pass, err = parseSOCKS5("socks5://10.1.1.1:9050")
+	if err != nil || host != "10.1.1.1:9050" || user != "" {
+		t.Fatalf("noauth %s %s %v", host, user, err)
+	}
+}
+
+func TestFindChrome(t *testing.T) {
+	if p := FindChrome(""); p == "" {
+		t.Skip("no chromium on this machine")
+	}
+}
+
+func TestChromeGuestJoinLocalHTML(t *testing.T) {
+	bin := FindChrome("")
+	if bin == "" {
+		t.Skip("no chromium")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!doctype html><form method="get" action="/room">
+<input id="join_name" name="join_name" />
+<button type="submit">Join</button>
+</form>`)
+	})
+	mux.HandleFunc("/room", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("join_name")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!doctype html><div data-test="userListItem">%s</div>
+<button data-test="listenOnlyBtn">Listen only</button>`, name)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	j := NewChromeJoiner(bin)
+	t.Cleanup(func() { _ = j.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	sess, err := j.Join(ctx, srv.URL+"/", "Иванов Иван", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	cs, ok := sess.(*chromeSession)
+	if !ok || cs.page == nil {
+		t.Fatal("expected chrome session")
+	}
+	html, err := cs.page.Timeout(10 * time.Second).HTML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(html, "Иванов Иван") && !strings.Contains(html, "join_name") {
+		t.Fatalf("page missing name, html=%s", html)
+	}
+	lobby, err := sess.InLobby(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lobby {
+		t.Fatal("local meeting should not look like lobby")
+	}
+}
