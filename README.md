@@ -1,23 +1,33 @@
 # SSAU lecture bot
 
-Один бинарник на Go: Telegram-бот + воркер на VDS. Ходит гостем в BBB Самарского университета по расписанию группы, пишет звук лекции и шлёт алерты по вейквордам.
+Четыре бинарника на Go, один VDS, общая sqlite. Не монолит.
 
-Полный замысел и решения — в [PLAN.md](PLAN.md).
+| Бинарник | Зачем |
+| --- | --- |
+| `tg` | Telegram: вайтлист, онбординг, T-15 |
+| `rasp` | парсер расписания |
+| `panel` | Mini App + API |
+| `bbb` | гостевой заход в BBB |
+
+Полный замысел — [PLAN.md](PLAN.md).
 
 ```bash
-go build -o bin/bot ./cmd/bot
+go build -o bin/tg ./cmd/tg
+go build -o bin/rasp ./cmd/rasp
+go build -o bin/panel ./cmd/panel
+go build -o bin/bbb ./cmd/bbb
 ```
 
-Секреты (токен бота, SOCKS5) только в `.env` на сервере, в git не класть.
+Секреты в `.env` на сервере, в git не класть. Один файл на все процессы.
 
 ## Push → VDS
 
-Пуш в ветку `plan` собирает linux-бинарник в GitHub Actions и выкатывает на VDS: `/opt/ssau-bot`, unit `ssau-bot.service`.
+Пуш в `main` гоняет тесты в GitHub Actions, собирает linux-бинарники и выкатывает `/opt/ssau-bot` + `ssau.target`.
 
 Один раз:
 
-1. В репе секрет `VDS_SSH_KEY` — приватный ключ, которым `root@95.182.114.82` пускает.
-2. На сервере публичная часть этого ключа в `/root/.ssh/authorized_keys`.
-3. `.env` на сервер руками: `/opt/ssau-bot/.env` (workflow его не трогает).
+1. Секрет `VDS_SSH_KEY` — ключ, которым `root@95.182.114.82` пускает.
+2. На сервере этот ключ в `authorized_keys`.
+3. `.env` руками: `/opt/ssau-bot/.env`.
 
-Дальше любой пуш в `plan` сам деплоит. Ручной прогон: Actions → Deploy VDS → Run workflow.
+Дальше любой пуш в `main` сам деплоит. Ручной прогон: Actions → Test and deploy VDS → Run workflow.

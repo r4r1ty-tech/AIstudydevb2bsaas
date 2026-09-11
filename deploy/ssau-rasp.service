@@ -1,0 +1,19 @@
+[Unit]
+Description=SSAU rasp parser
+PartOf=ssau.target
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ssau-bot
+EnvironmentFile=-/opt/ssau-bot/.env
+ExecStart=/opt/ssau-bot/rasp
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+User=root
+Group=root
+
+[Install]
+WantedBy=ssau.target
