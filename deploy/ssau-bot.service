@@ -1,0 +1,20 @@
+[Unit]
+Description=SSAU lecture bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ssau-bot
+EnvironmentFile=-/opt/ssau-bot/.env
+ExecStart=/opt/ssau-bot/bot
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Каркас пока живёт от root, как и сам VDS. Отдельного юзера заведём позже.
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

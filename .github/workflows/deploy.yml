@@ -1,0 +1,46 @@
+name: Deploy VDS
+
+on:
+  push:
+    branches: [plan]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Собрать linux/amd64
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/bot ./cmd/bot
+
+      - name: Залить на VDS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          username: ${{ secrets.VDS_USER || 'root' }}
+          port: ${{ secrets.VDS_PORT || 22 }}
+          key: ${{ secrets.VDS_SSH_KEY }}
+          source: bin/bot,deploy/ssau-bot.service,deploy/remote.sh
+          target: /tmp/ssau-deploy
+          strip_components: 1
+          overwrite: true
+
+      - name: Перезапустить systemd
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          username: ${{ secrets.VDS_USER || 'root' }}
+          port: ${{ secrets.VDS_PORT || 22 }}
+          key: ${{ secrets.VDS_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/bot
+            bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy

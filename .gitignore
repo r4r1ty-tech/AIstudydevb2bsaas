@@ -3,6 +3,7 @@
 *.exe
 .env
 .env.*
+!env.example
 *.pem
 recordings/
 data/
