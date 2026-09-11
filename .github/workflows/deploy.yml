@@ -1,12 +1,29 @@
-name: Deploy VDS
+name: Test and deploy VDS
 
 on:
   push:
-    branches: [plan]
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Тесты
+        run: CGO_ENABLED=0 go test ./...
+
   deploy:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +36,10 @@ jobs:
       - name: Собрать linux/amd64
         run: |
           mkdir -p bin
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/bot ./cmd/bot
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/tg ./cmd/tg
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/rasp ./cmd/rasp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/panel ./cmd/panel
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/bbb ./cmd/bbb
 
       - name: Залить на VDS
         uses: appleboy/scp-action@v0.1.7
@@ -28,7 +48,7 @@ jobs:
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
-          source: bin/bot,deploy/ssau-bot.service,deploy/remote.sh
+          source: bin/tg,bin/rasp,bin/panel,bin/bbb,deploy/ssau-tg.service,deploy/ssau-rasp.service,deploy/ssau-panel.service,deploy/ssau-bbb.service,deploy/ssau.target,deploy/remote.sh
           target: /tmp/ssau-deploy
           strip_components: 1
           overwrite: true
@@ -42,5 +62,5 @@ jobs:
           key: ${{ secrets.VDS_SSH_KEY }}
           script: |
             set -euo pipefail
-            chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/bot
+            chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/tg /tmp/ssau-deploy/rasp /tmp/ssau-deploy/panel /tmp/ssau-deploy/bbb
             bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy

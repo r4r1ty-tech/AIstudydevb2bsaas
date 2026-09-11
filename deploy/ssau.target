@@ -1,0 +1,7 @@
+[Unit]
+Description=SSAU lecture stack
+Wants=ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target
