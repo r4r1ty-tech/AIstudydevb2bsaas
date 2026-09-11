@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Пульт</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div id="gate" class="gate" hidden>
+    <p class="gate-msg">Открой из бота</p>
+  </div>
+  <div id="app" hidden>
+    <header class="top">
+      <div>
+        <h1>Пульт</h1>
+        <p class="sub" id="hdr-meta">SSAU · админ</p>
+      </div>
+      <span id="poll-st" class="muted">—</span>
+    </header>
+    <nav class="tabs" role="tablist">
+      <button type="button" data-tab="now" class="active">Сейчас</button>
+      <button type="button" data-tab="people">Люди</button>
+      <button type="button" data-tab="lessons">Пары</button>
+      <button type="button" data-tab="parser">Парсер</button>
+      <button type="button" data-tab="logs">Логи</button>
+    </nav>
+    <main>
+      <section id="tab-now" class="tab" data-panel="now">
+        <h2>Аккаунты</h2>
+        <div id="now-accounts" class="list"></div>
+        <h2>Текущая пара</h2>
+        <div id="now-current" class="panel"></div>
+        <h2>Следующая</h2>
+        <div id="now-next" class="panel"></div>
+        <h2>Запись</h2>
+        <div id="now-rec" class="panel"></div>
+      </section>
+      <section id="tab-people" class="tab" data-panel="people" hidden>
+        <div id="people-list" class="cards"></div>
+      </section>
+      <section id="tab-lessons" class="tab" data-panel="lessons" hidden>
+        <h2>Расписание</h2>
+        <div id="lessons-list" class="list"></div>
+        <h2>Ссылки BBB</h2>
+        <form id="bbb-form" class="panel form">
+          <label>Ключ <input name="key" placeholder="опционально"></label>
+          <label>Дисциплина <input name="discipline"></label>
+          <label>Преподаватель <input name="teacher"></label>
+          <label>URL <input name="url" placeholder="https://bbb.ssau.ru/b/..." required></label>
+          <button type="submit">Сохранить ссылку</button>
+        </form>
+        <div id="bbb-list" class="list"></div>
+        <h2>Записи</h2>
+        <div id="rec-list" class="list"></div>
+      </section>
+      <section id="tab-parser" class="tab" data-panel="parser" hidden>
+        <div id="parser-box" class="panel"></div>
+        <pre id="parser-diff" class="diff"></pre>
+        <button type="button" id="btn-refresh">Обновить расписание сейчас</button>
+      </section>
+      <section id="tab-logs" class="tab" data-panel="logs" hidden>
+        <div id="logs-list" class="tape"></div>
+      </section>
+    </main>
+    <div id="toast" class="toast" hidden></div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
