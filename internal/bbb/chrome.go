@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/input"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
@@ -97,6 +98,9 @@ type chromeSession struct {
 	root      *rod.Browser
 	contextID proto.BrowserBrowserContextID
 	bridge    *socksBridge
+
+	greetMu sync.Mutex
+	greeted bool
 }
 
 func (s *chromeSession) InLobby(ctx context.Context) (bool, error) {
@@ -128,6 +132,35 @@ func (s *chromeSession) InLobby(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	return ok, nil
+}
+
+func (s *chromeSession) Greet(ctx context.Context) error {
+	if s == nil || s.page == nil {
+		return nil
+	}
+	s.greetMu.Lock()
+	done := s.greeted
+	s.greetMu.Unlock()
+	if done {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lobby, err := s.InLobby(ctx)
+	if err != nil {
+		return err
+	}
+	if lobby {
+		return nil
+	}
+	if err := sendHello(s.page.Context(ctx)); err != nil {
+		return err
+	}
+	s.greetMu.Lock()
+	s.greeted = true
+	s.greetMu.Unlock()
+	return nil
 }
 
 func (s *chromeSession) Close() error {
@@ -234,34 +267,178 @@ func fillGuestName(page *rod.Page, fio string) error {
 	if ok, box, _ := page.Has("input[type='checkbox']"); ok && box != nil {
 		_ = box.Click(proto.InputMouseButtonLeft, 1)
 	}
-	btn, err := page.Timeout(8*time.Second).Race().
+	btn, err := page.Timeout(8 * time.Second).Race().
 		Element("button[type='submit']").
-		ElementR("button", `(?i)join|войти|подключ`).
+		Element("[data-test='joinButton']").
+		Element("[data-test='sessionJoinButton']").
 		Do()
 	if err != nil {
-		return err
-	}
-	if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		if !clickByText(page.Timeout(4*time.Second), joinNameRE) {
+			return err
+		}
+	} else if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
 	_ = page.Timeout(20 * time.Second).WaitLoad()
 	return nil
 }
 
+var listenOnlySels = []string{
+	"[data-test='listenOnlyBtn']",
+	"[data-test='helpListenOnlyBtn']",
+	"[data-test='listenOnlyJoin']",
+	`button[aria-label='Listen only']`,
+	`button[aria-label='Только слушать']`,
+}
+
+var inMeetingSels = []string{
+	"[data-test='waitingUsers']",
+	"[data-test='waitingusers']",
+	"[data-test='userListItem']",
+}
+
+const (
+	listenOnlyRE = `(?i)listen\s*only|только\s*слушать`
+	joinNameRE   = `(?i)join|войти|подключ`
+	chatOpenRE   = `(?i)public chat|публичн.*чат|открыть чат`
+	helloText    = "Здравствуйте"
+)
+
+var chatOpenSels = []string{
+	"[data-test='chatButton']",
+	"[data-test='publicChatTab']",
+	"[data-test='publicChat']",
+	`button[aria-label='Public Chat']`,
+	`button[aria-label='Публичный чат']`,
+}
+
+var chatInputSels = []string{
+	"[data-test='messageInput']",
+	"[data-test='chatInput']",
+	"textarea#message-input",
+	"#message-input",
+	"textarea[id*='message']",
+	"textarea[placeholder]",
+	`[contenteditable='true'][data-test*='message']`,
+}
+
+var chatSendSels = []string{
+	"[data-test='sendMessageButton']",
+	"[data-test='sendMessageBtn']",
+	`button[aria-label='Send message']`,
+	`button[aria-label='Отправить']`,
+}
+
+func sendHello(page *rod.Page) error {
+	var last error
+	for i := 0; i < 8; i++ {
+		p := page.Timeout(2 * time.Second)
+		_ = clickFirst(p, chatOpenSels)
+		_ = clickByText(p, chatOpenRE)
+		last = typeHello(p)
+		if last == nil {
+			return nil
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	if last == nil {
+		last = fmt.Errorf("поле чата не найдено")
+	}
+	return last
+}
+
+func typeHello(page *rod.Page) error {
+	el, err := findFirst(page, chatInputSels)
+	if err != nil {
+		return err
+	}
+	_ = el.Click(proto.InputMouseButtonLeft, 1)
+	_ = el.SelectAllText()
+	if err := el.Input(helloText); err != nil {
+		return err
+	}
+	if clickFirst(page, chatSendSels) {
+		return nil
+	}
+	if err := el.Type(input.Enter); err != nil {
+		return fmt.Errorf("отправить: %w", err)
+	}
+	return nil
+}
+
+func findFirst(page *rod.Page, sels []string) (*rod.Element, error) {
+	for _, sel := range sels {
+		ok, el, err := page.Has(sel)
+		if err == nil && ok && el != nil {
+			return el, nil
+		}
+	}
+	return nil, fmt.Errorf("поле чата не найдено")
+}
+
 func clickListenOnly(page *rod.Page) error {
-	p := page.Timeout(40 * time.Second)
-	_, err := p.Race().
-		Element("[data-test='listenOnlyBtn']").Handle(clickLeft).
-		Element("[data-test='helpListenOnlyBtn']").Handle(clickLeft).
-		ElementR("button", `(?i)listen only|только слушать`).Handle(clickLeft).
-		Element("[data-test='waitingUsers']").Handle(noopEl).
-		Element("[data-test='userListItem']").Handle(noopEl).
-		Do()
-	return err
+	deadline := time.Now().Add(40 * time.Second)
+	for time.Now().Before(deadline) {
+		p := page.Timeout(3 * time.Second)
+		if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
+			return nil
+		}
+		// Lobby / already in the roster: audio modal may never appear.
+		if hasAny(p, inMeetingSels) {
+			return nil
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	return fmt.Errorf("кнопка «только слушать» не найдена")
 }
 
-func clickLeft(el *rod.Element) error {
-	return el.Click(proto.InputMouseButtonLeft, 1)
+func hasAny(page *rod.Page, sels []string) bool {
+	for _, sel := range sels {
+		if ok, _, err := page.Has(sel); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
-func noopEl(*rod.Element) error { return nil }
+func clickFirst(page *rod.Page, sels []string) bool {
+	for _, sel := range sels {
+		ok, el, err := page.Has(sel)
+		if err != nil || !ok || el == nil {
+			continue
+		}
+		if err := el.Click(proto.InputMouseButtonLeft, 1); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func clickByText(page *rod.Page, goRE string) bool {
+	jsRE := jsRegexp(goRE)
+	if jsRE == "" {
+		return false
+	}
+	res, err := page.Eval(`(re) => {
+		const rx = new RegExp(re, 'i')
+		const nodes = document.querySelectorAll('button, [role="button"], [data-test], span, div, a')
+		for (const n of nodes) {
+			const t = ((n.innerText || '') + ' ' + (n.getAttribute('aria-label') || '')).trim()
+			if (t && rx.test(t)) { n.click(); return true }
+		}
+		return false
+	}`, jsRE)
+	if err != nil || res == nil {
+		return false
+	}
+	return res.Value.Bool()
+}
+
+// jsRegexp strips Go/PCRE inline flags — rod Eval runs in the browser.
+func jsRegexp(goRE string) string {
+	s := strings.TrimSpace(goRE)
+	s = strings.TrimPrefix(s, "(?i)")
+	s = strings.TrimPrefix(s, "(?m)")
+	s = strings.TrimPrefix(s, "(?s)")
+	return s
+}

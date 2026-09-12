@@ -10,7 +10,14 @@ import (
 )
 
 func Admin(ctx context.Context, cfg *config.Config, text string) {
-	if cfg == nil || cfg.BotToken == "" || text == "" {
+	if cfg == nil {
+		return
+	}
+	User(ctx, cfg, cfg.AdminID, text)
+}
+
+func User(ctx context.Context, cfg *config.Config, telegramID int64, text string) {
+	if cfg == nil || cfg.BotToken == "" || telegramID == 0 || text == "" {
 		return
 	}
 	if ctx == nil {
@@ -21,7 +28,7 @@ func Admin(ctx context.Context, cfg *config.Config, text string) {
 		log.Printf("notify: %v", err)
 		return
 	}
-	if _, err := bot.SendMessageWithContext(ctx, cfg.AdminID, text, nil); err != nil {
-		log.Printf("notify: send: %v", err)
+	if _, err := bot.SendMessageWithContext(ctx, telegramID, text, nil); err != nil {
+		log.Printf("notify: send %d: %v", telegramID, err)
 	}
 }

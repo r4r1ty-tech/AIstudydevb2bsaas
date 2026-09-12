@@ -68,7 +68,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) tick(ctx context.Context) {
 	now := time.Now().In(w.Loc)
-	lessons, err := w.Store.LessonsHappening(now)
+	lessons, err := w.Store.LessonsInJoinWindow(now, JoinEarlyYes)
 	if err != nil {
 		log.Printf("bbb: lessons: %v", err)
 		return
@@ -104,7 +104,7 @@ func (w *Worker) tick(ctx context.Context) {
 				continue
 			}
 			leave := w.ensureLeave(key, lesson.Finish)
-			if !ShouldBeInRoom(now, lesson.Begin, leave) {
+			if !ShouldBeInRoom(now, EnterAt(lesson.Begin, intent), leave) {
 				w.leave(ctx, u.TelegramID, lesson.ID, key, "time")
 				continue
 			}
@@ -162,6 +162,10 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 		Message: lesson.Discipline,
 	})
 	notify.Admin(ctx, w.Cfg, fmt.Sprintf("нет ссылки BBB: %s / %d", lesson.Discipline, u.TelegramID))
+	notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
+		"Не зашёл на «%s»: нет ссылки на комнату. Пришли bbb.ssau.ru/b/… сюда — запомню.",
+		lesson.Discipline,
+	))
 }
 
 func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson, url, key string, now time.Time) {
@@ -182,16 +186,19 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 			At: now, Type: model.EventError,
 			TelegramID: u.TelegramID, LessonID: lesson.ID, Message: err.Error(),
 		})
+		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не смог зайти на «%s».", lesson.Discipline))
 		return
 	}
-	w.mu.Lock()
-	w.sessions[key] = sess
-	w.lobbyAt[key] = now
-	w.mu.Unlock()
 	state := model.PresenceRoom
 	if lobby, _ := sess.InLobby(ctx); lobby {
 		state = model.PresenceLobby
 	}
+	w.mu.Lock()
+	w.sessions[key] = sess
+	if state == model.PresenceLobby {
+		w.lobbyAt[key] = now
+	}
+	w.mu.Unlock()
 	_ = w.Store.SetPresence(model.Presence{
 		TelegramID: u.TelegramID, LessonID: lesson.ID,
 		State: state, Message: "join", UpdatedAt: now,
@@ -200,6 +207,18 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		At: now, Type: model.EventJoin,
 		TelegramID: u.TelegramID, LessonID: lesson.ID, Message: lesson.Discipline,
 	})
+	if state == model.PresenceLobby {
+		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
+			"На «%s» жду в лобби. Имя в списке: %s.",
+			lesson.Discipline, u.FIO,
+		))
+		return
+	}
+	w.greet(ctx, sess)
+	notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
+		"Зашёл на «%s» как %s. Без микрофона, имя в списке.",
+		lesson.Discipline, u.FIO,
+	))
 }
 
 func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Lesson, key string, now time.Time) {
@@ -211,7 +230,25 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		return
 	}
 	lobby, err := sess.InLobby(ctx)
-	if err != nil || !lobby {
+	if err != nil {
+		return
+	}
+	if !lobby {
+		_ = w.Store.SetPresence(model.Presence{
+			TelegramID: u.TelegramID, LessonID: lesson.ID,
+			State: model.PresenceRoom, Message: "join", UpdatedAt: now,
+		})
+		w.mu.Lock()
+		_, wasLobby := w.lobbyAt[key]
+		delete(w.lobbyAt, key)
+		w.mu.Unlock()
+		if wasLobby {
+			notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
+				"Пустили на «%s» как %s. Без микрофона.",
+				lesson.Discipline, u.FIO,
+			))
+		}
+		w.greet(ctx, sess)
 		return
 	}
 	_ = w.Store.SetPresence(model.Presence{
@@ -220,6 +257,10 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 	})
 	if now.Sub(since) >= 2*time.Minute {
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("не пустили из лобби: %s / %d", u.FIO, u.TelegramID))
+		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
+			"На «%s» всё ещё лобби — модератор пока не пускает.",
+			lesson.Discipline,
+		))
 		_ = w.Store.AddEvent(model.Event{
 			At: now, Type: model.EventLobby,
 			TelegramID: u.TelegramID, LessonID: lesson.ID, Message: "лобби >2 мин",
@@ -244,6 +285,11 @@ func (w *Worker) leave(ctx context.Context, telegramID, lessonID int64, key, rea
 		At: time.Now(), Type: model.EventLeave,
 		TelegramID: telegramID, LessonID: lessonID, Message: reason,
 	})
+	title := reason
+	if l, err := w.Store.LessonByID(lessonID); err == nil && l != nil && l.Discipline != "" {
+		title = l.Discipline
+	}
+	notify.User(ctx, w.Cfg, telegramID, fmt.Sprintf("Вышел с «%s».", title))
 }
 
 func (w *Worker) closeAll() {
@@ -262,4 +308,13 @@ func splitKey(key string) (int64, int64) {
 	var a, b int64
 	fmt.Sscanf(key, "%d:%d", &a, &b)
 	return a, b
+}
+
+func (w *Worker) greet(ctx context.Context, sess Session) {
+	if sess == nil {
+		return
+	}
+	if err := sess.Greet(ctx); err != nil {
+		log.Printf("bbb: hello: %v", err)
+	}
 }

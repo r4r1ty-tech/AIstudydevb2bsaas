@@ -182,6 +182,18 @@ func TestReplaceLessonsCurrentNext(t *testing.T) {
 		t.Fatalf("next: %+v", next)
 	}
 
+	soon, err := st.LessonsInJoinWindow(aBegin.Add(-10*time.Minute), 15*time.Minute)
+	if err != nil {
+		t.Fatalf("LessonsInJoinWindow: %v", err)
+	}
+	if len(soon) != 1 || soon[0].Discipline != "Матан" {
+		t.Fatalf("join window 10m before: %+v", soon)
+	}
+	happening, err := st.LessonsHappening(aBegin.Add(-10 * time.Minute))
+	if err != nil || len(happening) != 0 {
+		t.Fatalf("happening before slot: %v %+v", err, happening)
+	}
+
 	atStart, err := st.CurrentLesson(aBegin)
 	if err != nil || atStart == nil || atStart.Discipline != "Матан" {
 		t.Fatalf("CurrentLesson at begin: (%v, %v)", atStart, err)

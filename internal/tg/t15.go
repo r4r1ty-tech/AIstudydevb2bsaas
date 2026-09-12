@@ -2,7 +2,6 @@ package tg
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -79,25 +78,9 @@ func (b *Bot) tickT15() {
 }
 
 func (b *Bot) sendT15Card(u model.User, lesson model.Lesson) error {
-	date := lesson.Date
-	if !lesson.Begin.IsZero() {
-		date = lesson.Begin.In(b.loc).Format("02.01.2006")
-	}
-	text := fmt.Sprintf("%s\n%s\n%s\n%s",
-		lesson.Discipline,
-		lesson.Teacher,
-		lesson.SlotLabel(),
-		date,
-	)
 	link, err := b.st.GetBBB(model.BBBKey(b.cfg.GroupID, lesson.Discipline, lesson.Teacher))
-	if err != nil || link == nil || strings.TrimSpace(link.URL) == "" {
-		text += "\n\n" + askBBBLink
-	}
-	mk := gotgbot.InlineKeyboardMarkup{
-		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
-			{Text: "Да", CallbackData: joinCallbackData(true, lesson.ID)},
-			{Text: "Нет", CallbackData: joinCallbackData(false, lesson.ID)},
-		}},
-	}
+	hasLink := err == nil && link != nil && strings.TrimSpace(link.URL) != ""
+	text := formatT15Card(lesson, b.now(), b.loc, hasLink)
+	mk := t15Keyboard(lesson.ID)
 	return b.send(u.TelegramID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mk})
 }

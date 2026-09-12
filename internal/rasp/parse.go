@@ -96,7 +96,10 @@ func parseCell(cell *goquery.Selection, begin, finish time.Time) ([]model.Lesson
 			return
 		}
 		place := strings.TrimSpace(l.Find(".schedule__place").First().Text())
-		typ := strings.TrimSpace(l.Find(".schedule__lesson-type-color").First().Text())
+		typ := strings.TrimSpace(l.Find(".schedule__lesson-type-chip").First().Text())
+		if typ == "" {
+			typ = strings.TrimSpace(l.Find(".schedule__lesson-type-color").First().Text())
+		}
 		if typ == "" {
 			typ = "unknown"
 		}
@@ -126,6 +129,12 @@ func joinTeachers(l *goquery.Selection) string {
 			names = append(names, name)
 		}
 	})
+	if len(names) == 0 {
+		plain := strings.Join(strings.Fields(l.Find(".schedule__teacher").First().Text()), " ")
+		if plain != "" {
+			names = append(names, plain)
+		}
+	}
 	return strings.Join(names, ", ")
 }
 
