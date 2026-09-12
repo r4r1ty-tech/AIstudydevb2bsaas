@@ -119,6 +119,21 @@ func (s *Store) migrate() error {
 			message TEXT,
 			updated_at TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS recordings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			lesson_id INTEGER,
+			discipline TEXT,
+			date TEXT,
+			lecture_num INTEGER DEFAULT 1,
+			video_path TEXT,
+			audio_path TEXT,
+			telegram_file_id TEXT,
+			telegram_msg_id INTEGER DEFAULT 0,
+			transcript_text TEXT,
+			summary_text TEXT,
+			has_test_alert INTEGER DEFAULT 0,
+			created_at TEXT
+		)`,
 	}
 	tx, err := s.db.Begin()
 	if err != nil {

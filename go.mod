@@ -1,17 +1,17 @@
 module github.com/r4r1ty-tech/AIstudydevb2bsaas
 
-go 1.25.0
+go 1.24.0
 
 require (
 	github.com/PaulSonOfLars/gotgbot/v2 v2.0.0-rc.36
-	github.com/PuerkitoBio/goquery v1.13.0
+	github.com/PuerkitoBio/goquery v1.10.2
 	github.com/go-rod/rod v0.116.2
-	golang.org/x/net v0.58.0
+	golang.org/x/net v0.35.0
 	modernc.org/sqlite v1.38.2
 )
 
 require (
-	github.com/andybalholm/cascadia v1.3.4 // indirect
+	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -23,7 +23,7 @@ require (
 	github.com/ysmood/gson v0.7.3 // indirect
 	github.com/ysmood/leakless v0.9.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.34.0 // indirect
 	modernc.org/libc v1.66.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

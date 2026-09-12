@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -44,7 +46,22 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 		}
 	}
 
-	api, err := gotgbot.NewBot(cfg.BotToken, nil)
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+	}
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", addr)
+		},
+	}
+	api, err := gotgbot.NewBot(cfg.BotToken, &gotgbot.BotOpts{
+		BotClient: &gotgbot.BaseBotClient{
+			Client: http.Client{
+				Transport: tr,
+				Timeout:   60 * time.Second,
+			},
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("tg: new bot: %w", err)
 	}
@@ -68,7 +85,9 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
+	dispatcher.AddHandler(handlers.NewCommand("recordings", b.onRecordingsCommand))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("j:"), b.onJoinCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("rec_"), b.onRecordingsCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
 	return b, nil

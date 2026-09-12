@@ -28,36 +28,52 @@ const (
 )
 
 type Config struct {
-	BotToken      string
-	AdminID       int64
-	WebAppURL     string
-	DBPath        string
-	GroupID       int64
-	GroupCode     string
-	ListenAddr    string
-	Timezone      string
-	RecordingsDir string
-	ChromeBin     string
-	BBBDryRun     bool
-	Whitelist     []int64
+	BotToken               string
+	AdminID                int64
+	WebAppURL              string
+	DBPath                 string
+	GroupID                int64
+	GroupCode              string
+	ListenAddr             string
+	Timezone               string
+	RecordingsDir          string
+	VideoRecordingsDir     string
+	ChromeBin              string
+	BBBDryRun              bool
+	Whitelist              []int64
+	FishStudioAPIKey       string
+	FishStudioAPIURL       string
+	LLMAPIKey              string
+	LLMBaseURL             string
+	LLMModel               string
+	StorageChannelID       int64
+	MaxConcurrentMediaJobs int
 }
 
 func Load() (*Config, error) {
 	loadDotEnv(".env")
 
 	c := &Config{
-		BotToken:      strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		AdminID:       int64Env("ADMIN_TELEGRAM_ID", DefaultAdminID),
-		WebAppURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
-		DBPath:        strEnv("DATABASE_PATH", DefaultDBPath),
-		GroupID:       int64Env("GROUP_ID", DefaultGroupID),
-		GroupCode:     strEnv("GROUP_CODE", DefaultGroupCode),
-		ListenAddr:    strEnv("LISTEN_ADDR", DefaultListen),
-		Timezone:      strEnv("TZ", DefaultTimezone),
-		RecordingsDir: strEnv("RECORDINGS_DIR", DefaultRecordings),
-		ChromeBin:     strEnv("CHROME_BIN", ""),
-		BBBDryRun:     os.Getenv("BBB_DRY_RUN") == "1",
-		Whitelist:     append([]int64(nil), DefaultWhitelist...),
+		BotToken:               strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		AdminID:                int64Env("ADMIN_TELEGRAM_ID", DefaultAdminID),
+		WebAppURL:              strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
+		DBPath:                 strEnv("DATABASE_PATH", DefaultDBPath),
+		GroupID:                int64Env("GROUP_ID", DefaultGroupID),
+		GroupCode:              strEnv("GROUP_CODE", DefaultGroupCode),
+		ListenAddr:             strEnv("LISTEN_ADDR", DefaultListen),
+		Timezone:               strEnv("TZ", DefaultTimezone),
+		RecordingsDir:          strEnv("RECORDINGS_DIR", DefaultRecordings),
+		VideoRecordingsDir:     strEnv("VIDEO_RECORDINGS_DIR", "recordings/video"),
+		ChromeBin:              strEnv("CHROME_BIN", ""),
+		BBBDryRun:              os.Getenv("BBB_DRY_RUN") == "1",
+		Whitelist:              append([]int64(nil), DefaultWhitelist...),
+		FishStudioAPIKey:       strings.TrimSpace(os.Getenv("FISH_STUDIO_API_KEY")),
+		FishStudioAPIURL:       strEnv("FISH_STUDIO_API_URL", "https://api.fish.audio/v1/stt"),
+		LLMAPIKey:              strings.TrimSpace(os.Getenv("LLM_API_KEY")),
+		LLMBaseURL:             strEnv("LLM_BASE_URL", "https://api.openai.com/v1"),
+		LLMModel:               strEnv("LLM_MODEL", "gpt-4o-mini"),
+		StorageChannelID:       int64Env("STORAGE_CHANNEL_ID", 0),
+		MaxConcurrentMediaJobs: int(int64Env("MAX_CONCURRENT_MEDIA_JOBS", 1)),
 	}
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {
 		for _, p := range strings.Split(extra, ",") {
