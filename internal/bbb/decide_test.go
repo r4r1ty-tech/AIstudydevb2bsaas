@@ -20,6 +20,21 @@ func TestWantsJoin(t *testing.T) {
 	}
 }
 
+func TestEnterAt(t *testing.T) {
+	begin := time.Date(2026, 9, 12, 11, 30, 0, 0, time.UTC)
+	if got := EnterAt(begin, nil); !got.Equal(begin.Add(-5 * time.Minute)) {
+		t.Fatalf("silence: %v", got)
+	}
+	pending := &model.JoinIntent{Decision: model.JoinPending}
+	if got := EnterAt(begin, pending); !got.Equal(begin.Add(-5 * time.Minute)) {
+		t.Fatalf("pending: %v", got)
+	}
+	yes := &model.JoinIntent{Decision: model.JoinYes}
+	if got := EnterAt(begin, yes); !got.Equal(begin.Add(-15 * time.Minute)) {
+		t.Fatalf("yes: %v", got)
+	}
+}
+
 func TestShouldBeInRoom(t *testing.T) {
 	begin := time.Date(2026, 9, 11, 8, 0, 0, 0, time.UTC)
 	leave := time.Date(2026, 9, 11, 9, 30, 0, 0, time.UTC)
@@ -44,6 +59,9 @@ func TestDryJoin(t *testing.T) {
 		t.Fatalf("lobby: %v %v", lobby, err)
 	}
 	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Greet(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }

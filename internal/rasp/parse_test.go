@@ -154,3 +154,37 @@ func TestParseSeveralTeachers(t *testing.T) {
 		t.Errorf("type = %q", lessons[0].Type)
 	}
 }
+
+func TestParseLiveMarkupChipAndPlainTeacher(t *testing.T) {
+	html := []byte(`<div class="schedule">
+		<div class="schedule__item schedule__head"><div class="schedule__head-date">12.09.2026</div></div>
+		<div class="schedule__time"><div class="schedule__time-item">11:30</div><div class="schedule__time-item">13:05</div></div>
+		<div class="schedule__item">
+			<div class="schedule__lesson">
+				<div class="schedule__lesson-type-color lesson-type-3__color"></div>
+				<div class="schedule__lesson-type-chip lesson-type-3__bg">Практика</div>
+				<div class="body-text schedule__discipline">Теория информации</div>
+				<div class="schedule__teacher">Преподаватели Военной Кафедры</div>
+				<div class="caption-text schedule__place">online</div>
+			</div>
+		</div>
+	</div>`)
+	loc := time.FixedZone("Europe/Samara", 4*3600)
+	lessons, err := Parse(html, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lessons) != 1 {
+		t.Fatalf("got %d", len(lessons))
+	}
+	l := lessons[0]
+	if l.Type != "Практика" {
+		t.Errorf("type = %q", l.Type)
+	}
+	if l.Teacher != "Преподаватели Военной Кафедры" {
+		t.Errorf("teacher = %q", l.Teacher)
+	}
+	if !l.Online || l.Start != "11:30" {
+		t.Errorf("slot online=%v start=%s", l.Online, l.Start)
+	}
+}

@@ -7,13 +7,25 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-const maxLeaveEarly = 5 * time.Minute
+const (
+	maxLeaveEarly    = 5 * time.Minute
+	joinEarlySilence = 5 * time.Minute
+	JoinEarlyYes     = 15 * time.Minute
+)
 
 func WantsJoin(intent *model.JoinIntent) bool {
 	if intent != nil && intent.Decision == model.JoinNo {
 		return false
 	}
 	return true
+}
+
+func EnterAt(begin time.Time, intent *model.JoinIntent) time.Time {
+	early := joinEarlySilence
+	if intent != nil && intent.Decision == model.JoinYes {
+		early = JoinEarlyYes
+	}
+	return begin.Add(-early)
 }
 
 func LeaveAt(finish time.Time, early time.Duration) time.Time {

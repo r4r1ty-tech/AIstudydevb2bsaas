@@ -18,6 +18,14 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
 
+type awaitKind int
+
+const (
+	awaitNone awaitKind = iota
+	awaitFIO
+	awaitWords
+)
+
 type Bot struct {
 	cfg     *config.Config
 	st      *store.Store
@@ -25,9 +33,10 @@ type Bot struct {
 	api     *gotgbot.Bot
 	updater *ext.Updater
 
-	mu      sync.Mutex
-	t15Mu   sync.Mutex
-	lastT15 map[int64]int64 // telegram id → last T-15 lesson id
+	mu       sync.Mutex
+	t15Mu    sync.Mutex
+	lastT15  map[int64]int64 // telegram id → last T-15 lesson id
+	awaiting map[int64]awaitKind
 }
 
 func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) {
@@ -59,19 +68,26 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	updater := ext.NewUpdater(dispatcher, nil)
 
 	b := &Bot{
-		cfg:     cfg,
-		st:      st,
-		loc:     loc,
-		api:     api,
-		updater: updater,
-		lastT15: make(map[int64]int64),
+		cfg:      cfg,
+		st:       st,
+		loc:      loc,
+		api:      api,
+		updater:  updater,
+		lastT15:  make(map[int64]int64),
+		awaiting: make(map[int64]awaitKind),
 	}
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
+	dispatcher.AddHandler(handlers.NewCommand("help", b.onHelp))
+	dispatcher.AddHandler(handlers.NewCommand("today", b.onToday))
+	dispatcher.AddHandler(handlers.NewCommand("settings", b.onSettings))
 	dispatcher.AddHandler(handlers.NewCommand("words", b.onWords))
 	dispatcher.AddHandler(handlers.NewCommand("link", b.onLink))
+	dispatcher.AddHandler(handlers.NewCommand("links", b.onLink))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("j:"), b.onJoinCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("ob:"), b.onOnboardCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("st:"), b.onSettingsCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
 	return b, nil
@@ -96,9 +112,8 @@ func (b *Bot) Start(ctx context.Context) error {
 		return fmt.Errorf("tg: polling: %w", err)
 	}
 
-	b.setAdminMenuButton()
+	b.publishProfile()
 	log.Printf("webapp=%s", b.webAppURL())
-	b.pingAdminPanel()
 
 	t15Ctx, cancelT15 := context.WithCancel(ctx)
 	defer cancelT15()
@@ -139,12 +154,59 @@ func (b *Bot) send(chatID int64, text string, opts *gotgbot.SendMessageOpts) err
 	return err
 }
 
+func (b *Bot) sendMain(chatID int64, text string) error {
+	return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mainKeyboard()})
+}
+
+func (b *Bot) sendInline(chatID int64, text string, mk gotgbot.InlineKeyboardMarkup) error {
+	return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mk})
+}
+
 func (b *Bot) webAppURL() string {
 	u := strings.TrimRight(strings.TrimSpace(b.cfg.WebAppURL), "/")
 	if u == "" {
 		return ""
 	}
 	return u + "/"
+}
+
+func (b *Bot) publishProfile() {
+	cmds := []gotgbot.BotCommand{
+		{Command: "start", Description: "Сегодня и статус"},
+		{Command: "today", Description: "Пары на сегодня"},
+		{Command: "settings", Description: "ФИО, подгруппа, слова"},
+		{Command: "help", Description: "Как это работает"},
+	}
+	if _, err := b.api.SetMyCommands(cmds, nil); err != nil {
+		log.Printf("tg: setMyCommands: %v", err)
+	}
+	if admin := b.cfg.AdminID; admin != 0 {
+		adminCmds := append(append([]gotgbot.BotCommand{}, cmds...), gotgbot.BotCommand{
+			Command:     "panel",
+			Description: "Админ-панель",
+		})
+		if _, err := b.api.SetMyCommands(adminCmds, &gotgbot.SetMyCommandsOpts{
+			Scope: gotgbot.BotCommandScopeChat{ChatId: admin},
+		}); err != nil {
+			log.Printf("tg: setMyCommands admin: %v", err)
+		}
+	}
+	if _, err := b.api.SetChatMenuButton(&gotgbot.SetChatMenuButtonOpts{
+		MenuButton: gotgbot.MenuButtonCommands{},
+	}); err != nil {
+		log.Printf("tg: setChatMenuButton default: %v", err)
+	}
+	if _, err := b.api.SetMyShortDescription(&gotgbot.SetMyShortDescriptionOpts{
+		ShortDescription: botShortDesc,
+	}); err != nil {
+		log.Printf("tg: setMyShortDescription: %v", err)
+	}
+	if _, err := b.api.SetMyDescription(&gotgbot.SetMyDescriptionOpts{
+		Description: botDescription,
+	}); err != nil {
+		log.Printf("tg: setMyDescription: %v", err)
+	}
+	b.setAdminMenuButton()
 }
 
 func (b *Bot) setAdminMenuButton() {
@@ -165,15 +227,24 @@ func (b *Bot) setAdminMenuButton() {
 	}
 }
 
-func (b *Bot) pingAdminPanel() {
-	mk := b.panelMarkup()
-	if mk == nil {
+func (b *Bot) setAwait(id int64, kind awaitKind) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if kind == awaitNone {
+		delete(b.awaiting, id)
 		return
 	}
-	_, err := b.api.SendMessage(b.cfg.AdminID, "Пульт: жми кнопку ниже. Ссылку в браузере не открывай — Telegram тогда не даёт сессию.", &gotgbot.SendMessageOpts{ReplyMarkup: *mk})
-	if err != nil {
-		log.Printf("tg: panel ping: %v", err)
-	}
+	b.awaiting[id] = kind
+}
+
+func (b *Bot) peekAwait(id int64) awaitKind {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.awaiting[id]
+}
+
+func (b *Bot) clearAwait(id int64) {
+	b.setAwait(id, awaitNone)
 }
 
 func (b *Bot) panelMarkup() *gotgbot.InlineKeyboardMarkup {

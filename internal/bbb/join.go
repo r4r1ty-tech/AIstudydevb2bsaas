@@ -4,6 +4,7 @@ import "context"
 
 type Session interface {
 	InLobby(ctx context.Context) (bool, error)
+	Greet(ctx context.Context) error
 	Close() error
 }
 
@@ -14,6 +15,7 @@ type Joiner interface {
 type drySession struct{}
 
 func (drySession) InLobby(context.Context) (bool, error) { return false, nil }
+func (drySession) Greet(context.Context) error           { return nil }
 func (drySession) Close() error                          { return nil }
 
 type DryJoiner struct{}

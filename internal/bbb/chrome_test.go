@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-rod/rod/lib/proto"
 )
 
 func TestParseSOCKS5(t *testing.T) {
@@ -46,7 +48,9 @@ func TestChromeGuestJoinLocalHTML(t *testing.T) {
 		name := r.URL.Query().Get("join_name")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><div data-test="userListItem">%s</div>
-<button data-test="listenOnlyBtn">Listen only</button>`, name)
+<button data-test="listenOnlyBtn">Listen only</button>
+<textarea data-test="messageInput"></textarea>
+<button data-test="sendMessageButton" onclick="document.body.dataset.msg=document.querySelector('[data-test=messageInput]').value">Send</button>`, name)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -80,5 +84,65 @@ func TestChromeGuestJoinLocalHTML(t *testing.T) {
 	}
 	if lobby {
 		t.Fatal("local meeting should not look like lobby")
+	}
+	if err := sess.Greet(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cs.page.Eval(`() => document.body.dataset.msg || ''`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Value.Str() != helloText {
+		t.Fatalf("hello = %q", res.Value.Str())
+	}
+	if err := sess.Greet(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJSRegexpStripsGoFlags(t *testing.T) {
+	t.Parallel()
+	if got := jsRegexp(`(?i)listen\s*only|только\s*слушать`); got != `listen\s*only|только\s*слушать` {
+		t.Fatalf("jsRegexp = %q", got)
+	}
+}
+
+func TestClickListenOnlyByRussianLabel(t *testing.T) {
+	bin := FindChrome("")
+	if bin == "" {
+		t.Skip("no chromium")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!doctype html>
+<button type="button" onclick="document.body.dataset.ok='1'">Только слушать</button>`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	j := NewChromeJoiner(bin)
+	t.Cleanup(func() { _ = j.Close() })
+	root, err := j.ensureBrowser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := root.Page(proto.TargetCreateTarget{URL: srv.URL + "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = page.Close() })
+	_ = page.Timeout(15 * time.Second).WaitLoad()
+
+	if err := clickListenOnly(page); err != nil {
+		t.Fatal(err)
+	}
+	res, err := page.Eval(`() => document.body.dataset.ok || ''`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Value.Str() != "1" {
+		t.Fatalf("listen-only click did not land, got %q", res.Value.Str())
 	}
 }

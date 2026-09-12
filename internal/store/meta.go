@@ -254,27 +254,33 @@ func (s *Store) ListPresence() ([]model.Presence, error) {
 }
 
 func (s *Store) LessonsHappening(now time.Time) ([]model.Lesson, error) {
-	t := timeArg(now)
+	return s.LessonsInJoinWindow(now, 0)
+}
+
+func (s *Store) LessonsInJoinWindow(now time.Time, early time.Duration) ([]model.Lesson, error) {
+	if early < 0 {
+		early = 0
+	}
 	rows, err := s.db.Query(
 		`SELECT `+lessonCols+` FROM lessons
 		 WHERE online = 1 AND begin <= ? AND finish > ?
 		 ORDER BY begin, id`,
-		t, t,
+		timeArg(now.Add(early)), timeArg(now),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("store: lessons happening: %w", err)
+		return nil, fmt.Errorf("store: lessons join window: %w", err)
 	}
 	defer rows.Close()
 	out := make([]model.Lesson, 0)
 	for rows.Next() {
 		l, err := scanLesson(rows)
 		if err != nil {
-			return nil, fmt.Errorf("store: lessons happening: %w", err)
+			return nil, fmt.Errorf("store: lessons join window: %w", err)
 		}
 		out = append(out, *l)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: lessons happening: %w", err)
+		return nil, fmt.Errorf("store: lessons join window: %w", err)
 	}
 	return out, nil
 }

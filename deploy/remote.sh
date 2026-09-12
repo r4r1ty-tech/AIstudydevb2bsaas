@@ -75,6 +75,19 @@ if [[ ! -f "$APP/.env" ]]; then
   exit 0
 fi
 
-systemctl restart ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service ssau-tunnel.service
+bbb_was_active=0
+if systemctl is-active --quiet ssau-bbb.service; then
+  bbb_was_active=1
+fi
+
+systemctl restart ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service
+if [[ "$bbb_was_active" -eq 1 ]]; then
+  systemctl restart ssau-bbb.service
+fi
 sleep 1
-systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service ssau-tunnel.service
+systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service
+if [[ "$bbb_was_active" -eq 1 ]]; then
+  systemctl --no-pager --full status ssau-bbb.service
+else
+  echo "ssau-bbb был выключен — бинарник обновил, сервис не стартовал"
+fi
