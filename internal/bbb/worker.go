@@ -23,13 +23,12 @@ type Worker struct {
 
 	Hogs Hogs
 
-	mu         sync.Mutex
-	sessions   map[string]Session
-	leaveAt    map[string]time.Time
-	noBBB      map[string]struct{}
-	lobbyAt    map[string]time.Time
-	harvested  map[string]struct{}
-	harvesting bool
+	mu       sync.Mutex
+	sessions map[string]Session
+	leaveAt  map[string]time.Time
+	noBBB    map[string]struct{}
+	lobbyAt  map[string]time.Time
+	busy     bool
 }
 
 func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker {
@@ -52,16 +51,15 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		hogs = newProcHogs()
 	}
 	return &Worker{
-		Cfg:       cfg,
-		Store:     st,
-		Loc:       loc,
-		Joiner:    j,
-		Hogs:      hogs,
-		sessions:  make(map[string]Session),
-		leaveAt:   make(map[string]time.Time),
-		noBBB:     make(map[string]struct{}),
-		lobbyAt:   make(map[string]time.Time),
-		harvested: make(map[string]struct{}),
+		Cfg:      cfg,
+		Store:    st,
+		Loc:      loc,
+		Joiner:   j,
+		Hogs:     hogs,
+		sessions: make(map[string]Session),
+		leaveAt:  make(map[string]time.Time),
+		noBBB:    make(map[string]struct{}),
+		lobbyAt:  make(map[string]time.Time),
 	}
 }
 
@@ -144,6 +142,7 @@ func (w *Worker) tick(ctx context.Context) {
 		w.leave(ctx, tgID, lessonID, key, "slot over")
 	}
 	w.maybeHarvest(ctx, now)
+	w.maybeNotes(ctx, now)
 }
 
 func (w *Worker) ensureLeave(key string, finish time.Time) time.Time {

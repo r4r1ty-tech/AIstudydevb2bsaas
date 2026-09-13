@@ -2,7 +2,11 @@ package notify
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
@@ -17,6 +21,22 @@ func Admin(ctx context.Context, cfg *config.Config, text string) {
 }
 
 func User(ctx context.Context, cfg *config.Config, telegramID int64, text string) {
+	UserMarkup(ctx, cfg, telegramID, text, nil)
+}
+
+func NotesButton(packID int64) *gotgbot.InlineKeyboardMarkup {
+	if packID <= 0 {
+		return nil
+	}
+	return &gotgbot.InlineKeyboardMarkup{
+		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{{
+			Text:         "Скачать PDF",
+			CallbackData: fmt.Sprintf("nt:%d", packID),
+		}}},
+	}
+}
+
+func UserMarkup(ctx context.Context, cfg *config.Config, telegramID int64, text string, mk *gotgbot.InlineKeyboardMarkup) {
 	if cfg == nil || cfg.BotToken == "" || telegramID == 0 || text == "" {
 		return
 	}
@@ -28,7 +48,39 @@ func User(ctx context.Context, cfg *config.Config, telegramID int64, text string
 		log.Printf("notify: %v", err)
 		return
 	}
-	if _, err := bot.SendMessageWithContext(ctx, telegramID, text, nil); err != nil {
+	opts := &gotgbot.SendMessageOpts{}
+	if mk != nil {
+		opts.ReplyMarkup = *mk
+	}
+	if _, err := bot.SendMessageWithContext(ctx, telegramID, text, opts); err != nil {
 		log.Printf("notify: send %d: %v", telegramID, err)
 	}
+}
+
+func Document(ctx context.Context, cfg *config.Config, telegramID int64, path, caption, filename string) error {
+	if cfg == nil || cfg.BotToken == "" || telegramID == 0 {
+		return fmt.Errorf("notify: нет токена")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if filename == "" {
+		filename = filepath.Base(path)
+	}
+	bot, err := gotgbot.NewBot(cfg.BotToken, nil)
+	if err != nil {
+		return err
+	}
+	_, err = bot.SendDocumentWithContext(ctx, telegramID, gotgbot.InputFileByReader(filename, f), &gotgbot.SendDocumentOpts{
+		Caption: strings.TrimSpace(caption),
+	})
+	if err != nil {
+		log.Printf("notify: document %d: %v", telegramID, err)
+	}
+	return err
 }

@@ -48,7 +48,7 @@ jobs:
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
-          source: bin/tg,bin/rasp,bin/panel,bin/bbb,deploy/ssau-tg.service,deploy/ssau-rasp.service,deploy/ssau-panel.service,deploy/ssau-bbb.service,deploy/ssau-tunnel.service,deploy/ssau.target,deploy/remote.sh,deploy/tunnel.sh,deploy/audio.sh
+          source: bin/tg,bin/rasp,bin/panel,bin/bbb,deploy/ssau-tg.service,deploy/ssau-rasp.service,deploy/ssau-panel.service,deploy/ssau-bbb.service,deploy/ssau-tunnel.service,deploy/ssau.target,deploy/remote.sh,deploy/tunnel.sh,deploy/audio.sh,deploy/wake.py
           target: /tmp/ssau-deploy
           strip_components: 1
           overwrite: true
@@ -62,5 +62,5 @@ jobs:
           key: ${{ secrets.VDS_SSH_KEY }}
           script: |
             set -euo pipefail
-            chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/tg /tmp/ssau-deploy/rasp /tmp/ssau-deploy/panel /tmp/ssau-deploy/bbb /tmp/ssau-deploy/tunnel.sh /tmp/ssau-deploy/audio.sh
+            chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/tg /tmp/ssau-deploy/rasp /tmp/ssau-deploy/panel /tmp/ssau-deploy/bbb /tmp/ssau-deploy/tunnel.sh /tmp/ssau-deploy/audio.sh /tmp/ssau-deploy/wake.py
             bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy

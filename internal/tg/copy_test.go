@@ -66,7 +66,7 @@ func TestFormatTodaySplitsNowAndLater(t *testing.T) {
 	if !strings.Contains(got, "Сейчас") || !strings.Contains(got, "Дальше") {
 		t.Fatalf("sections: %s", got)
 	}
-	if !strings.Contains(got, "в комнате") || !strings.Contains(got, "если молчишь") {
+	if !strings.Contains(got, "в комнате") || !strings.Contains(got, "молчу — зайду") {
 		t.Fatalf("notes: %s", got)
 	}
 	empty := formatToday(now, loc, "Иванов Иван", nil)
@@ -108,7 +108,7 @@ func TestFormatSettingsAndWordsAsk(t *testing.T) {
 	t.Parallel()
 	u := model.User{FIO: "Иванов Иван", Subgroup: 2, ExtraWords: []string{"лаба"}}
 	got := formatSettings(u)
-	for _, want := range []string{"Настройки", "Иванов Иван", "Подгруппа: 2", "лаба", "тест"} {
+	for _, want := range []string{"Профиль", "Иванов Иван", "Подгруппа: 2", "лаба", "тест"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in:\n%s", want, got)
 		}
@@ -128,19 +128,63 @@ func TestParseSettingsCallback(t *testing.T) {
 	if !ok || kind != "fio" {
 		t.Fatalf("fio: %s %v", kind, ok)
 	}
+	kind, _, ok = parseSettingsCallback("st:rooms")
+	if !ok || kind != "rooms" {
+		t.Fatalf("rooms: %s %v", kind, ok)
+	}
+	kind, _, ok = parseSettingsCallback("st:back")
+	if !ok || kind != "back" {
+		t.Fatalf("back: %s %v", kind, ok)
+	}
 	if _, _, ok := parseSettingsCallback("ob:sub:1"); ok {
 		t.Fatal("onboard is not settings")
 	}
 	mk := settingsKeyboard(1)
+	if mk.InlineKeyboard[0][0].Text != "Изменить имя в журнале" {
+		t.Fatalf("fio btn: %+v", mk)
+	}
 	if mk.InlineKeyboard[1][0].Text != "Подгруппа 1 ✓" || mk.InlineKeyboard[1][1].Text != "Подгруппа 2" {
 		t.Fatalf("marks: %+v", mk)
+	}
+	if mk.InlineKeyboard[3][0].CallbackData != "st:rooms" {
+		t.Fatalf("rooms: %+v", mk)
+	}
+}
+
+func TestNotesListAndCallback(t *testing.T) {
+	t.Parallel()
+	ready := []model.LecturePack{{
+		ID: 7, Discipline: "Матан", Number: 2, Date: "2026-09-13", Status: model.PackDone,
+	}}
+	pending := []model.LecturePack{{
+		ID: 8, Discipline: "Физика", Number: 1, Date: "2026-09-13", Status: model.PackSlides,
+	}}
+	got := formatNotesList(ready, pending)
+	for _, want := range []string{"Конспекты", "Матан · лекция 2", "Физика", "после полуночи"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(formatNotesList(nil, nil), "пока нет") {
+		t.Fatal("empty")
+	}
+	id, ok := parseNotesCallback("nt:7")
+	if !ok || id != 7 {
+		t.Fatalf("cb %d %v", id, ok)
+	}
+	if _, ok := parseNotesCallback("j:y:1"); ok {
+		t.Fatal("join is not notes")
+	}
+	kb := notesKeyboard([]int64{7}, []string{"Матан · 2"})
+	if kb.InlineKeyboard[0][0].CallbackData != "nt:7" {
+		t.Fatalf("%+v", kb)
 	}
 }
 
 func TestJSRegexpNotUsedInT15Buttons(t *testing.T) {
 	t.Parallel()
 	mk := t15Keyboard(42)
-	if mk.InlineKeyboard[0][0].Text != "Зайти" || mk.InlineKeyboard[0][1].Text != "Пропустить" {
+	if mk.InlineKeyboard[0][0].Text != "Зайти за меня" || mk.InlineKeyboard[0][1].Text != "Не сегодня" {
 		t.Fatalf("buttons: %+v", mk)
 	}
 	if mk.InlineKeyboard[0][0].CallbackData != "j:y:42" {
@@ -150,7 +194,10 @@ func TestJSRegexpNotUsedInT15Buttons(t *testing.T) {
 	if !kb.IsPersistent || kb.InputFieldPlaceholder != inputHint {
 		t.Fatalf("main kb: %+v", kb)
 	}
+	if kb.Keyboard[0][0].Text != btnToday || kb.Keyboard[0][1].Text != btnNotes {
+		t.Fatalf("row1: %+v", kb.Keyboard)
+	}
 	if kb.Keyboard[1][0].Text != btnSettings {
-		t.Fatalf("settings button: %+v", kb.Keyboard)
+		t.Fatalf("profile button: %+v", kb.Keyboard)
 	}
 }

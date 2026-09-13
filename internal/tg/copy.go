@@ -9,33 +9,38 @@ import (
 )
 
 const (
-	introText      = "Захожу на онлайн-пары вместо тебя: в BBB в списке будет твоё ФИО, без микрофона и камеры.\n\nКак записать тебя в журнал? Фамилия Имя Отчество, как в ведомости."
-	askFIO         = "Как записать тебя в BBB? Фамилия Имя Отчество, как в ведомости."
-	askSub         = "Какая подгруппа?"
-	askWords       = "Свои слова для пейджера — через запятую. Фамилия, «тест», «контрольная», «мудл» уже есть.\nМожно пропустить: пейджер на паре пока не орёт, это список на потом."
-	askWordsNext   = "Напиши слова через запятую. «-» — сбросить свои."
-	askBBBLink     = "Ещё нет ссылки на комнату. Пришли bbb.ssau.ru/b/… сюда — без неё не зайду."
-	helpText       = "За 15 мин до онлайн-пары спрошу. «Зайти» — иду сразу. Молчишь — за 5 мин до звонка.\nВ BBB сижу гостем, без микрофона. Имя как в журнале.\n\nСсылку bbb.ssau.ru/b/… пришли один раз.\n\nКнопки внизу: Сегодня, Ссылки, Настройки.\nМеню «/» тоже работает.\n\nПейджер и запись пока выключены — сейчас захожу и сижу «только слушать»."
-	fallbackText   = "Жми кнопки внизу: Сегодня, Ссылки, Настройки.\nИли пришли bbb.ssau.ru/b/…"
-	noBBBTarget    = "Не понял, к какой паре это. Ближайших онлайн без ссылки нет. Открой Ссылки и пришли bbb.ssau.ru/b/… ближе к паре."
+	introText      = "Захожу на онлайн-пары вместо тебя: в BBB в списке будет твоё ФИО, без микрофона и камеры.\n\nКак тебя записать в журнал? Фамилия Имя Отчество, как в ведомости."
+	askFIO         = "Напиши ФИО как в ведомости — три слова: Фамилия Имя Отчество.\nПод этим именем зайду в комнату."
+	askSub         = "Какая подгруппа? Чужие подгрупповые пары пропускаю."
+	askWords       = "На лекции слушаю короткие слова и пишу тебе, если препод их сказал.\nУже есть: фамилия, «тест», «контрольная», «мудл».\nМожно добавить свои через запятую или пропустить."
+	askWordsNext   = "Напиши свои слова через запятую — например: лаба, зачёт.\n«-» — убрать только свои, базовые останутся."
+	askBBBLink     = "Ещё нет ссылки на комнату. Пришли сюда bbb.ssau.ru/b/… — без неё не зайду."
+	helpText       = "Внизу три кнопки.\n\nПары — что сегодня и зайду ли.\nКонспекты — PDF после полуночи.\nПрофиль — имя в журнале, подгруппа, слова для пинга.\n\nЗа 15 мин до онлайн-пары спрошу. «Зайти за меня» — иду сразу. Молчишь — зайду за 5 мин до звонка, без микрофона.\nСсылку bbb.ssau.ru/b/… достаточно один раз."
+	fallbackText   = "Не понял. Внизу три кнопки: Пары, Конспекты, Профиль."
+	noBBBTarget    = "Не понял, к какой паре ссылка. Открой Профиль → Комнаты BBB или пришли bbb.ssau.ru/b/… ближе к паре."
+	notesEmpty     = "Готовых конспектов пока нет.\nНа лекции пишу звук, PDF собираю после полуночи — кнопка появится здесь."
+	notesHint      = "Готовый PDF — кнопкой под сообщением."
 	botShortDesc   = "Захожу на онлайн-пары СГАУ вместо тебя"
-	botDescription = "Гость в BBB без микрофона. За 15 минут спрошу, заходить ли. Молчишь — зайду за 5 минут до пары."
-	inputHint      = "bbb.ssau.ru/b/… или кнопка"
+	botDescription = "Гость в BBB без микрофона. За 15 минут спрошу, заходить ли. Молчишь — зайду за 5 минут до пары. Конспекты — кнопкой «Конспекты»."
+	inputHint      = "Пары, Конспекты или Профиль"
 	fioHint        = "Фамилия Имя Отчество"
-	changeHint     = "Передумать — кнопки выше."
+	changeHint     = "Передумать можно в карточке пары."
 )
 
 const (
-	btnToday    = "Сегодня"
-	btnLinks    = "Ссылки"
-	btnSettings = "Настройки"
-	btnWords    = "Слова"
-	btnHelp     = "Помощь"
+	btnToday       = "Пары"
+	btnTodayOld    = "Сегодня"
+	btnNotes       = "Конспекты"
+	btnSettings    = "Профиль"
+	btnSettingsOld = "Настройки"
+	btnLinks       = "Ссылки"
+	btnWords       = "Слова"
+	btnHelp        = "Помощь"
 )
 
 func isMenuLabel(text string) bool {
 	switch strings.TrimSpace(text) {
-	case btnToday, btnLinks, btnSettings, btnWords, btnHelp:
+	case btnToday, btnTodayOld, btnNotes, btnSettings, btnSettingsOld, btnLinks, btnWords, btnHelp:
 		return true
 	default:
 		return false
@@ -43,30 +48,32 @@ func isMenuLabel(text string) bool {
 }
 
 func formatWakeReply(u model.User) string {
-	list := u.WakeList()
+	base := strings.Join(u.WakeList(), ", ")
 	extra := model.FormatWakeWords(u.ExtraWords)
 	if extra == "" {
-		extra = "нет"
+		extra = "пока нет"
 	}
-	return fmt.Sprintf("Пейджер: %s\nСвои слова: %s", strings.Join(list, ", "), extra)
+	return fmt.Sprintf("На лекции напишу, если услышу: %s.\nСвои добавки: %s", base, extra)
 }
 
 func formatOnboardDone(u model.User) string {
-	return fmt.Sprintf("Готово. В BBB — %s, подгруппа %d.\n\nЗа 15 мин спрошу. Молчишь — зайду за 5 мин до начала.",
+	return fmt.Sprintf("Готово. В журнале — %s, подгруппа %d.\n\nВнизу: Пары, Конспекты, Профиль.\nЗа 15 мин спрошу. Молчишь — зайду за 5 мин до начала.",
 		u.FIO, u.Subgroup)
 }
 
 func formatSettings(u model.User) string {
-	extra := model.FormatWakeWords(u.ExtraWords)
-	if extra == "" {
-		extra = "нет"
-	}
 	fio := strings.TrimSpace(u.FIO)
 	if fio == "" {
 		fio = "не задано"
 	}
-	return fmt.Sprintf("Настройки\n\nВ BBB: %s\nПодгруппа: %d\nПейджер: %s\nСвои слова: %s",
-		fio, u.Subgroup, strings.Join(u.WakeList(), ", "), extra)
+	extra := model.FormatWakeWords(u.ExtraWords)
+	if extra == "" {
+		extra = "нет"
+	}
+	return fmt.Sprintf(
+		"Профиль\n\nИмя в журнале\n%s\nПод этим ФИО захожу в BBB. Камеру и микрофон не включаю.\n\nПодгруппа: %d\nПары другой подгруппы пропускаю.\n\nПинг на лекции\nВсегда: %s\nТвои слова: %s\nЕсли препод скажет — напишу сюда.",
+		fio, u.Subgroup, strings.Join(u.WakeList(), ", "), extra,
+	)
 }
 
 func lessonStamp(l model.Lesson, loc *time.Location) string {
@@ -234,17 +241,17 @@ func todayNote(r todayRow) string {
 	}
 	switch r.Decision {
 	case model.JoinNo:
-		return "пропуск"
+		return "сегодня пропускаю"
 	case model.JoinYes:
 		if r.HasLink {
-			return "зайду"
+			return "зайду за тебя"
 		}
-		return "зайду, но нет ссылки"
+		return "зайду, но нет ссылки на комнату"
 	case model.JoinPending:
 		if r.HasLink {
-			return "если молчишь — зайду"
+			return "молчу — зайду за 5 мин"
 		}
-		return "нужна ссылка bbb.ssau.ru/b/…"
+		return "нужна ссылка комнаты bbb.ssau.ru/b/…"
 	}
 	if r.HasLink {
 		return "ссылка есть"
@@ -258,16 +265,87 @@ func formatWordsHint() string {
 
 func formatLinkList(upcoming []string, saved []string) string {
 	var b strings.Builder
-	b.WriteString("Онлайн впереди:\n")
+	b.WriteString("Комнаты BBB\n\nПришли сюда ссылку bbb.ssau.ru/b/… — запомню на предмет. Один раз хватит.")
+	b.WriteString("\n\nЖдут ссылку:\n")
 	if len(upcoming) == 0 {
-		b.WriteString("нет ближайших пар")
+		b.WriteString("сейчас все комнаты известны")
 	} else {
 		b.WriteString(strings.Join(upcoming, "\n"))
 	}
 	if len(saved) > 0 {
-		b.WriteString("\n\nУже есть:\n")
+		b.WriteString("\n\nУже запомнил:\n")
 		b.WriteString(strings.Join(saved, "\n"))
 	}
-	b.WriteString("\n\nПришли bbb.ssau.ru/b/… — привяжу к ближайшей паре без комнаты.")
 	return b.String()
+}
+
+func packDay(date string) string {
+	t, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return date
+	}
+	return t.Format("02.01")
+}
+
+func notesButtonLabel(p model.LecturePack) string {
+	d := strings.TrimSpace(p.Discipline)
+	if d == "" {
+		d = "лекция"
+	}
+	if rs := []rune(d); len(rs) > 28 {
+		d = string(rs[:27]) + "…"
+	}
+	return fmt.Sprintf("%s · %d", d, p.Number)
+}
+
+func formatNotesList(ready, pending []model.LecturePack) string {
+	if len(ready) == 0 && len(pending) == 0 {
+		return notesEmpty
+	}
+	var b strings.Builder
+	b.WriteString("Конспекты лекций")
+	if len(ready) > 0 {
+		b.WriteString("\n\nГотовы — жми кнопку:")
+		for i, p := range ready {
+			fmt.Fprintf(&b, "\n%d. %s (%s)", i+1, archiveLabel(p), packDay(p.Date))
+		}
+	}
+	if len(pending) > 0 {
+		b.WriteString("\n\nЕщё собираю:")
+		for _, p := range pending {
+			fmt.Fprintf(&b, "\n• %s — %s", archiveLabel(p), notesStatus(p.Status))
+		}
+	}
+	b.WriteString("\n\n")
+	b.WriteString(notesHint)
+	return b.String()
+}
+
+func archiveLabel(p model.LecturePack) string {
+	d := strings.TrimSpace(p.Discipline)
+	if d == "" {
+		d = "лекция"
+	}
+	n := p.Number
+	if n < 1 {
+		n = 1
+	}
+	return fmt.Sprintf("%s · лекция %d", d, n)
+}
+
+func notesStatus(st string) string {
+	switch st {
+	case model.PackRecording:
+		return "пишу звук"
+	case model.PackRecorded:
+		return "звук есть, PDF после полуночи"
+	case model.PackSlides:
+		return "слайды сняты, PDF после полуночи"
+	case model.PackNotes, model.PackTranscribe:
+		return "собираю PDF"
+	case model.PackError:
+		return "не собрался"
+	default:
+		return st
+	}
 }

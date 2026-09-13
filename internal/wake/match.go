@@ -61,7 +61,7 @@ func tokenize(s string) []string {
 	return model.ParseWakeWords(b.String())
 }
 
-func whoGets(word string, users []model.User) []model.User {
+func WhoGets(word string, users []model.User) []model.User {
 	word = strings.ToLower(strings.TrimSpace(word))
 	if word == "" {
 		return nil
