@@ -8,10 +8,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/ssau-bot
 EnvironmentFile=-/opt/ssau-bot/.env
+ExecStartPre=/opt/ssau-bot/audio.sh
 ExecStart=/opt/ssau-bot/bbb
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=20
+TimeoutStopSec=40
 User=root
 Group=root
 

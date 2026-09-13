@@ -163,7 +163,42 @@ const (
 	EventT15     = "t15"
 	EventSkip    = "skip"
 	EventError   = "error"
+	EventRecord  = "record"
+	EventSlides  = "slides"
+	EventNotes   = "notes"
 )
+
+func IsLecture(typ string) bool {
+	t := strings.ToLower(strings.TrimSpace(typ))
+	return strings.Contains(t, "лекц") || strings.Contains(t, "lecture")
+}
+
+const (
+	PackRecording  = "recording"
+	PackRecorded   = "recorded"
+	PackSlides     = "slides"
+	PackTranscribe = "transcribe"
+	PackNotes      = "notes"
+	PackDone       = "done"
+	PackError      = "error"
+)
+
+type LecturePack struct {
+	ID         int64     `json:"id"`
+	LessonID   int64     `json:"lesson_id"`
+	Discipline string    `json:"discipline"`
+	Number     int       `json:"number"`
+	Date       string    `json:"date"`
+	Dir        string    `json:"dir"`
+	BBBURL     string    `json:"bbb_url"`
+	Status     string    `json:"status"`
+	Audio      string    `json:"audio"`
+	Transcript string    `json:"transcript"`
+	NotesPDF   string    `json:"notes_pdf"`
+	Err        string    `json:"err,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
 
 type ParseRun struct {
 	ID          int64     `json:"id"`
@@ -184,9 +219,13 @@ type JoinIntent struct {
 }
 
 type Recording struct {
-	Name string    `json:"name"`
-	Size int64     `json:"size"`
-	Mod  time.Time `json:"mod"`
+	Name       string    `json:"name"`
+	Rel        string    `json:"rel,omitempty"`
+	Size       int64     `json:"size"`
+	Mod        time.Time `json:"mod"`
+	Status     string    `json:"status,omitempty"`
+	Number     int       `json:"number,omitempty"`
+	Discipline string    `json:"discipline,omitempty"`
 }
 
 type PersonCard struct {

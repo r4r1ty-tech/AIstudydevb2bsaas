@@ -21,11 +21,15 @@ type Worker struct {
 	Loc    *time.Location
 	Joiner Joiner
 
-	mu       sync.Mutex
-	sessions map[string]Session
-	leaveAt  map[string]time.Time
-	noBBB    map[string]struct{}
-	lobbyAt  map[string]time.Time
+	Hogs Hogs
+
+	mu         sync.Mutex
+	sessions   map[string]Session
+	leaveAt    map[string]time.Time
+	noBBB      map[string]struct{}
+	lobbyAt    map[string]time.Time
+	harvested  map[string]struct{}
+	harvesting bool
 }
 
 func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker {
@@ -37,17 +41,27 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		} else {
 			bin = FindChrome("")
 		}
-		j = NewChromeJoiner(bin)
+		cj := NewChromeJoiner(bin)
+		if cfg != nil && cfg.ChromeUserDir != "" {
+			cj.UserDataDir = cfg.ChromeUserDir
+		}
+		j = cj
+	}
+	hogs := Hogs(nopHogs{})
+	if cfg != nil && !cfg.BBBDryRun && cfg.LecturePause {
+		hogs = newProcHogs()
 	}
 	return &Worker{
-		Cfg:      cfg,
-		Store:    st,
-		Loc:      loc,
-		Joiner:   j,
-		sessions: make(map[string]Session),
-		leaveAt:  make(map[string]time.Time),
-		noBBB:    make(map[string]struct{}),
-		lobbyAt:  make(map[string]time.Time),
+		Cfg:       cfg,
+		Store:     st,
+		Loc:       loc,
+		Joiner:    j,
+		Hogs:      hogs,
+		sessions:  make(map[string]Session),
+		leaveAt:   make(map[string]time.Time),
+		noBBB:     make(map[string]struct{}),
+		lobbyAt:   make(map[string]time.Time),
+		harvested: make(map[string]struct{}),
 	}
 }
 
@@ -86,6 +100,10 @@ func (w *Worker) tick(ctx context.Context) {
 		if err == nil && link != nil {
 			url = link.URL
 		}
+		recID := int64(0)
+		if url != "" && model.IsLecture(lesson.Type) {
+			recID = w.pickRecorder(users, lesson, now)
+		}
 		for i := range users {
 			u := users[i]
 			if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
@@ -109,7 +127,7 @@ func (w *Worker) tick(ctx context.Context) {
 				continue
 			}
 			wanted[key] = struct{}{}
-			w.ensureIn(ctx, u, lesson, url, key, now)
+			w.ensureIn(ctx, u, lesson, url, key, now, recID != 0 && u.TelegramID == recID)
 		}
 	}
 
@@ -125,6 +143,7 @@ func (w *Worker) tick(ctx context.Context) {
 		tgID, lessonID := splitKey(key)
 		w.leave(ctx, tgID, lessonID, key, "slot over")
 	}
+	w.maybeHarvest(ctx, now)
 }
 
 func (w *Worker) ensureLeave(key string, finish time.Time) time.Time {
@@ -168,7 +187,7 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 	))
 }
 
-func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson, url, key string, now time.Time) {
+func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson, url, key string, now time.Time, record bool) {
 	w.mu.Lock()
 	_, live := w.sessions[key]
 	w.mu.Unlock()
@@ -176,8 +195,14 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		w.watchLobby(ctx, u, lesson, key, now)
 		return
 	}
-	sess, err := w.Joiner.Join(ctx, url, u.FIO, u.SOCKS5)
+	w.hogs().Hold()
+	role := RolePresence
+	if record {
+		role = RoleRecord
+	}
+	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: u.FIO, SOCKS5: u.SOCKS5, Role: role})
 	if err != nil {
+		w.hogs().Release()
 		_ = w.Store.SetPresence(model.Presence{
 			TelegramID: u.TelegramID, LessonID: lesson.ID,
 			State: model.PresenceError, Message: err.Error(), UpdatedAt: now,
@@ -188,6 +213,9 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		})
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не смог зайти на «%s».", lesson.Discipline))
 		return
+	}
+	if record {
+		sess = w.attachRecorder(ctx, sess, lesson, url)
 	}
 	state := model.PresenceRoom
 	if lobby, _ := sess.InLobby(ctx); lobby {
@@ -290,11 +318,11 @@ func (w *Worker) leave(ctx context.Context, telegramID, lessonID int64, key, rea
 		title = l.Discipline
 	}
 	notify.User(ctx, w.Cfg, telegramID, fmt.Sprintf("Вышел с «%s».", title))
+	w.hogs().Release()
 }
 
 func (w *Worker) closeAll() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	for k, s := range w.sessions {
 		_ = s.Close()
 		delete(w.sessions, k)
@@ -302,6 +330,15 @@ func (w *Worker) closeAll() {
 	if c, ok := w.Joiner.(io.Closer); ok {
 		_ = c.Close()
 	}
+	w.mu.Unlock()
+	w.hogs().Reset()
+}
+
+func (w *Worker) hogs() Hogs {
+	if w == nil || w.Hogs == nil {
+		return nopHogs{}
+	}
+	return w.Hogs
 }
 
 func splitKey(key string) (int64, int64) {
