@@ -428,3 +428,50 @@ func TestPresenceAndRaspKick(t *testing.T) {
 		t.Fatalf("cleared: %+v %v", list, err)
 	}
 }
+
+func TestLecturePacksNumbering(t *testing.T) {
+	st := openTemp(t)
+	loc := time.UTC
+	lessons := []model.Lesson{
+		{
+			Date: "2026-09-15", Discipline: "Матан", Type: "Лекция", Online: true,
+			Begin: time.Date(2026, 9, 15, 8, 0, 0, 0, loc), Finish: time.Date(2026, 9, 15, 9, 35, 0, 0, loc),
+		},
+		{
+			Date: "2026-09-15", Discipline: "Физика", Type: "Лекция", Online: true,
+			Begin: time.Date(2026, 9, 15, 10, 0, 0, 0, loc), Finish: time.Date(2026, 9, 15, 11, 20, 0, 0, loc),
+		},
+		{
+			Date: "2026-09-16", Discipline: "Матан", Type: "Лекция", Online: true,
+			Begin: time.Date(2026, 9, 16, 8, 0, 0, 0, loc), Finish: time.Date(2026, 9, 16, 9, 35, 0, 0, loc),
+		},
+	}
+	if err := st.ReplaceLessons(lessons); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := st.ListLessons()
+	if err != nil || len(listed) != 3 {
+		t.Fatalf("listed: %d %v", len(listed), err)
+	}
+	root := t.TempDir()
+	p1, err := st.EnsurePack(listed[0], "https://bbb.ssau.ru/b/a", root)
+	if err != nil || p1 == nil || p1.Number != 1 || p1.Discipline != "Матан" {
+		t.Fatalf("p1: %+v %v", p1, err)
+	}
+	p2, err := st.EnsurePack(listed[1], "https://bbb.ssau.ru/b/b", root)
+	if err != nil || p2 == nil || p2.Number != 1 || p2.Discipline != "Физика" {
+		t.Fatalf("p2: %+v %v", p2, err)
+	}
+	p3, err := st.EnsurePack(listed[2], "https://bbb.ssau.ru/b/a", root)
+	if err != nil || p3 == nil || p3.Number != 2 {
+		t.Fatalf("p3: %+v %v", p3, err)
+	}
+	again, err := st.EnsurePack(listed[0], "", root)
+	if err != nil || again == nil || again.ID != p1.ID || again.Number != 1 {
+		t.Fatalf("again: %+v %v", again, err)
+	}
+	ok, err := st.AnyRecording()
+	if err != nil || !ok {
+		t.Fatalf("recording flag: %v %v", ok, err)
+	}
+}

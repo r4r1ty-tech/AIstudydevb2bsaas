@@ -15,21 +15,33 @@ import (
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
 )
 
 type ChromeJoiner struct {
-	Bin string
+	Bin         string
+	UserDataDir string
 
-	mu       sync.Mutex
-	browser  *rod.Browser
-	launcher *launcher.Launcher
+	mu          sync.Mutex
+	browser     *rod.Browser
+	recBrowser  *rod.Browser
+	launcher    *launcher.Launcher
+	recLauncher *launcher.Launcher
 }
 
 func NewChromeJoiner(bin string) *ChromeJoiner {
 	if bin == "" {
 		bin = FindChrome("")
 	}
-	return &ChromeJoiner{Bin: bin}
+	return &ChromeJoiner{Bin: bin, UserDataDir: chromeUserDir()}
+}
+
+func chromeUserDir() string {
+	if d := strings.TrimSpace(os.Getenv("CHROME_USER_DATA_DIR")); d != "" {
+		return d
+	}
+	return filepath.Join(os.TempDir(), "ssau-bbb-chrome")
 }
 
 func (c *ChromeJoiner) Close() error {
@@ -39,17 +51,32 @@ func (c *ChromeJoiner) Close() error {
 		_ = c.browser.Close()
 		c.browser = nil
 	}
+	if c.recBrowser != nil {
+		_ = c.recBrowser.Close()
+		c.recBrowser = nil
+	}
 	if c.launcher != nil {
 		c.launcher.Kill()
 		c.launcher = nil
+	}
+	if c.recLauncher != nil {
+		c.recLauncher.Kill()
+		c.recLauncher = nil
 	}
 	return nil
 }
 
 func (c *ChromeJoiner) ensureBrowser() (*rod.Browser, error) {
+	return c.ensure(false)
+}
+
+func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.browser != nil {
+	if record && c.recBrowser != nil {
+		return c.recBrowser, nil
+	}
+	if !record && c.browser != nil {
 		return c.browser, nil
 	}
 	bin := c.Bin
@@ -60,7 +87,13 @@ func (c *ChromeJoiner) ensureBrowser() (*rod.Browser, error) {
 		return nil, fmt.Errorf("chromium не найден — apt install chromium или CHROME_BIN")
 	}
 
-	dir := filepath.Join(os.TempDir(), "ssau-bbb-chrome")
+	dir := c.UserDataDir
+	if dir == "" {
+		dir = chromeUserDir()
+	}
+	if record {
+		dir = dir + "-rec"
+	}
 	_ = os.MkdirAll(dir, 0o755)
 
 	l := launcher.New().
@@ -75,8 +108,13 @@ func (c *ChromeJoiner) ensureBrowser() (*rod.Browser, error) {
 		Set(flags.Flag("no-first-run")).
 		Set(flags.Flag("no-default-browser-check")).
 		Set(flags.Flag("autoplay-policy"), "no-user-gesture-required").
-		Set(flags.Flag("use-fake-ui-for-media-stream")).
-		Set(flags.Flag("use-fake-device-for-media-stream"))
+		Set(flags.Flag("use-fake-ui-for-media-stream"))
+
+	if record {
+		l = l.Env(capture.PulseEnv()...)
+	} else {
+		l = l.Set(flags.Flag("use-fake-device-for-media-stream"))
+	}
 
 	u, err := l.Launch()
 	if err != nil {
@@ -87,9 +125,15 @@ func (c *ChromeJoiner) ensureBrowser() (*rod.Browser, error) {
 		l.Kill()
 		return nil, fmt.Errorf("chrome connect: %w", err)
 	}
-	c.launcher = l
-	c.browser = b
-	log.Printf("bbb: chromium %s", bin)
+	if record {
+		c.recLauncher = l
+		c.recBrowser = b
+		log.Printf("bbb: chromium-rec %s", bin)
+	} else {
+		c.launcher = l
+		c.browser = b
+		log.Printf("bbb: chromium %s", bin)
+	}
 	return b, nil
 }
 
@@ -179,20 +223,20 @@ func (s *chromeSession) Close() error {
 	return nil
 }
 
-func (c *ChromeJoiner) Join(ctx context.Context, meetingURL, fio, socks5 string) (Session, error) {
+func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	root, err := c.ensureBrowser()
+	root, err := c.ensure(req.Role == RoleRecord)
 	if err != nil {
 		return nil, err
 	}
 
-	bridge, err := startSOCKSBridge(socks5)
+	bridge, err := startSOCKSBridge(req.SOCKS5)
 	if err != nil {
 		return nil, err
 	}
-	proxyURL, err := chromeProxyURL(socks5, bridge)
+	proxyURL, err := chromeProxyURL(req.SOCKS5, bridge)
 	if err != nil {
 		if bridge != nil {
 			_ = bridge.Close()
@@ -232,16 +276,20 @@ func (c *ChromeJoiner) Join(ctx context.Context, meetingURL, fio, socks5 string)
 		bridge:    bridge,
 	}
 
-	if err := page.Timeout(30 * time.Second).Navigate(meetingURL); err != nil {
+	if err := page.Timeout(30 * time.Second).Navigate(req.URL); err != nil {
 		_ = sess.Close()
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
 	_ = page.Timeout(15 * time.Second).WaitLoad()
 
-	if err := fillGuestName(page, fio); err != nil {
+	if err := fillGuestName(page, req.FIO); err != nil {
 		log.Printf("bbb: guest form: %v", err)
 	}
-	if err := clickListenOnly(page); err != nil {
+	if req.Role == RolePresence {
+		if err := dismissAudio(page); err != nil {
+			log.Printf("bbb: skip audio: %v", err)
+		}
+	} else if err := clickListenOnly(page); err != nil {
 		log.Printf("bbb: listen-only: %v", err)
 	}
 	return sess, nil
@@ -390,6 +438,29 @@ func clickListenOnly(page *rod.Page) error {
 		time.Sleep(400 * time.Millisecond)
 	}
 	return fmt.Errorf("кнопка «только слушать» не найдена")
+}
+
+var closeAudioSels = []string{
+	"[data-test='closeModalButton']",
+	"[data-test='closeModal']",
+	"[data-test='closeButton']",
+	`button[aria-label='Close']`,
+	`button[aria-label='Закрыть']`,
+}
+
+func dismissAudio(page *rod.Page) error {
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		p := page.Timeout(2 * time.Second)
+		if clickFirst(p, closeAudioSels) || clickByText(p, `(?i)close|закрыть|skip|пропуст`) {
+			return nil
+		}
+		if hasAny(p, inMeetingSels) {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return clickListenOnly(page)
 }
 
 func hasAny(page *rod.Page, sels []string) bool {

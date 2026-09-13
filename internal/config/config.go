@@ -28,38 +28,64 @@ const (
 )
 
 type Config struct {
-	BotToken      string
-	AdminID       int64
-	WebAppURL     string
-	DBPath        string
-	GroupID       int64
-	GroupCode     string
-	ListenAddr    string
-	Timezone      string
-	RecordingsDir string
-	ChromeBin     string
-	BBBDryRun     bool
-	PanelPassword string
-	Whitelist     []int64
+	BotToken         string
+	AdminID          int64
+	WebAppURL        string
+	DBPath           string
+	GroupID          int64
+	GroupCode        string
+	ListenAddr       string
+	Timezone         string
+	RecordingsDir    string
+	ChromeBin        string
+	ChromeUserDir    string
+	BBBDryRun        bool
+	LecturePause     bool
+	PanelPassword    string
+	DeepSeekAPIKey   string
+	DeepSeekAPIURL   string
+	FishStudioAPIKey string
+	FishStudioAPIURL string
+	GrokAPIKey       string
+	GrokAPIURL       string
+	GrokModel        string
+	GroqAPIKey       string
+	GroqAPIURL       string
+	GroqVisionModel  string
+	GroqSTTModel     string
+	Whitelist        []int64
 }
 
 func Load() (*Config, error) {
 	loadDotEnv(".env")
 
 	c := &Config{
-		BotToken:      strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		AdminID:       int64Env("ADMIN_TELEGRAM_ID", DefaultAdminID),
-		WebAppURL:     strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
-		DBPath:        strEnv("DATABASE_PATH", DefaultDBPath),
-		GroupID:       int64Env("GROUP_ID", DefaultGroupID),
-		GroupCode:     strEnv("GROUP_CODE", DefaultGroupCode),
-		ListenAddr:    strEnv("LISTEN_ADDR", DefaultListen),
-		Timezone:      strEnv("TZ", DefaultTimezone),
-		RecordingsDir: strEnv("RECORDINGS_DIR", DefaultRecordings),
-		ChromeBin:     strEnv("CHROME_BIN", ""),
-		BBBDryRun:     os.Getenv("BBB_DRY_RUN") == "1",
-		PanelPassword: strEnv("PANEL_PASSWORD", ""),
-		Whitelist:     append([]int64(nil), DefaultWhitelist...),
+		BotToken:         strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		AdminID:          int64Env("ADMIN_TELEGRAM_ID", DefaultAdminID),
+		WebAppURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
+		DBPath:           strEnv("DATABASE_PATH", DefaultDBPath),
+		GroupID:          int64Env("GROUP_ID", DefaultGroupID),
+		GroupCode:        strEnv("GROUP_CODE", DefaultGroupCode),
+		ListenAddr:       strEnv("LISTEN_ADDR", DefaultListen),
+		Timezone:         strEnv("TZ", DefaultTimezone),
+		RecordingsDir:    strEnv("RECORDINGS_DIR", DefaultRecordings),
+		ChromeBin:        strEnv("CHROME_BIN", ""),
+		ChromeUserDir:    strEnv("CHROME_USER_DATA_DIR", ""),
+		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
+		LecturePause:     boolEnv("LECTURE_PAUSE", true),
+		PanelPassword:    strEnv("PANEL_PASSWORD", ""),
+		DeepSeekAPIKey:   strEnv("DEEPSEEK_API_KEY", ""),
+		DeepSeekAPIURL:   strEnv("DEEPSEEK_API_URL", "https://api.deepseek.com"),
+		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),
+		FishStudioAPIURL: strEnv("FISH_STUDIO_API_URL", "https://api.fish.audio"),
+		GrokAPIKey:       strEnv("GROK_API_KEY", ""),
+		GrokAPIURL:       strEnv("GROK_API_URL", "https://api.x.ai/v1"),
+		GrokModel:        strEnv("GROK_MODEL", "grok-2-vision-1212"),
+		GroqAPIKey:       strEnv("GROQ_API_KEY", ""),
+		GroqAPIURL:       strEnv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
+		GroqVisionModel:  strEnv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
+		GroqSTTModel:     strEnv("GROQ_STT_MODEL", "whisper-large-v3"),
+		Whitelist:        append([]int64(nil), DefaultWhitelist...),
 	}
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {
 		for _, p := range strings.Split(extra, ",") {
@@ -102,6 +128,20 @@ func strEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func boolEnv(key string, fallback bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	switch v {
+	case "":
+		return fallback
+	case "0", "false", "no", "off":
+		return false
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return fallback
+	}
 }
 
 func int64Env(key string, fallback int64) int64 {

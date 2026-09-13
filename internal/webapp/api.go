@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -131,7 +132,7 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		Accounts:  accounts,
 		Current:   s.lessonWithBBB(cur),
 		Next:      s.lessonWithBBB(next),
-		Recording: false,
+		Recording: s.anyRecording(),
 	})
 }
 
@@ -272,7 +273,7 @@ func (s *Server) handleLessons(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, lessonsResponse{
 		Lessons:    out,
 		BBB:        bbb,
-		Recordings: listRecordings(s.recordingsDir),
+		Recordings: s.listPackRecordings(),
 		GroupID:    s.cfg.GroupID,
 	})
 }
@@ -446,31 +447,49 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 	writeErr(w, http.StatusInternalServerError, "store error")
 }
 
-func listRecordings(dir string) []model.Recording {
+func (s *Server) anyRecording() bool {
+	if s == nil || s.st == nil {
+		return false
+	}
+	ok, _ := s.st.AnyRecording()
+	return ok
+}
+
+func (s *Server) listPackRecordings() []model.Recording {
 	out := []model.Recording{}
-	if strings.TrimSpace(dir) == "" {
+	if s == nil || s.st == nil {
 		return out
 	}
-	entries, err := os.ReadDir(dir)
+	packs, err := s.st.ListPacks()
 	if err != nil {
 		return out
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil {
-			continue
+	for _, p := range packs {
+		abs := filepath.Join(s.recordingsDir, p.Dir)
+		mod := p.UpdatedAt
+		if st, err := os.Stat(abs); err == nil {
+			mod = st.ModTime()
 		}
 		out = append(out, model.Recording{
-			Name: e.Name(),
-			Size: info.Size(),
-			Mod:  info.ModTime(),
+			Name:       p.Dir,
+			Rel:        p.Dir,
+			Size:       dirSize(abs),
+			Mod:        mod,
+			Status:     p.Status,
+			Number:     p.Number,
+			Discipline: p.Discipline,
 		})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].Mod.After(out[j].Mod)
-	})
 	return out
+}
+
+func dirSize(root string) int64 {
+	var n int64
+	_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && !info.IsDir() {
+			n += info.Size()
+		}
+		return nil
+	})
+	return n
 }

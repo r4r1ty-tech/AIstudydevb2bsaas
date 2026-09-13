@@ -50,7 +50,7 @@ func TestShouldBeInRoom(t *testing.T) {
 }
 
 func TestDryJoin(t *testing.T) {
-	s, err := DryJoiner{}.Join(context.Background(), "https://bbb.ssau.ru/b/x", "Иванов", "")
+	s, err := DryJoiner{}.Join(context.Background(), JoinReq{URL: "https://bbb.ssau.ru/b/x", FIO: "Иванов"})
 	if err != nil || s == nil {
 		t.Fatalf("dry: %v %v", s, err)
 	}
@@ -63,5 +63,9 @@ func TestDryJoin(t *testing.T) {
 	}
 	if err := s.Greet(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	n, err := s.GrabSlides(context.Background(), t.TempDir())
+	if err != nil || n != 0 {
+		t.Fatalf("slides: %d %v", n, err)
 	}
 }

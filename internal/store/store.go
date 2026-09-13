@@ -122,6 +122,22 @@ func (s *Store) migrate() error {
 			message TEXT,
 			updated_at TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS lecture_packs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			lesson_id INTEGER UNIQUE,
+			discipline TEXT,
+			number INTEGER,
+			date TEXT,
+			dir TEXT,
+			bbb_url TEXT,
+			status TEXT,
+			audio TEXT,
+			transcript TEXT,
+			notes_pdf TEXT,
+			err TEXT,
+			created_at TEXT,
+			updated_at TEXT
+		)`,
 	}
 	tx, err := s.db.Begin()
 	if err != nil {

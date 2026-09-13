@@ -305,7 +305,7 @@
       rb.innerHTML = recs.map(function (f) {
         return (
           '<div class="row-item">' +
-            '<span class="mono grow">' + esc(f.name) + "</span>" +
+            '<span class="mono grow">' + esc(f.name) + (f.status ? " · " + esc(f.status) : "") + "</span>" +
             "<span>" + bytes(f.size) + "</span>" +
             '<span class="muted">' + fmtTime(f.mod) + "</span>" +
           "</div>"

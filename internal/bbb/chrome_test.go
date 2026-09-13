@@ -61,7 +61,7 @@ func TestChromeGuestJoinLocalHTML(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	sess, err := j.Join(ctx, srv.URL+"/", "Иванов Иван", "")
+	sess, err := j.Join(ctx, JoinReq{URL: srv.URL + "/", FIO: "Иванов Иван"})
 	if err != nil {
 		t.Fatal(err)
 	}
