@@ -81,6 +81,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
 	dispatcher.AddHandler(handlers.NewCommand("help", b.onHelp))
 	dispatcher.AddHandler(handlers.NewCommand("today", b.onToday))
+	dispatcher.AddHandler(handlers.NewCommand("notes", b.onNotes))
 	dispatcher.AddHandler(handlers.NewCommand("settings", b.onSettings))
 	dispatcher.AddHandler(handlers.NewCommand("words", b.onWords))
 	dispatcher.AddHandler(handlers.NewCommand("link", b.onLink))
@@ -88,6 +89,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("j:"), b.onJoinCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("ob:"), b.onOnboardCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("st:"), b.onSettingsCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("nt:"), b.onNotesCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
 	return b, nil
@@ -172,9 +174,10 @@ func (b *Bot) webAppURL() string {
 
 func (b *Bot) publishProfile() {
 	cmds := []gotgbot.BotCommand{
-		{Command: "start", Description: "Сегодня и статус"},
+		{Command: "start", Description: "Пары и статус"},
 		{Command: "today", Description: "Пары на сегодня"},
-		{Command: "settings", Description: "ФИО, подгруппа, слова"},
+		{Command: "notes", Description: "Конспекты PDF"},
+		{Command: "settings", Description: "Профиль: имя, подгруппа, пинг"},
 		{Command: "help", Description: "Как это работает"},
 	}
 	if _, err := b.api.SetMyCommands(cmds, nil); err != nil {

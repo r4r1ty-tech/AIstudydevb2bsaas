@@ -1,6 +1,7 @@
 package tg
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -10,26 +11,12 @@ import (
 func mainKeyboard() gotgbot.ReplyKeyboardMarkup {
 	return gotgbot.ReplyKeyboardMarkup{
 		Keyboard: [][]gotgbot.KeyboardButton{
-			{{Text: btnToday}, {Text: btnLinks}},
-			{{Text: btnSettings}, {Text: btnHelp}},
+			{{Text: btnToday}, {Text: btnNotes}},
+			{{Text: btnSettings}},
 		},
 		IsPersistent:          true,
 		ResizeKeyboard:        true,
 		InputFieldPlaceholder: inputHint,
-	}
-}
-
-func fioForceReply() gotgbot.ForceReply {
-	return gotgbot.ForceReply{
-		ForceReply:            true,
-		InputFieldPlaceholder: fioHint,
-	}
-}
-
-func wordsForceReply() gotgbot.ForceReply {
-	return gotgbot.ForceReply{
-		ForceReply:            true,
-		InputFieldPlaceholder: "лаба, зачёт",
 	}
 }
 
@@ -53,8 +40,8 @@ func skipWordsKeyboard() gotgbot.InlineKeyboardMarkup {
 func t15Keyboard(lessonID int64) gotgbot.InlineKeyboardMarkup {
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
-			{Text: "Зайти", CallbackData: joinCallbackData(true, lessonID)},
-			{Text: "Пропустить", CallbackData: joinCallbackData(false, lessonID)},
+			{Text: "Зайти за меня", CallbackData: joinCallbackData(true, lessonID)},
+			{Text: "Не сегодня", CallbackData: joinCallbackData(false, lessonID)},
 		}},
 	}
 }
@@ -68,18 +55,72 @@ func settingsKeyboard(sub int) gotgbot.InlineKeyboardMarkup {
 	}
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{
-			{{Text: "Сменить ФИО", CallbackData: "st:fio"}},
+			{{Text: "Изменить имя в журнале", CallbackData: "st:fio"}},
 			{
 				{Text: t1, CallbackData: "st:sub:1"},
 				{Text: t2, CallbackData: "st:sub:2"},
 			},
-			{{Text: "Свои слова", CallbackData: "st:words"}},
+			{{Text: "Слова для пинга на паре", CallbackData: "st:words"}},
+			{{Text: "Комнаты BBB", CallbackData: "st:rooms"}},
+			{{Text: "Как это работает", CallbackData: "st:help"}},
 		},
 	}
 }
 
+func cancelKeyboard() gotgbot.InlineKeyboardMarkup {
+	return gotgbot.InlineKeyboardMarkup{
+		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
+			{Text: "Отмена", CallbackData: "st:cancel"},
+		}},
+	}
+}
+
+func backToProfileKeyboard() gotgbot.InlineKeyboardMarkup {
+	return gotgbot.InlineKeyboardMarkup{
+		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
+			{Text: "← К профилю", CallbackData: "st:back"},
+		}},
+	}
+}
+
+func notesKeyboard(ids []int64, labels []string) gotgbot.InlineKeyboardMarkup {
+	rows := make([][]gotgbot.InlineKeyboardButton, 0, len(ids))
+	for i := range ids {
+		if ids[i] <= 0 {
+			continue
+		}
+		label := "Скачать PDF"
+		if i < len(labels) && strings.TrimSpace(labels[i]) != "" {
+			label = labels[i]
+		}
+		if len([]rune(label)) > 60 {
+			r := []rune(label)
+			label = string(r[:57]) + "…"
+		}
+		rows = append(rows, []gotgbot.InlineKeyboardButton{{
+			Text:         label,
+			CallbackData: fmt.Sprintf("nt:%d", ids[i]),
+		}})
+		if len(rows) >= 10 {
+			break
+		}
+	}
+	return gotgbot.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
 func emptyInline() gotgbot.InlineKeyboardMarkup {
 	return gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{}}
+}
+
+func parseNotesCallback(data string) (int64, bool) {
+	if !strings.HasPrefix(data, "nt:") {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimPrefix(data, "nt:"), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func parseOnboardCallback(data string) (kind string, n int, ok bool) {
@@ -101,6 +142,12 @@ func parseSettingsCallback(data string) (kind string, n int, ok bool) {
 		return "fio", 0, true
 	case data == "st:words":
 		return "words", 0, true
+	case data == "st:rooms":
+		return "rooms", 0, true
+	case data == "st:help":
+		return "help", 0, true
+	case data == "st:back", data == "st:cancel":
+		return "back", 0, true
 	case strings.HasPrefix(data, "st:sub:"):
 		n, err := strconv.Atoi(strings.TrimPrefix(data, "st:sub:"))
 		if err != nil || (n != 1 && n != 2) {

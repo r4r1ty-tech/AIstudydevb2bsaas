@@ -3,6 +3,7 @@ package bbb
 import (
 	"context"
 	"log"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -12,6 +13,11 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notes"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
+)
+
+const (
+	slidesDoneKey = "slides_done:"
+	notesDoneKey  = "notes_done:"
 )
 
 func (w *Worker) recRoot() string {
@@ -63,6 +69,8 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 		At: time.Now(), Type: model.EventRecord, LessonID: lesson.ID,
 		Message: archive.Rel(lesson.Discipline, pack.Number),
 	})
+	users := w.lectureUsers(lesson, time.Now())
+	go w.startSpotter(ctx, rec, lesson, users)
 	st := w.Store
 	return &closeHook{Session: sess, fn: func() {
 		_ = rec.Stop()
@@ -84,29 +92,39 @@ func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
 		return
 	}
 	day := now.Format("2006-01-02")
-	w.mu.Lock()
-	if w.harvested == nil {
-		w.harvested = make(map[string]struct{})
-	}
-	if _, ok := w.harvested[day]; ok || w.harvesting {
-		w.mu.Unlock()
+	if w.settingOn(slidesDoneKey + day) {
 		return
 	}
-	w.harvesting = true
-	w.mu.Unlock()
-
+	if !w.beginJob(false) {
+		return
+	}
 	go func() {
-		defer func() {
-			w.mu.Lock()
-			w.harvesting = false
-			w.harvested[day] = struct{}{}
-			w.mu.Unlock()
-		}()
-		w.finishDay(ctx, day)
+		defer w.endJob()
+		w.harvestDay(ctx, day)
+		w.setSetting(slidesDoneKey+day, "1")
 	}()
 }
 
-func (w *Worker) finishDay(ctx context.Context, day string) {
+func (w *Worker) maybeNotes(ctx context.Context, now time.Time) {
+	if w == nil || w.Store == nil {
+		return
+	}
+	day := archive.NotesDay(now)
+	if day == "" || w.settingOn(notesDoneKey+day) {
+		return
+	}
+	if !w.beginJob(true) {
+		return
+	}
+	go func() {
+		defer w.endJob()
+		if w.buildNotesDay(ctx, day) {
+			w.setSetting(notesDoneKey+day, "1")
+		}
+	}()
+}
+
+func (w *Worker) harvestDay(ctx context.Context, day string) {
 	packs, err := w.Store.PacksByDate(day)
 	if err != nil {
 		log.Printf("bbb: packs %s: %v", day, err)
@@ -114,14 +132,49 @@ func (w *Worker) finishDay(ctx context.Context, day string) {
 	}
 	for i := range packs {
 		p := packs[i]
-		switch p.Status {
-		case model.PackRecording, model.PackDone, model.PackError:
-			continue
-		case model.PackRecorded:
+		if p.Status == model.PackRecorded {
 			w.harvestSlides(ctx, &p)
+		}
+	}
+}
+
+func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
+	packs, err := w.Store.PacksByDate(day)
+	if err != nil {
+		log.Printf("bbb: notes packs %s: %v", day, err)
+		return false
+	}
+	done := true
+	for i := range packs {
+		p := packs[i]
+		if p.Status == model.PackRecording {
+			if w.promoteStuckRecording(&p) {
+				p.Status = model.PackRecorded
+			} else {
+				done = false
+				continue
+			}
+		}
+		if !archive.ShouldNotePack(p.Status) {
+			continue
 		}
 		w.buildNotes(ctx, p.ID)
 	}
+	return done
+}
+
+func (w *Worker) promoteStuckRecording(p *model.LecturePack) bool {
+	if p == nil || w.Store == nil {
+		return false
+	}
+	audio := filepath.Join(w.recRoot(), p.Audio)
+	st, err := os.Stat(audio)
+	if err != nil || st.Size() < 2048 {
+		return false
+	}
+	p.Status = model.PackRecorded
+	_ = w.Store.SavePack(p)
+	return true
 }
 
 func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
@@ -169,7 +222,10 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) {
 	}
 	p.Status = model.PackNotes
 	_ = w.Store.SavePack(p)
-	if err := notes.Build(ctx, w.Cfg, w.recRoot(), *p); err != nil {
+	w.hogs().Hold()
+	err = notes.Build(ctx, w.Cfg, w.recRoot(), *p)
+	w.hogs().Release()
+	if err != nil {
 		p.Status = model.PackError
 		p.Err = err.Error()
 		_ = w.Store.SavePack(p)
@@ -185,5 +241,68 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) {
 		At: time.Now(), Type: model.EventNotes, LessonID: p.LessonID,
 		Message: archive.Rel(p.Discipline, p.Number),
 	})
-	notify.Admin(ctx, w.Cfg, "конспект готов: "+archive.Rel(p.Discipline, p.Number))
+	w.announceNotes(ctx, p)
+}
+
+func (w *Worker) announceNotes(ctx context.Context, p *model.LecturePack) {
+	if p == nil {
+		return
+	}
+	label := archive.Label(p.Discipline, p.Number)
+	text := "Конспект готов: " + label + "\nСкачать PDF — кнопка ниже или «Конспекты» в меню."
+	mk := notify.NotesButton(p.ID)
+	sent := false
+	if users, err := w.Store.ListUsers(); err == nil {
+		for _, u := range users {
+			if !u.Onboarded || !u.Enabled {
+				continue
+			}
+			notify.UserMarkup(ctx, w.Cfg, u.TelegramID, text, mk)
+			sent = true
+		}
+	}
+	if !sent {
+		notify.UserMarkup(ctx, w.Cfg, w.adminID(), text, mk)
+	}
+}
+
+func (w *Worker) adminID() int64 {
+	if w != nil && w.Cfg != nil {
+		return w.Cfg.AdminID
+	}
+	return 0
+}
+
+func (w *Worker) settingOn(key string) bool {
+	if w == nil || w.Store == nil {
+		return false
+	}
+	v, ok, err := w.Store.GetSetting(key)
+	return err == nil && ok && v == "1"
+}
+
+func (w *Worker) setSetting(key, val string) {
+	if w == nil || w.Store == nil {
+		return
+	}
+	_ = w.Store.SetSetting(key, val)
+}
+
+func (w *Worker) beginJob(needQuiet bool) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.busy {
+		return false
+	}
+	if needQuiet && len(w.sessions) > 0 {
+		return false
+	}
+	w.busy = true
+	return true
+}
+
+func (w *Worker) endJob() {
+	w.mu.Lock()
+	w.busy = false
+	w.mu.Unlock()
 }

@@ -3,6 +3,7 @@ package capture
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -12,11 +13,15 @@ import (
 	"syscall"
 )
 
-const SinkName = "ssau_rec"
+const (
+	SinkName = "ssau_rec"
+	WakeRate = 16000
+)
 
 type Rec struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
+	pcm    io.ReadCloser
 	path   string
 	mu     sync.Mutex
 }
@@ -50,6 +55,16 @@ func EnsureSink() error {
 	return nil
 }
 
+func FFmpegArgs(outPath string) []string {
+	return []string{
+		"-hide_banner", "-nostdin", "-loglevel", "error",
+		"-f", "pulse", "-i", SinkName + ".monitor",
+		"-filter_complex", "[0:a]asplit=2[rec][wake]",
+		"-map", "[rec]", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k", "-y", outPath,
+		"-map", "[wake]", "-ac", "1", "-ar", fmt.Sprintf("%d", WakeRate), "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1",
+	}
+}
+
 func Start(ctx context.Context, outPath string) (*Rec, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -65,21 +80,27 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 		return nil, fmt.Errorf("ffmpeg не найден")
 	}
 	cctx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(cctx, ffmpeg,
-		"-hide_banner", "-nostdin", "-loglevel", "error",
-		"-f", "pulse", "-i", SinkName+".monitor",
-		"-ac", "1", "-ar", "48000",
-		"-c:a", "libopus", "-b:a", "32k",
-		"-y", outPath,
-	)
+	cmd := exec.CommandContext(cctx, ffmpeg, FFmpegArgs(outPath)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stderr = os.Stderr
+	pcm, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("ffmpeg stdout: %w", err)
+	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("ffmpeg start: %w", err)
 	}
-	log.Printf("capture: ffmpeg pid=%d -> %s", cmd.Process.Pid, outPath)
-	return &Rec{cmd: cmd, cancel: cancel, path: outPath}, nil
+	log.Printf("capture: ffmpeg pid=%d -> %s + pcm %dHz", cmd.Process.Pid, outPath, WakeRate)
+	return &Rec{cmd: cmd, cancel: cancel, pcm: pcm, path: outPath}, nil
+}
+
+func (r *Rec) Read(p []byte) (int, error) {
+	if r == nil || r.pcm == nil {
+		return 0, io.EOF
+	}
+	return r.pcm.Read(p)
 }
 
 func (r *Rec) Stop() error {

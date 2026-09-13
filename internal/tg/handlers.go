@@ -165,11 +165,13 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 	b.clearAwait(from.Id)
 
 	switch text {
-	case btnToday:
+	case btnToday, btnTodayOld:
 		return b.sendToday(u, chatID)
+	case btnNotes:
+		return b.sendNotes(chatID)
 	case btnLinks:
-		return b.sendLinks(u, chatID)
-	case btnSettings:
+		return b.sendRooms(u, chatID)
+	case btnSettings, btnSettingsOld:
 		return b.sendSettings(u, chatID)
 	case btnWords:
 		return b.sendAskWords(u, chatID)
@@ -185,13 +187,13 @@ func (b *Bot) sendAskFIO(chatID, userID int64, text string) error {
 	if strings.TrimSpace(text) == "" {
 		text = askFIO
 	}
-	return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: fioForceReply()})
+	return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: cancelKeyboard()})
 }
 
 func (b *Bot) sendAskWords(u *model.User, chatID int64) error {
 	b.setAwait(u.TelegramID, awaitWords)
 	return b.send(chatID, formatWakeReply(*u)+"\n\n"+askWordsNext, &gotgbot.SendMessageOpts{
-		ReplyMarkup: wordsForceReply(),
+		ReplyMarkup: cancelKeyboard(),
 	})
 }
 
@@ -213,7 +215,7 @@ func (b *Bot) handleAwait(u *model.User, chatID int64, text string, kind awaitKi
 		}
 		b.clearAwait(u.TelegramID)
 		u.FIO = fio
-		return b.sendMain(chatID, formatSettings(*u))
+		return b.sendSettings(u, chatID)
 	case awaitWords:
 		var words []string
 		if !isClearWords(text) && !model.SkipWakeWords(text) {
@@ -224,7 +226,7 @@ func (b *Bot) handleAwait(u *model.User, chatID int64, text string, kind awaitKi
 		}
 		b.clearAwait(u.TelegramID)
 		u.ExtraWords = words
-		return b.sendMain(chatID, formatSettings(*u))
+		return b.sendSettings(u, chatID)
 	default:
 		b.clearAwait(u.TelegramID)
 		return b.sendMain(chatID, fallbackText)
@@ -364,7 +366,7 @@ func (b *Bot) onWords(_ *gotgbot.Bot, ctx *ext.Context) error {
 		return b.sendAskWords(u, chatID)
 	}
 	if u.Onboarded {
-		return b.sendMain(chatID, formatSettings(*u))
+		return b.sendSettings(u, chatID)
 	}
 	return b.send(chatID, formatWakeReply(*u)+"\n\n"+formatWordsHint(), nil)
 }
@@ -396,12 +398,16 @@ func answerToast(bot *gotgbot.Bot, ctx *ext.Context, text string) {
 }
 
 func (b *Bot) sendLinks(u *model.User, chatID int64) error {
+	return b.sendRooms(u, chatID)
+}
+
+func (b *Bot) sendRooms(u *model.User, chatID int64) error {
 	text, err := b.formatLinkReply(u)
 	if err != nil {
 		return err
 	}
 	if u != nil && u.Onboarded {
-		return b.sendMain(chatID, text)
+		return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: backToProfileKeyboard()})
 	}
 	return b.send(chatID, text, nil)
 }
@@ -649,11 +655,30 @@ func (b *Bot) onSettingsCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	switch kind {
 	case "fio":
-		answerToast(bot, ctx, "ФИО")
+		answerToast(bot, ctx, "Имя")
 		return b.sendAskFIO(chatID, from.Id, askFIO)
 	case "words":
 		answerToast(bot, ctx, "Слова")
 		return b.sendAskWords(u, chatID)
+	case "rooms":
+		answerToast(bot, ctx, "Комнаты")
+		return b.sendRooms(u, chatID)
+	case "help":
+		answerToast(bot, ctx, "")
+		return b.send(chatID, helpText, &gotgbot.SendMessageOpts{ReplyMarkup: backToProfileKeyboard()})
+	case "back":
+		answerToast(bot, ctx, "")
+		b.clearAwait(from.Id)
+		if ctx.CallbackQuery.Message != nil {
+			_, _, err := ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+				Text:        formatSettings(*u),
+				ReplyMarkup: settingsKeyboard(u.Subgroup),
+			})
+			if err == nil {
+				return nil
+			}
+		}
+		return b.sendSettings(u, chatID)
 	case "sub":
 		answerToast(bot, ctx, fmt.Sprintf("Подгруппа %d", n))
 		if err := b.st.SetSubgroup(from.Id, n); err != nil {

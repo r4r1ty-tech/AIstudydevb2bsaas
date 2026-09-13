@@ -37,12 +37,13 @@ unit_bbb=$(need ssau-bbb.service)
 unit_tunnel=$(need ssau-tunnel.service)
 tunnel_sh=$(need tunnel.sh)
 audio_sh=$(need audio.sh)
+wake_py=$(need wake.py)
 target=$(need ssau.target)
 
 install -d -m 755 "$APP" "$APP/data" "$APP/recordings" "$APP/chrome" "$APP/chrome-rec"
 
 need_pkgs=()
-for p in chromium ffmpeg fonts-liberation ca-certificates pulseaudio pulseaudio-utils; do
+for p in chromium ffmpeg fonts-liberation ca-certificates pulseaudio pulseaudio-utils python3 python3-pip unzip; do
   if ! dpkg -s "$p" >/dev/null 2>&1; then
     need_pkgs+=("$p")
   fi
@@ -90,6 +91,33 @@ ensure_swap() {
 }
 ensure_swap
 
+ensure_vosk() {
+  local model="$APP/vosk-model"
+  if ! python3 -c "import vosk" >/dev/null 2>&1; then
+    python3 -m pip install --break-system-packages -q vosk || {
+      echo "vosk pip failed — пейджер будет молчать"
+      return 0
+    }
+  fi
+  if [[ -f "$model/am/final.mdl" || -f "$model/conf/model.conf" ]]; then
+    echo "vosk model already there"
+    return 0
+  fi
+  local zip=/tmp/vosk-model-small-ru-0.22.zip
+  if ! curl -fsSL -o "$zip" "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"; then
+    echo "vosk model download failed — пейджер будет молчать"
+    return 0
+  fi
+  rm -rf "$model" "$APP/vosk-model-small-ru-0.22"
+  unzip -q "$zip" -d "$APP"
+  rm -f "$zip"
+  if [[ -d "$APP/vosk-model-small-ru-0.22" ]]; then
+    mv "$APP/vosk-model-small-ru-0.22" "$model"
+  fi
+  echo "vosk model installed"
+}
+ensure_vosk
+
 if [[ ! -x /usr/local/bin/cloudflared ]]; then
   curl -fsSL -o /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
   chmod 755 /usr/local/bin/cloudflared
@@ -106,6 +134,7 @@ install -m 644 "$unit_bbb" /etc/systemd/system/ssau-bbb.service
 install -m 644 "$unit_tunnel" /etc/systemd/system/ssau-tunnel.service
 install -m 755 "$tunnel_sh" "$APP/tunnel.sh"
 install -m 755 "$audio_sh" "$APP/audio.sh"
+install -m 755 "$wake_py" "$APP/wake.py"
 install -m 644 "$target" /etc/systemd/system/ssau.target
 
 systemctl disable --now ssau-bot.service 2>/dev/null || true
@@ -122,6 +151,8 @@ fi
 
 grep -q '^LECTURE_PAUSE=' "$APP/.env" || echo 'LECTURE_PAUSE=1' >> "$APP/.env"
 grep -q '^CHROME_USER_DATA_DIR=' "$APP/.env" || echo 'CHROME_USER_DATA_DIR=/opt/ssau-bot/chrome' >> "$APP/.env"
+grep -q '^VOSK_MODEL=' "$APP/.env" || echo 'VOSK_MODEL=/opt/ssau-bot/vosk-model' >> "$APP/.env"
+grep -q '^VOSK_SCRIPT=' "$APP/.env" || echo 'VOSK_SCRIPT=/opt/ssau-bot/wake.py' >> "$APP/.env"
 
 bbb_was_active=0
 if systemctl is-active --quiet ssau-bbb.service; then

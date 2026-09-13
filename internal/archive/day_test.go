@@ -41,3 +41,26 @@ func TestShouldHarvest(t *testing.T) {
 		t.Fatal("no lectures")
 	}
 }
+
+func TestNotesDayIsYesterday(t *testing.T) {
+	t.Parallel()
+	loc := time.FixedZone("Samara", 4*3600)
+	justAfter := time.Date(2026, 9, 14, 0, 5, 0, 0, loc)
+	if got := NotesDay(justAfter); got != "2026-09-13" {
+		t.Fatalf("midnight: %s", got)
+	}
+	evening := time.Date(2026, 9, 13, 23, 50, 0, 0, loc)
+	if got := NotesDay(evening); got != "2026-09-12" {
+		t.Fatalf("before midnight still previous day: %s", got)
+	}
+}
+
+func TestShouldNotePack(t *testing.T) {
+	t.Parallel()
+	if ShouldNotePack(model.PackDone) || ShouldNotePack(model.PackRecording) || ShouldNotePack(model.PackError) {
+		t.Fatal("skip done/recording/error")
+	}
+	if !ShouldNotePack(model.PackSlides) || !ShouldNotePack(model.PackRecorded) || !ShouldNotePack(model.PackNotes) {
+		t.Fatal("need notes for slides/recorded/in-progress")
+	}
+}

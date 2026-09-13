@@ -24,4 +24,10 @@ func TestSlugAndRel(t *testing.T) {
 	if Rel("x", 0) != filepath.Join("x", "лекция-1") {
 		t.Fatalf("n<1: %q", Rel("x", 0))
 	}
+	if Label("Матан", 3) != "Матан · лекция 3" {
+		t.Fatalf("label: %q", Label("Матан", 3))
+	}
+	if PDFFileName("Матан", 2) != "Матан-лекция-2.pdf" {
+		t.Fatalf("pdf name: %q", PDFFileName("Матан", 2))
+	}
 }

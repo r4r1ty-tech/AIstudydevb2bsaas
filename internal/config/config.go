@@ -53,6 +53,8 @@ type Config struct {
 	GroqAPIURL       string
 	GroqVisionModel  string
 	GroqSTTModel     string
+	VoskModel        string
+	VoskScript       string
 	Whitelist        []int64
 }
 
@@ -85,6 +87,8 @@ func Load() (*Config, error) {
 		GroqAPIURL:       strEnv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
 		GroqVisionModel:  strEnv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
 		GroqSTTModel:     strEnv("GROQ_STT_MODEL", "whisper-large-v3"),
+		VoskModel:        strEnv("VOSK_MODEL", "/opt/ssau-bot/vosk-model"),
+		VoskScript:       strEnv("VOSK_SCRIPT", "/opt/ssau-bot/wake.py"),
 		Whitelist:        append([]int64(nil), DefaultWhitelist...),
 	}
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {
