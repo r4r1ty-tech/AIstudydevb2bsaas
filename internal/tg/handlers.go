@@ -138,6 +138,10 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 	chatID := ctx.EffectiveMessage.Chat.Id
 
 	if url := extractBBBURL(text); url != "" {
+		if b.peekAwait(from.Id) == awaitTestURL {
+			b.clearAwait(from.Id)
+			return b.armTestURL(chatID, url, "")
+		}
 		b.clearAwait(from.Id)
 		return b.handleBBBURL(from.Id, chatID, url)
 	}
@@ -229,6 +233,13 @@ func (b *Bot) handleAwait(u *model.User, chatID int64, text string, kind awaitKi
 		return b.sendSettings(u, chatID)
 	case awaitTestName:
 		return b.setTestGuestName(chatID, text)
+	case awaitTestURL:
+		url := extractBBBURL(text)
+		if url == "" {
+			return b.send(chatID, askTestURL, nil)
+		}
+		b.clearAwait(u.TelegramID)
+		return b.armTestURL(chatID, url, "")
 	default:
 		b.clearAwait(u.TelegramID)
 		return b.sendMain(chatID, fallbackText)

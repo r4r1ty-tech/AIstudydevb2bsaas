@@ -324,10 +324,10 @@ func formatTestCard(j model.TestJoin) string {
 
 	b.WriteString("Тест BBB\n\nОтдельная комната: ссылка сюда не пишется в пары.\nВ списке зайду как «")
 	b.WriteString(j.GuestName())
-	b.WriteString("».\nИмя: кнопка «Имя» или /test имя …")
+	b.WriteString("».\nСсылка / имя: кнопки ниже или /test <url>")
 	url := strings.TrimSpace(j.URL)
 	if url == "" {
-		b.WriteString("\n\nСсылки нет. Пришли bbb.ssau.ru/b/… или /test <url>")
+		b.WriteString("\n\nСсылки нет. Жми «Ссылка» или пришли bbb.ssau.ru/b/…")
 		return b.String()
 	}
 	b.WriteString("\n\n")
