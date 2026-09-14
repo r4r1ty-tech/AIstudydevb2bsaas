@@ -26,7 +26,22 @@ body {
   justify-content: center;
   padding: 24px;
 }
-.gate-msg { font-size: 20px; font-weight: 600; color: var(--muted); }
+.gate-form {
+  width: min(280px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gate-form input {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font: inherit;
+}
+.gate-err { margin: 0; color: var(--bad); font-size: 13px; }
 
 #app { max-width: 720px; margin: 0 auto; padding: 10px 10px 28px; }
 
@@ -200,5 +215,13 @@ button:disabled { opacity: .55; cursor: wait; }
 .empty { color: var(--muted); padding: 8px 2px; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-
+.actions .act { flex: 1 1 120px; min-height: 40px; }
+button.act.on {
+  background: #14301c;
+  border-color: #2f6f3e;
+  color: var(--ok);
+}
 #btn-refresh { margin-top: 10px; width: 100%; }
+
+#test-blurb { margin: 0 0 10px; }
+#test-status .row-item { margin: 0; padding: 0; border: 0; background: transparent; }

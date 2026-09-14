@@ -89,9 +89,11 @@ func (b *Bot) sendT15Card(u model.User, lesson model.Lesson) error {
 		lesson.SlotLabel(),
 		date,
 	)
-	link, err := b.st.GetBBB(model.BBBKey(b.cfg.GroupID, lesson.Discipline, lesson.Teacher))
-	if err != nil || link == nil || strings.TrimSpace(link.URL) == "" {
+	text += "\n\nСсылка — только на эту пару. Прошлые комнаты того же предмета не беру."
+	if strings.TrimSpace(b.lookupBBB(lesson.ID)) == "" {
 		text += "\n\n" + askBBBLink
+	} else {
+		text += "\nСсылка этой пары уже есть. Другая комната — пришли новый bbb.ssau.ru/b/…"
 	}
 	mk := gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
