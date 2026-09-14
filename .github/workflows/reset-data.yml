@@ -1,0 +1,34 @@
+name: Reset VDS data
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Залить reset-data.sh
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          username: ${{ secrets.VDS_USER || 'root' }}
+          port: ${{ secrets.VDS_PORT || 22 }}
+          key: ${{ secrets.VDS_SSH_KEY }}
+          source: deploy/reset-data.sh
+          target: /tmp
+          strip_components: 1
+          overwrite: true
+
+      - name: Сбросить БД, конспекты и chrome
+        uses: appleboy/ssh-action@v1.2.2
+        with:
+          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          username: ${{ secrets.VDS_USER || 'root' }}
+          port: ${{ secrets.VDS_PORT || 22 }}
+          key: ${{ secrets.VDS_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            chmod +x /tmp/reset-data.sh
+            bash /tmp/reset-data.sh
