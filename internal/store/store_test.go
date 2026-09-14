@@ -475,3 +475,27 @@ func TestLecturePacksNumbering(t *testing.T) {
 		t.Fatalf("recording flag: %v %v", ok, err)
 	}
 }
+
+func TestTestJoinAndAdmin(t *testing.T) {
+	st := openTemp(t)
+	got, err := st.GetTestJoin()
+	if err != nil || got.GuestName() != "тест" {
+		t.Fatalf("empty: %+v %v", got, err)
+	}
+	got.URL = "https://bbb.ssau.ru/b/abc"
+	got.Want = model.TestWantDummy
+	got.Status = model.TestJoining
+	if err := st.PutTestJoin(got); err != nil {
+		t.Fatal(err)
+	}
+	back, err := st.GetTestJoin()
+	if err != nil || back.URL != got.URL || back.Want != model.TestWantDummy || back.Name != "тест" {
+		t.Fatalf("roundtrip: %+v %v", back, err)
+	}
+	if err := st.RememberAdmin(1074442235); err != nil {
+		t.Fatal(err)
+	}
+	if st.RememberedAdmin() != 1074442235 {
+		t.Fatalf("admin %d", st.RememberedAdmin())
+	}
+}
