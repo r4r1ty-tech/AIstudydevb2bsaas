@@ -358,6 +358,78 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, logsResponse{Events: events})
 }
 
+type testJoinPatch struct {
+	URL  string  `json:"url"`
+	Want string  `json:"want"`
+	Name *string `json:"name"`
+}
+
+func (s *Server) handleTestGet(w http.ResponseWriter, r *http.Request) {
+	j, err := s.st.GetTestJoin()
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, j)
+}
+
+func (s *Server) handleTestPost(w http.ResponseWriter, r *http.Request) {
+	var req testJoinPatch
+	if err := decodeJSON(r.Body, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	j, err := s.st.GetTestJoin()
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	if url := strings.TrimSpace(req.URL); url != "" {
+		if !bbbHostOK(url) {
+			writeErr(w, http.StatusBadRequest, "url must be https://bbb.ssau.ru/b/...")
+			return
+		}
+		j.URL = url
+	}
+	if req.Name != nil {
+		j.Name = normalizeTestGuestName(*req.Name)
+	}
+	switch want := strings.TrimSpace(req.Want); want {
+	case model.TestWantDummy, model.TestWantListen:
+		if strings.TrimSpace(j.URL) == "" {
+			writeErr(w, http.StatusBadRequest, "сначала ссылка")
+			return
+		}
+		if j.Want != want || (j.Status != model.TestJoining && j.Status != model.TestLobby && j.Status != model.TestRoom) {
+			j.Want = want
+			j.Status = model.TestJoining
+			j.Message = "захожу"
+		}
+	case "off", "leave":
+		j.Want = model.TestWantOff
+		j.Status = model.TestIdle
+		j.Mode = ""
+		j.Message = "выхожу"
+	}
+	if err := s.st.PutTestJoin(j); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, j)
+}
+
+func normalizeTestGuestName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if name == "" || name == "-" || name == "—" {
+		return model.TestGuestName
+	}
+	runes := []rune(name)
+	if len(runes) > 64 {
+		name = string(runes[:64])
+	}
+	return name
+}
+
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, settingsResponse{
 		GroupID:   s.cfg.GroupID,

@@ -56,7 +56,7 @@
         var el = document.getElementById("hdr-meta");
         el.textContent = (s.group_code || "группа") + " · " + (s.group_id || "") + " · " + (s.timezone || "");
       }
-      showTab("now");
+      showTab("test");
     }).catch(function () {});
   }
 
@@ -412,15 +412,20 @@
     j = j || {};
     var urlEl = document.getElementById("test-url");
     if (urlEl && j.url && !urlEl.value) urlEl.value = j.url;
+    var nameEl = document.getElementById("test-name");
+    if (nameEl && document.activeElement !== nameEl) {
+      nameEl.value = j.name || "тест";
+    }
     var mode = "";
     if (j.want === "listen" || j.mode === "listen") mode = " · слушаю";
     else if (j.want === "dummy" || j.mode === "dummy") mode = " · болванчик";
     var line = (j.message || "") + mode;
+    var guest = (j.name && String(j.name).trim()) || "тест";
     document.getElementById("test-status").innerHTML =
       '<div class="row-item">' + testBadge(j) +
       '<span class="grow">' + esc(line || "кинь ссылку и выбери заход") + "</span></div>" +
       (j.url ? '<div class="muted" style="margin-top:8px">' + esc(j.url) + "</div>" : "") +
-      '<div class="muted" style="margin-top:6px">в списке: ' + esc(j.name || "тест") + "</div>";
+      '<div class="muted" style="margin-top:6px">в списке: ' + esc(guest) + "</div>";
     var inRoom = j.want && (j.status === "joining" || j.status === "lobby" || j.status === "room");
     var dummyBtn = document.getElementById("test-dummy");
     var listenBtn = document.getElementById("test-listen");
@@ -448,10 +453,20 @@
   document.getElementById("test-form").addEventListener("submit", function (ev) {
     ev.preventDefault();
     var url = (document.getElementById("test-url").value || "").trim();
-    api("/api/test", { method: "POST", body: { url: url, want: testWant } })
+    var name = (document.getElementById("test-name").value || "").trim();
+    api("/api/test", { method: "POST", body: { url: url, want: testWant, name: name || "тест" } })
       .then(function (j) {
         renderTest(j);
         toast(testWant === "listen" ? "заход со звуком" : "болванчик");
+      })
+      .catch(function (e) { toast(e.message); });
+  });
+  document.getElementById("test-name").addEventListener("change", function () {
+    var name = (document.getElementById("test-name").value || "").trim();
+    api("/api/test", { method: "POST", body: { name: name || "тест" } })
+      .then(function (j) {
+        renderTest(j);
+        toast("имя: " + ((j && j.name) || "тест"));
       })
       .catch(function (e) { toast(e.message); });
   });

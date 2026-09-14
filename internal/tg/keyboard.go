@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
 func mainKeyboard() gotgbot.ReplyKeyboardMarkup {
@@ -35,6 +37,57 @@ func skipWordsKeyboard() gotgbot.InlineKeyboardMarkup {
 			{Text: "Пропустить", CallbackData: "ob:skipw"},
 		}},
 	}
+}
+
+func (b *Bot) testMarkup(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
+	kb := testKeyboard(j)
+	if b == nil {
+		return kb
+	}
+	url := b.webAppURL()
+	if url == "" {
+		return kb
+	}
+	kb.InlineKeyboard = append(kb.InlineKeyboard, []gotgbot.InlineKeyboardButton{{
+		Text:   "Пульт",
+		WebApp: &gotgbot.WebAppInfo{Url: url},
+	}})
+	return kb
+}
+
+func testAlready(j model.TestJoin, want string) bool {
+	if j.Want != want {
+		return false
+	}
+	switch j.Status {
+	case model.TestJoining, model.TestLobby, model.TestRoom:
+		return true
+	default:
+		return false
+	}
+}
+
+func testKeyboard(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
+	in := j.Want != model.TestWantOff && (j.Status == model.TestJoining || j.Status == model.TestLobby || j.Status == model.TestRoom)
+	nameBtn := gotgbot.InlineKeyboardButton{Text: "Имя", CallbackData: "tx:name"}
+	if !in {
+		return gotgbot.InlineKeyboardMarkup{
+			InlineKeyboard: [][]gotgbot.InlineKeyboardButton{
+				{
+					{Text: "Болванчик", CallbackData: "tx:dummy"},
+					{Text: "Со звуком", CallbackData: "tx:listen"},
+				},
+				{nameBtn},
+			},
+		}
+	}
+	row := []gotgbot.InlineKeyboardButton{{Text: "Выйти", CallbackData: "tx:leave"}}
+	if j.Want == model.TestWantListen {
+		row = append(row, gotgbot.InlineKeyboardButton{Text: "Болванчик", CallbackData: "tx:dummy"})
+	} else {
+		row = append(row, gotgbot.InlineKeyboardButton{Text: "Со звуком", CallbackData: "tx:listen"})
+	}
+	return gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{row, {nameBtn}}}
 }
 
 func t15Keyboard(lessonID int64) gotgbot.InlineKeyboardMarkup {
