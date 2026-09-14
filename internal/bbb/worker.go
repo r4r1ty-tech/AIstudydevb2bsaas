@@ -81,58 +81,72 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func (w *Worker) tick(ctx context.Context) {
 	now := time.Now().In(w.Loc)
+	wanted := make(map[string]struct{})
+
+	type pending struct {
+		u      model.User
+		lesson model.Lesson
+		url    string
+		key    string
+		record bool
+	}
+	var joins []pending
+	needLecture := false
+
 	lessons, err := w.Store.LessonsInJoinWindow(now, JoinEarlyYes)
 	if err != nil {
 		log.Printf("bbb: lessons: %v", err)
-		return
-	}
-	users, err := w.Store.ListUsers()
-	if err != nil {
+	} else if users, err := w.Store.ListUsers(); err != nil {
 		log.Printf("bbb: users: %v", err)
-		return
+	} else {
+		for _, lesson := range lessons {
+			url := strings.TrimSpace(w.Store.GetLessonBBB(lesson.ID))
+			recID := int64(0)
+			if url != "" && model.IsLecture(lesson.Type) {
+				recID = w.pickRecorder(users, lesson, now)
+			}
+			for i := range users {
+				u := users[i]
+				if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
+					continue
+				}
+				intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)
+				if err != nil {
+					continue
+				}
+				if !WantsJoin(intent) {
+					continue
+				}
+				key := sessionKey(u.TelegramID, lesson.ID)
+				if url == "" {
+					w.missingBBB(ctx, u, lesson, key)
+					continue
+				}
+				leave := w.ensureLeave(key, lesson.Finish)
+				if !ShouldBeInRoom(now, EnterAt(lesson.Begin, intent), leave) {
+					w.leave(ctx, u.TelegramID, lesson.ID, key, "time")
+					continue
+				}
+				needLecture = true
+				joins = append(joins, pending{
+					u: u, lesson: lesson, url: url, key: key,
+					record: recID != 0 && u.TelegramID == recID,
+				})
+			}
+		}
 	}
 
-	wanted := make(map[string]struct{})
-	needLecture := false
-	for _, lesson := range lessons {
-		url := strings.TrimSpace(w.Store.GetLessonBBB(lesson.ID))
-		recID := int64(0)
-		if url != "" && model.IsLecture(lesson.Type) {
-			recID = w.pickRecorder(users, lesson, now)
-		}
-		for i := range users {
-			u := users[i]
-			if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
-				continue
-			}
-			intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)
-			if err != nil {
-				continue
-			}
-			if !WantsJoin(intent) {
-				continue
-			}
-			key := sessionKey(u.TelegramID, lesson.ID)
-			if url == "" {
-				w.missingBBB(ctx, u, lesson, key)
-				continue
-			}
-			leave := w.ensureLeave(key, lesson.Finish)
-			if !ShouldBeInRoom(now, EnterAt(lesson.Begin, intent), leave) {
-				w.leave(ctx, u.TelegramID, lesson.ID, key, "time")
-				continue
-			}
-			needLecture = true
-			wanted[key] = struct{}{}
-			w.ensureIn(ctx, u, lesson, url, key, now, recID != 0 && u.TelegramID == recID)
-		}
-	}
-
+	// Тест — отдельная сущность (settings.test_join). Chrome один:
+	// если идёт пара — тест гасим; иначе крутим тест.
 	if needLecture {
-		// Одна chrome-сессия: тестовая комната не должна перебивать пару.
 		w.stopTest(ctx, "lecture", false)
 	} else {
 		w.tickTest(ctx, now, wanted)
+	}
+
+	for _, j := range joins {
+		wanted[j.key] = struct{}{}
+		w.ensureIn(ctx, j.u, j.lesson, j.url, j.key, now, j.record)
 	}
 
 	w.mu.Lock()

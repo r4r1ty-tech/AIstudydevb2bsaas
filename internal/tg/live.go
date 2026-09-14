@@ -62,6 +62,7 @@ func (b *Bot) tickLive() {
 	for _, tgID := range gone {
 		b.clearLiveCard(tgID, "Вышел из комнаты.")
 	}
+	b.syncTestLive()
 }
 
 func (b *Bot) syncLiveCard(p model.Presence, now time.Time) {
@@ -235,3 +236,90 @@ func parseLeaveCallback(data string) (lessonID int64, ok bool) {
 	}
 	return id, true
 }
+
+type testLiveSnap struct {
+	key       string
+	messageID int64
+	chatID    int64
+}
+
+func testLiveKey(j model.TestJoin) string {
+	return j.Status + "|" + strings.TrimSpace(j.URL) + "|" + j.GuestName() + "|" + j.Want + "|" + j.Mode
+}
+
+func (b *Bot) syncTestLive() {
+	if b == nil || b.st == nil || b.cfg == nil {
+		return
+	}
+	admin := b.cfg.AdminID
+	if admin == 0 {
+		return
+	}
+	j, err := b.st.GetTestJoin()
+	if err != nil {
+		return
+	}
+	active := j.Want != model.TestWantOff &&
+		(j.Status == model.TestJoining || j.Status == model.TestLobby || j.Status == model.TestRoom)
+	if !active {
+		b.clearTestLive("Тест: вышел из комнаты.")
+		return
+	}
+	text := formatTestCard(j)
+	mk := b.testMarkup(j)
+	key := testLiveKey(j)
+
+	b.mu.Lock()
+	prev := b.testLive
+	b.mu.Unlock()
+	if prev != nil && prev.messageID != 0 && prev.key == key {
+		return
+	}
+
+	if prev != nil && prev.messageID != 0 {
+		_, _, err := b.api.EditMessageText(&gotgbot.EditMessageTextOpts{
+			ChatId:      prev.chatID,
+			MessageId:   prev.messageID,
+			Text:        text,
+			ReplyMarkup: mk,
+			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
+		})
+		if err == nil {
+			b.rememberTestLive(prev.chatID, prev.messageID, j)
+			return
+		}
+	}
+
+	msg, err := b.api.SendMessage(admin, text, &gotgbot.SendMessageOpts{
+		ReplyMarkup:        mk,
+		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
+	})
+	if err != nil || msg == nil {
+		return
+	}
+	b.rememberTestLive(admin, msg.MessageId, j)
+}
+
+func (b *Bot) rememberTestLive(chatID, messageID int64, j model.TestJoin) {
+	b.mu.Lock()
+	b.testLive = &testLiveSnap{key: testLiveKey(j), messageID: messageID, chatID: chatID}
+	b.mu.Unlock()
+}
+
+func (b *Bot) clearTestLive(text string) {
+	b.mu.Lock()
+	prev := b.testLive
+	b.testLive = nil
+	b.mu.Unlock()
+	if prev == nil || prev.messageID == 0 || text == "" {
+		return
+	}
+	_, _, _ = b.api.EditMessageText(&gotgbot.EditMessageTextOpts{
+		ChatId:      prev.chatID,
+		MessageId:   prev.messageID,
+		Text:        text,
+		ReplyMarkup: gotgbot.InlineKeyboardMarkup{},
+		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
+	})
+}
+

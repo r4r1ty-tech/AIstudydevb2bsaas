@@ -72,7 +72,17 @@ func (b *Bot) sendTestCard(chatID int64) error {
 	if err != nil {
 		return err
 	}
-	return b.send(chatID, formatTestCard(j), &gotgbot.SendMessageOpts{ReplyMarkup: b.testMarkup(j)})
+	msg, err := b.api.SendMessage(chatID, formatTestCard(j), &gotgbot.SendMessageOpts{
+		ReplyMarkup:        b.testMarkup(j),
+		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
+	})
+	if err != nil {
+		return err
+	}
+	if msg != nil {
+		b.rememberTestLive(chatID, msg.MessageId, j)
+	}
+	return nil
 }
 
 func (b *Bot) armTestURL(chatID int64, url, extra string) error {
@@ -93,7 +103,17 @@ func (b *Bot) armTestURL(chatID int64, url, extra string) error {
 	if extra != "" {
 		text = extra + "\n\n" + text
 	}
-	return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: b.testMarkup(j)})
+	msg, err := b.api.SendMessage(chatID, text, &gotgbot.SendMessageOpts{
+		ReplyMarkup:        b.testMarkup(j),
+		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
+	})
+	if err != nil {
+		return err
+	}
+	if msg != nil {
+		b.rememberTestLive(chatID, msg.MessageId, j)
+	}
+	return nil
 }
 
 func (b *Bot) onTestCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -154,7 +174,9 @@ func (b *Bot) onTestCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
 			Text:        formatTestCard(j),
 			ReplyMarkup: b.testMarkup(j),
+			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 		})
+		b.rememberTestLive(from.Id, ctx.CallbackQuery.Message.GetMessageId(), j)
 	}
 	return nil
 }

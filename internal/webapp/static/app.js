@@ -401,48 +401,58 @@
 
   function testBadge(j) {
     var st = (j && j.status) || "idle";
-    if (st === "room") return '<span class="badge ok">в комнате</span>';
-    if (st === "lobby") return '<span class="badge warn">лобби</span>';
-    if (st === "joining") return '<span class="badge acc">захожу</span>';
-    if (st === "error") return '<span class="badge bad">ошибка</span>';
-    return '<span class="badge">не в комнате</span>';
+    if (st === "room") return "в комнате";
+    if (st === "lobby") return "лобби — ждём модератора";
+    if (st === "joining") return "захожу…";
+    if (st === "error") return "ошибка" + (j.message ? ": " + j.message : "");
+    return "не в комнате";
+  }
+
+  function testModeLabel(j) {
+    if (j.want === "listen" || j.mode === "listen") return "со звуком · слушаю";
+    if (j.want === "dummy" || j.mode === "dummy") return "болванчик · без звука";
+    return "—";
+  }
+
+  function testActive(j) {
+    if (!j || !j.want) return false;
+    return j.status === "joining" || j.status === "lobby" || j.status === "room";
   }
 
   function renderTest(j) {
     j = j || {};
+    var active = testActive(j);
+    var setup = document.getElementById("test-setup");
+    var live = document.getElementById("test-live");
+    if (setup) setup.hidden = !!active;
+    if (live) live.hidden = !active;
+
     var urlEl = document.getElementById("test-url");
     if (urlEl && j.url && !urlEl.value) urlEl.value = j.url;
     var nameEl = document.getElementById("test-name");
     if (nameEl && document.activeElement !== nameEl) {
       nameEl.value = j.name || "тест";
     }
-    var mode = "";
-    if (j.want === "listen" || j.mode === "listen") mode = " · слушаю";
-    else if (j.want === "dummy" || j.mode === "dummy") mode = " · болванчик";
-    var line = (j.message || "") + mode;
+
     var guest = (j.name && String(j.name).trim()) || "тест";
-    document.getElementById("test-status").innerHTML =
-      '<div class="row-item">' + testBadge(j) +
-      '<span class="grow">' + esc(line || "кинь ссылку и выбери заход") + "</span></div>" +
-      (j.url ? '<div class="muted" style="margin-top:8px">' + esc(j.url) + "</div>" : "") +
-      '<div class="muted" style="margin-top:6px">в списке: ' + esc(guest) + "</div>";
-    var inRoom = j.want && (j.status === "joining" || j.status === "lobby" || j.status === "room");
-    var dummyBtn = document.getElementById("test-dummy");
-    var listenBtn = document.getElementById("test-listen");
-    var leaveBtn = document.getElementById("test-leave");
-    if (dummyBtn) {
-      dummyBtn.classList.toggle("on", inRoom && j.want === "dummy");
-      dummyBtn.disabled = false;
-    }
-    if (listenBtn) {
-      listenBtn.classList.toggle("on", inRoom && j.want === "listen");
-      listenBtn.disabled = false;
-    }
-    if (leaveBtn) leaveBtn.disabled = !inRoom && j.status !== "error";
+    var set = function (id, text) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = text || "—";
+    };
+    set("live-url", j.url || "—");
+    set("live-name", guest);
+    set("live-status", testBadge(j));
+    set("live-mode", testModeLabel(j));
   }
 
   function loadTest() {
     return api("/api/test").then(renderTest).catch(function (e) { toast(e.message); });
+  }
+
+  function leaveTest() {
+    api("/api/test", { method: "POST", body: { want: "leave" } })
+      .then(function (j) { renderTest(j); toast("выходим"); })
+      .catch(function (e) { toast(e.message); });
   }
 
   var testWant = "dummy";
@@ -454,6 +464,10 @@
     ev.preventDefault();
     var url = (document.getElementById("test-url").value || "").trim();
     var name = (document.getElementById("test-name").value || "").trim();
+    if (!url) {
+      toast("нужна ссылка");
+      return;
+    }
     api("/api/test", { method: "POST", body: { url: url, want: testWant, name: name || "тест" } })
       .then(function (j) {
         renderTest(j);
@@ -470,11 +484,8 @@
       })
       .catch(function (e) { toast(e.message); });
   });
-  document.getElementById("test-leave").addEventListener("click", function () {
-    api("/api/test", { method: "POST", body: { want: "leave" } })
-      .then(function (j) { renderTest(j); toast("выходим"); })
-      .catch(function (e) { toast(e.message); });
-  });
+  var leaveLive = document.getElementById("test-leave-live");
+  if (leaveLive) leaveLive.addEventListener("click", leaveTest);
 
   function stopNowPoll() {
     if (nowTimer) {

@@ -2,9 +2,12 @@ package bbb
 
 import (
 	"context"
+	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
 )
@@ -54,18 +57,16 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 	if url == "" {
 		return
 	}
-	tj.Status = model.TestJoining
-	tj.Message = "захожу"
-	_ = w.Store.PutTestJoin(tj)
-
-	w.hogs().Hold()
 	role := RolePresence
 	if tj.Want == model.TestWantListen {
 		role = RoleRecord
 	}
+	tj.Status = model.TestJoining
+	tj.Message = "захожу"
+	_ = w.Store.PutTestJoin(tj)
+
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: tj.GuestName(), Role: role})
 	if err != nil {
-		w.hogs().Release()
 		tj.Status = model.TestError
 		tj.Mode = ""
 		tj.Message = err.Error()
@@ -76,7 +77,6 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 	if latest, e := w.Store.GetTestJoin(); e == nil {
 		if latest.Want == model.TestWantOff {
 			_ = sess.Close()
-			w.hogs().Release()
 			latest.Status = model.TestIdle
 			latest.Mode = ""
 			latest.Message = "вышел"
@@ -85,10 +85,12 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		}
 		if latest.Want != tj.Want {
 			_ = sess.Close()
-			w.hogs().Release()
 			w.ensureTestN(ctx, latest, now, depth+1)
 			return
 		}
+	}
+	if tj.Want == model.TestWantListen {
+		sess = w.attachTestRecorder(ctx, sess)
 	}
 
 	state := model.TestRoom
@@ -159,7 +161,6 @@ func (w *Worker) stopTest(ctx context.Context, reason string, ping bool) {
 	w.mu.Unlock()
 	if ok && sess != nil {
 		_ = sess.Close()
-		w.hogs().Release()
 	}
 	tj, err := w.Store.GetTestJoin()
 	if err == nil {
@@ -179,4 +180,24 @@ func (w *Worker) stopTest(ctx context.Context, reason string, ping bool) {
 			notify.Admin(ctx, w.Cfg, "тест: вышел из комнаты.")
 		}
 	}
+}
+
+func (w *Worker) attachTestRecorder(ctx context.Context, sess Session) Session {
+	if w == nil || sess == nil {
+		return sess
+	}
+	out := filepath.Join(w.recRoot(), "test", "audio.ogg")
+	rec, err := capture.Start(ctx, out)
+	if err != nil {
+		log.Printf("bbb: test ffmpeg: %v", err)
+		notify.Admin(ctx, w.Cfg, "тест: звук не стартанул — "+err.Error())
+		return sess
+	}
+	users, err := w.Store.ListUsers()
+	if err != nil {
+		users = nil
+	}
+	lesson := model.Lesson{Discipline: "тест"}
+	go w.startSpotter(ctx, rec, lesson, users)
+	return &closeHook{Session: sess, fn: func() { _ = rec.Stop() }}
 }
