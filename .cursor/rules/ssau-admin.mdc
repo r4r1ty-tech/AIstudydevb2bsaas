@@ -1,0 +1,9 @@
+---
+description: SSAU bot admin is Telegram id 1074442235
+alwaysApply: true
+---
+
+# Admin
+
+Telegram admin (Mini App, /panel, /test, тестовый BBB) — всегда `1074442235`.
+Это значение пишется в sqlite `settings.admin_id` при старте процессов и не меняется без явной просьбы.

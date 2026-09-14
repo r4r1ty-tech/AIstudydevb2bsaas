@@ -14,8 +14,8 @@ const (
 	askSub         = "Какая подгруппа? Чужие подгрупповые пары пропускаю."
 	askWords       = "На лекции слушаю короткие слова и пишу тебе, если препод их сказал.\nУже есть: фамилия, «тест», «контрольная», «мудл».\nМожно добавить свои через запятую или пропустить."
 	askWordsNext   = "Напиши свои слова через запятую — например: лаба, зачёт.\n«-» — убрать только свои, базовые останутся."
-	askBBBLink     = "Ещё нет ссылки на комнату. Пришли сюда bbb.ssau.ru/b/… — без неё не зайду."
-	helpText       = "Внизу три кнопки.\n\nПары — что сегодня и зайду ли.\nКонспекты — PDF после полуночи.\nПрофиль — имя в журнале, подгруппа, слова для пинга.\n\nЗа 15 мин до онлайн-пары спрошу. «Зайти за меня» — иду сразу. Молчишь — зайду за 5 мин до звонка, без микрофона.\nСсылку bbb.ssau.ru/b/… достаточно один раз."
+	askBBBLink     = "Ссылка нужна на ЭТУ пару, не на предмет на семестр. Пришли bbb.ssau.ru/b/… — без неё не зайду."
+	helpText       = "Внизу три кнопки.\n\nПары — что сегодня и зайду ли.\nКонспекты — PDF после полуночи.\nПрофиль — имя в журнале, подгруппа, слова для пинга.\n\nЗа 15 мин до онлайн-пары спрошу. «Зайти за меня» — иду сразу. Молчишь — зайду за 5 мин до звонка, без микрофона.\nСсылку bbb.ssau.ru/b/… кинь перед каждой парой — привяжу только к этой."
 	fallbackText   = "Не понял. Внизу три кнопки: Пары, Конспекты, Профиль."
 	noBBBTarget    = "Не понял, к какой паре ссылка. Открой Профиль → Комнаты BBB или пришли bbb.ssau.ru/b/… ближе к паре."
 	notesEmpty     = "Готовых конспектов пока нет.\nНа лекции пишу звук, PDF собираю после полуночи — кнопка появится здесь."
@@ -128,9 +128,12 @@ func formatT15Card(l model.Lesson, now time.Time, loc *time.Location, hasLink bo
 	b.WriteString("\n\n")
 	b.WriteString(formatLessonHead(l, loc))
 	b.WriteString("\n\nЗайти за тебя? Если не ответишь — зайду за 5 минут до звонка.\nБез микрофона, имя в списке как в журнале.")
+	b.WriteString("\n\nСсылка — только на эту пару. Прошлые комнаты того же предмета не беру.")
 	if !hasLink {
-		b.WriteString("\n\n")
+		b.WriteString("\n")
 		b.WriteString(askBBBLink)
+	} else {
+		b.WriteString("\nСсылка этой пары уже есть. Другая комната — пришли новый bbb.ssau.ru/b/…")
 	}
 	return b.String()
 }
@@ -166,11 +169,18 @@ func formatSkipAck(l *model.Lesson, loc *time.Location) string {
 	return b.String()
 }
 
-func formatSavedLink(discipline string) string {
-	if strings.TrimSpace(discipline) == "" {
-		return "Запомнил ссылку на комнату."
+func formatSavedLink(l model.Lesson) string {
+	title := strings.TrimSpace(l.Discipline)
+	if title == "" {
+		title = "паре"
+	} else {
+		title = "«" + title + "»"
 	}
-	return fmt.Sprintf("Запомнил комнату для «%s». В следующий раз зайду сам.", discipline)
+	stamp := strings.TrimSpace(l.SlotLabel() + " " + l.Date)
+	if stamp == "–" || stamp == "" {
+		return "Привязал ссылку к этой паре. На следующую сам не перенесу — кинь заново."
+	}
+	return fmt.Sprintf("Привязал ссылку к %s %s.\nНа другую пару этот URL не пойдёт — перед следующей кинь заново.", title, stamp)
 }
 
 type todayRow struct {

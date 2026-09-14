@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,12 +93,9 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 
 	wanted := make(map[string]struct{})
+	needLecture := false
 	for _, lesson := range lessons {
-		link, err := w.Store.GetBBB(model.BBBKey(w.Cfg.GroupID, lesson.Discipline, lesson.Teacher))
-		url := ""
-		if err == nil && link != nil {
-			url = link.URL
-		}
+		url := strings.TrimSpace(w.Store.GetLessonBBB(lesson.ID))
 		recID := int64(0)
 		if url != "" && model.IsLecture(lesson.Type) {
 			recID = w.pickRecorder(users, lesson, now)
@@ -124,9 +122,17 @@ func (w *Worker) tick(ctx context.Context) {
 				w.leave(ctx, u.TelegramID, lesson.ID, key, "time")
 				continue
 			}
+			needLecture = true
 			wanted[key] = struct{}{}
 			w.ensureIn(ctx, u, lesson, url, key, now, recID != 0 && u.TelegramID == recID)
 		}
+	}
+
+	if needLecture {
+		// Одна chrome-сессия: тестовая комната не должна перебивать пару.
+		w.stopTest(ctx, "lecture", false)
+	} else {
+		w.tickTest(ctx, now, wanted)
 	}
 
 	w.mu.Lock()
@@ -138,6 +144,10 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 	w.mu.Unlock()
 	for _, key := range extra {
+		if key == testSessionKey {
+			w.stopTest(ctx, "idle", false)
+			continue
+		}
 		tgID, lessonID := splitKey(key)
 		w.leave(ctx, tgID, lessonID, key, "slot over")
 	}

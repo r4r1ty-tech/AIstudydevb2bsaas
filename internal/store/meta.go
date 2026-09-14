@@ -10,6 +10,24 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
+func (s *Store) GetLessonBBB(lessonID int64) string {
+	if s == nil || lessonID <= 0 {
+		return ""
+	}
+	b, err := s.GetBBB(model.BBBLessonKey(lessonID))
+	if err != nil || b == nil {
+		return ""
+	}
+	return strings.TrimSpace(b.URL)
+}
+
+func (s *Store) SetLessonBBB(lessonID int64, url string) error {
+	if lessonID <= 0 {
+		return fmt.Errorf("store: lesson bbb: empty lesson id")
+	}
+	return s.SetBBB(model.BBBLessonKey(lessonID), strings.TrimSpace(url))
+}
+
 func (s *Store) GetBBB(key string) (*model.BBBLink, error) {
 	b, err := scanBBB(s.db.QueryRow(`SELECT key, url, updated_at FROM bbb_links WHERE key = ?`, key))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -221,6 +239,34 @@ func (s *Store) ClearPresence(telegramID int64) error {
 		return fmt.Errorf("store: clear presence: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) GetPresence(telegramID int64) (*model.Presence, error) {
+	if telegramID == 0 {
+		return nil, nil
+	}
+	var p model.Presence
+	var state, msg, updated sql.NullString
+	err := s.db.QueryRow(
+		`SELECT telegram_id, lesson_id, state, message, updated_at FROM presence WHERE telegram_id = ?`,
+		telegramID,
+	).Scan(&p.TelegramID, &p.LessonID, &state, &msg, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get presence: %w", err)
+	}
+	p.State = nullStr(state)
+	p.Message = nullStr(msg)
+	if updated.Valid && updated.String != "" {
+		t, err := parseTime(updated.String)
+		if err != nil {
+			return nil, fmt.Errorf("store: parse presence.updated_at: %w", err)
+		}
+		p.UpdatedAt = t
+	}
+	return &p, nil
 }
 
 func (s *Store) ListPresence() ([]model.Presence, error) {

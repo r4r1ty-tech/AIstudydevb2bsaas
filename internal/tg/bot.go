@@ -37,6 +37,7 @@ type Bot struct {
 	t15Mu    sync.Mutex
 	lastT15  map[int64]int64 // telegram id → last T-15 lesson id
 	awaiting map[int64]awaitKind
+	live     map[int64]liveSnap
 }
 
 func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) {
@@ -75,6 +76,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 		updater:  updater,
 		lastT15:  make(map[int64]int64),
 		awaiting: make(map[int64]awaitKind),
+		live:     make(map[int64]liveSnap),
 	}
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
@@ -87,6 +89,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	dispatcher.AddHandler(handlers.NewCommand("link", b.onLink))
 	dispatcher.AddHandler(handlers.NewCommand("links", b.onLink))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("j:"), b.onJoinCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("x:"), b.onLeaveCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("ob:"), b.onOnboardCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("st:"), b.onSettingsCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("nt:"), b.onNotesCallback))
@@ -120,6 +123,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	t15Ctx, cancelT15 := context.WithCancel(ctx)
 	defer cancelT15()
 	go b.t15Loop(t15Ctx)
+	go b.liveLoop(t15Ctx)
 
 	<-ctx.Done()
 	cancelT15()

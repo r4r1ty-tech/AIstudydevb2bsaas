@@ -5,7 +5,7 @@
   var gate = document.getElementById("gate");
   var app = document.getElementById("app");
   var toastEl = document.getElementById("toast");
-  var currentTab = "now";
+  var currentTab = "test";
   var nowTimer = null;
   var toastT = null;
   var booted = false;
@@ -289,9 +289,15 @@
       bb.innerHTML = '<p class="empty">ссылок нет</p>';
     } else {
       bb.innerHTML = bbb.map(function (b) {
+        var key = b.key || "";
+        var parts = key.split("|");
+        var label = key;
+        if (parts.length >= 3) {
+          label = parts[1] + (parts[2] ? " · " + parts[2] : "");
+        }
         return (
           '<div class="row-item">' +
-            '<span class="mono grow">' + esc(b.key) + "</span>" +
+            '<span class="grow">' + esc(label) + "</span>" +
             '<a href="' + esc(b.url) + '">' + esc(b.url) + "</a>" +
           "</div>"
         );
@@ -393,6 +399,68 @@
     return api("/api/logs?limit=200").then(renderLogs).catch(function (e) { toast(e.message); });
   }
 
+  function testBadge(j) {
+    var st = (j && j.status) || "idle";
+    if (st === "room") return '<span class="badge ok">в комнате</span>';
+    if (st === "lobby") return '<span class="badge warn">лобби</span>';
+    if (st === "joining") return '<span class="badge acc">захожу</span>';
+    if (st === "error") return '<span class="badge bad">ошибка</span>';
+    return '<span class="badge">не в комнате</span>';
+  }
+
+  function renderTest(j) {
+    j = j || {};
+    var urlEl = document.getElementById("test-url");
+    if (urlEl && j.url && !urlEl.value) urlEl.value = j.url;
+    var mode = "";
+    if (j.want === "listen" || j.mode === "listen") mode = " · слушаю";
+    else if (j.want === "dummy" || j.mode === "dummy") mode = " · болванчик";
+    var line = (j.message || "") + mode;
+    document.getElementById("test-status").innerHTML =
+      '<div class="row-item">' + testBadge(j) +
+      '<span class="grow">' + esc(line || "кинь ссылку и выбери заход") + "</span></div>" +
+      (j.url ? '<div class="muted" style="margin-top:8px">' + esc(j.url) + "</div>" : "") +
+      '<div class="muted" style="margin-top:6px">в списке: ' + esc(j.name || "тест") + "</div>";
+    var inRoom = j.want && (j.status === "joining" || j.status === "lobby" || j.status === "room");
+    var dummyBtn = document.getElementById("test-dummy");
+    var listenBtn = document.getElementById("test-listen");
+    var leaveBtn = document.getElementById("test-leave");
+    if (dummyBtn) {
+      dummyBtn.classList.toggle("on", inRoom && j.want === "dummy");
+      dummyBtn.disabled = false;
+    }
+    if (listenBtn) {
+      listenBtn.classList.toggle("on", inRoom && j.want === "listen");
+      listenBtn.disabled = false;
+    }
+    if (leaveBtn) leaveBtn.disabled = !inRoom && j.status !== "error";
+  }
+
+  function loadTest() {
+    return api("/api/test").then(renderTest).catch(function (e) { toast(e.message); });
+  }
+
+  var testWant = "dummy";
+  document.getElementById("test-form").addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-want]");
+    if (b) testWant = b.getAttribute("data-want");
+  });
+  document.getElementById("test-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var url = (document.getElementById("test-url").value || "").trim();
+    api("/api/test", { method: "POST", body: { url: url, want: testWant } })
+      .then(function (j) {
+        renderTest(j);
+        toast(testWant === "listen" ? "заход со звуком" : "болванчик");
+      })
+      .catch(function (e) { toast(e.message); });
+  });
+  document.getElementById("test-leave").addEventListener("click", function () {
+    api("/api/test", { method: "POST", body: { want: "leave" } })
+      .then(function (j) { renderTest(j); toast("выходим"); })
+      .catch(function (e) { toast(e.message); });
+  });
+
   function stopNowPoll() {
     if (nowTimer) {
       clearInterval(nowTimer);
@@ -402,12 +470,13 @@
 
   function startNowPoll() {
     stopNowPoll();
-    loadNow();
+    if (currentTab === "now") loadNow();
+    if (currentTab === "test") loadTest();
     nowTimer = setInterval(function () {
-      if (currentTab === "now" && document.visibilityState === "visible") {
-        loadNow();
-      }
-    }, 7000);
+      if (document.visibilityState !== "visible") return;
+      if (currentTab === "now") loadNow();
+      if (currentTab === "test") loadTest();
+    }, 4000);
   }
 
   function showTab(name) {
@@ -418,7 +487,7 @@
     document.querySelectorAll("section.tab").forEach(function (sec) {
       sec.hidden = sec.getAttribute("data-panel") !== name;
     });
-    if (name === "now") startNowPoll();
+    if (name === "now" || name === "test") startNowPoll();
     else {
       stopNowPoll();
       if (name === "people") loadPeople();
@@ -426,6 +495,7 @@
       if (name === "parser") loadParser();
       if (name === "logs") loadLogs();
     }
+    if (name === "test") loadTest();
   }
 
   document.querySelector(".tabs").addEventListener("click", function (ev) {
@@ -436,6 +506,7 @@
 
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "visible" && currentTab === "now") loadNow();
+    if (document.visibilityState === "visible" && currentTab === "test") loadTest();
   });
 
   document.getElementById("login-form").addEventListener("submit", function (ev) {

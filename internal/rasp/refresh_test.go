@@ -31,6 +31,23 @@ func TestExtractSelectedWeek(t *testing.T) {
 	}
 }
 
+func TestExtractSSAUCurrentWeekNavSunday(t *testing.T) {
+	html := []byte(`<div class="week-nav">
+<a href="/rasp?groupId=1&selectedWeek=2&selectedWeekday=1" class="week-nav-prev"><span>2 неделя</span></a>
+<div class="week-nav-current"><span class="h3-text week-nav-current_week">3 неделя</span>
+<div class="week-nav-current_date">13.09.2026</div></div>
+<a href="/rasp?groupId=1&selectedWeek=4&selectedWeekday=1" class="week-nav-next"><span>4 неделя</span></a>
+</div>`)
+	n, ok := extractSelectedWeek(html)
+	if !ok || n != 3 {
+		t.Fatalf("current week = %d %v, want 3", n, ok)
+	}
+	next, ok := extractNextWeek(html)
+	if !ok || next != 4 {
+		t.Fatalf("next week = %d %v, want 4", next, ok)
+	}
+}
+
 func TestRefreshSuccessAndDiff(t *testing.T) {
 	html := fixtureHTML(t)
 	st, err := store.Open(filepath.Join(t.TempDir(), "bot.db"))
@@ -173,5 +190,75 @@ func TestStartCronFiresOncePerMinute(t *testing.T) {
 	}
 	if calls > 2 {
 		t.Fatalf("expected one fire this minute, got %d fetches (week0+maybe week+1)", calls)
+	}
+}
+
+func TestKeepFutureLessons(t *testing.T) {
+	parsed := []model.Lesson{{Date: "2026-09-13", Start: "08:00", Discipline: "A"}}
+	old := []model.Lesson{
+		{Date: "2026-09-12", Start: "08:00", Discipline: "gone"},
+		{Date: "2026-09-13", Start: "08:00", Discipline: "A"},
+		{Date: "2026-09-14", Start: "09:45", Discipline: "B"},
+	}
+	got := keepFutureLessons(parsed, old)
+	if len(got) != 2 {
+		t.Fatalf("got %d: %+v", len(got), got)
+	}
+	var hasB bool
+	for _, l := range got {
+		if l.Discipline == "B" {
+			hasB = true
+		}
+		if l.Discipline == "gone" {
+			t.Fatal("kept past week leftover")
+		}
+	}
+	if !hasB {
+		t.Fatal("dropped next-week lesson")
+	}
+}
+
+func TestRefreshKeepsFutureWhenNextWeekUnknown(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	loc := time.FixedZone("Europe/Samara", 4*3600)
+	future := model.Lesson{
+		Date: "2026-09-20", Start: "09:45", End: "11:20",
+		Begin: time.Date(2026, 9, 20, 5, 45, 0, 0, time.UTC), Finish: time.Date(2026, 9, 20, 7, 20, 0, 0, time.UTC),
+		Discipline: "Статистика", Teacher: "К", Place: "online", Online: true,
+	}
+	if err := st.ReplaceLessons([]model.Lesson{future}); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := fetchSchedule
+	fetchSchedule = func(ctx context.Context, groupID int64, week int) ([]byte, int, error) {
+		if week != 0 {
+			t.Errorf("should not fetch week %d without nav", week)
+		}
+		return fixtureHTML(t), 200, nil
+	}
+	t.Cleanup(func() { fetchSchedule = prev })
+
+	r := &Refresher{Store: st, GroupID: 1, Loc: loc}
+	run, err := r.Refresh(context.Background())
+	if err != nil || !run.OK {
+		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	got, err := st.ListLessons()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept bool
+	for _, l := range got {
+		if l.Date == "2026-09-20" && l.Discipline == "Статистика" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatalf("next week dropped: %+v", got)
 	}
 }

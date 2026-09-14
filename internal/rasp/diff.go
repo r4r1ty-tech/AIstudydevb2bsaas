@@ -3,36 +3,19 @@ package rasp
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-func lessonIdentity(l model.Lesson) string {
-	online := "false"
-	if l.Online {
-		online = "true"
-	}
-	return strings.Join([]string{
-		l.Date,
-		l.Start,
-		l.Discipline,
-		l.Teacher,
-		l.Place,
-		strconv.Itoa(l.Subgroup),
-		online,
-	}, "|")
-}
-
 func Diff(old, new []model.Lesson) string {
 	oldSet := make(map[string]model.Lesson, len(old))
 	newSet := make(map[string]model.Lesson, len(new))
 	for _, l := range old {
-		oldSet[lessonIdentity(l)] = l
+		oldSet[l.Identity()] = l
 	}
 	for _, l := range new {
-		newSet[lessonIdentity(l)] = l
+		newSet[l.Identity()] = l
 	}
 
 	var removed, added []string
@@ -68,7 +51,7 @@ func mergeLessons(weeks ...[]model.Lesson) []model.Lesson {
 	var out []model.Lesson
 	for _, week := range weeks {
 		for _, l := range week {
-			id := lessonIdentity(l)
+			id := l.Identity()
 			if _, ok := seen[id]; ok {
 				continue
 			}
