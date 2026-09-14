@@ -93,12 +93,43 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		sess = w.attachTestRecorder(ctx, sess)
 	}
 
+	lobby, err := sess.InLobby(ctx)
+	if err != nil {
+		_ = sess.Close()
+		tj.Status = model.TestError
+		tj.Mode = ""
+		tj.Message = err.Error()
+		_ = w.Store.PutTestJoin(tj)
+		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+err.Error())
+		return
+	}
+	room, err := sess.InRoom(ctx)
+	if err != nil {
+		_ = sess.Close()
+		tj.Status = model.TestError
+		tj.Mode = ""
+		tj.Message = err.Error()
+		_ = w.Store.PutTestJoin(tj)
+		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+err.Error())
+		return
+	}
+	if !lobby && !room {
+		_ = sess.Close()
+		tj.Status = model.TestError
+		tj.Mode = ""
+		tj.Message = "страница не комната и не лобби"
+		_ = w.Store.PutTestJoin(tj)
+		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — страница не комната и не лобби")
+		return
+	}
+
 	state := model.TestRoom
 	msg := "в комнате"
-	if lobby, _ := sess.InLobby(ctx); lobby {
+	if lobby {
 		state = model.TestLobby
 		msg = "лобби, жду модератора"
 	}
+	w.hogs().Hold()
 	w.mu.Lock()
 	w.sessions[testSessionKey] = sess
 	if state == model.TestLobby {
@@ -133,6 +164,12 @@ func (w *Worker) watchTest(ctx context.Context, sess Session, tj model.TestJoin,
 	}
 	lobby, err := sess.InLobby(ctx)
 	if err != nil {
+		w.stopTest(ctx, "dead", true)
+		return
+	}
+	room, err := sess.InRoom(ctx)
+	if err != nil || (!lobby && !room) {
+		w.stopTest(ctx, "dead", true)
 		return
 	}
 	if lobby {
@@ -161,6 +198,7 @@ func (w *Worker) stopTest(ctx context.Context, reason string, ping bool) {
 	w.mu.Unlock()
 	if ok && sess != nil {
 		_ = sess.Close()
+		w.hogs().Release()
 	}
 	tj, err := w.Store.GetTestJoin()
 	if err == nil {

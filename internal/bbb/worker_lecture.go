@@ -193,15 +193,17 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 			}
 		}
 	}
-	w.hogs().Hold()
-	defer w.hogs().Release()
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: p.BBBURL, FIO: fio, Role: RoleSlides})
 	if err != nil {
 		log.Printf("bbb: slides join %s/%d: %v", p.Discipline, p.Number, err)
 		return
 	}
+	w.hogs().Hold()
+	defer func() {
+		_ = sess.Close()
+		w.hogs().Release()
+	}()
 	n, err := sess.GrabSlides(ctx, archive.SlidesDir(filepath.Join(w.recRoot(), p.Dir)))
-	_ = sess.Close()
 	if err != nil {
 		log.Printf("bbb: slides grab %s/%d: %v", p.Discipline, p.Number, err)
 	}
