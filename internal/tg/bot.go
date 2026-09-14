@@ -24,6 +24,7 @@ const (
 	awaitNone awaitKind = iota
 	awaitFIO
 	awaitWords
+	awaitTestName
 )
 
 type Bot struct {
@@ -81,6 +82,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
+	dispatcher.AddHandler(handlers.NewCommand("test", b.onTest))
 	dispatcher.AddHandler(handlers.NewCommand("help", b.onHelp))
 	dispatcher.AddHandler(handlers.NewCommand("today", b.onToday))
 	dispatcher.AddHandler(handlers.NewCommand("notes", b.onNotes))
@@ -92,6 +94,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("x:"), b.onLeaveCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("ob:"), b.onOnboardCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("st:"), b.onSettingsCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("tx:"), b.onTestCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("nt:"), b.onNotesCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
@@ -188,10 +191,10 @@ func (b *Bot) publishProfile() {
 		log.Printf("tg: setMyCommands: %v", err)
 	}
 	if admin := b.cfg.AdminID; admin != 0 {
-		adminCmds := append(append([]gotgbot.BotCommand{}, cmds...), gotgbot.BotCommand{
-			Command:     "panel",
-			Description: "Админ-панель",
-		})
+		adminCmds := append(append([]gotgbot.BotCommand{}, cmds...),
+			gotgbot.BotCommand{Command: "test", Description: "Тест BBB: ссылка, болванчик, звук"},
+			gotgbot.BotCommand{Command: "panel", Description: "Админ-панель"},
+		)
 		if _, err := b.api.SetMyCommands(adminCmds, &gotgbot.SetMyCommandsOpts{
 			Scope: gotgbot.BotCommandScopeChat{ChatId: admin},
 		}); err != nil {

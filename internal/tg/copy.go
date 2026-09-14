@@ -18,6 +18,8 @@ const (
 	helpText       = "Внизу три кнопки.\n\nПары — что сегодня и зайду ли.\nКонспекты — PDF после полуночи.\nПрофиль — имя в журнале, подгруппа, слова для пинга.\n\nЗа 15 мин до онлайн-пары спрошу. «Зайти за меня» — иду сразу. Молчишь — зайду за 5 мин до звонка, без микрофона.\nСсылку bbb.ssau.ru/b/… кинь перед каждой парой — привяжу только к этой."
 	fallbackText   = "Не понял. Внизу три кнопки: Пары, Конспекты, Профиль."
 	noBBBTarget    = "Не понял, к какой паре ссылка. Открой Профиль → Комнаты BBB или пришли bbb.ssau.ru/b/… ближе к паре."
+	testNeedURL    = "Кинь ссылку bbb.ssau.ru/b/… — сразу покажу кнопки захода."
+	testWorkerHint = "Воркер BBB подхватит за несколько секунд. Если молчит — ssau-bbb не запущен."
 	notesEmpty     = "Готовых конспектов пока нет.\nНа лекции пишу звук, PDF собираю после полуночи — кнопка появится здесь."
 	notesHint      = "Готовый PDF — кнопкой под сообщением."
 	botShortDesc   = "Захожу на онлайн-пары СГАУ вместо тебя"
@@ -287,6 +289,48 @@ func formatLinkList(upcoming []string, saved []string) string {
 		b.WriteString(strings.Join(saved, "\n"))
 	}
 	return b.String()
+}
+
+func formatTestCard(j model.TestJoin) string {
+	var b strings.Builder
+	b.WriteString("Тест BBB\n\nВ списке зайду как «")
+	b.WriteString(j.GuestName())
+	b.WriteString("».\nБолванчик — просто сидеть, без звука.\nСо звуком — слушать и ловить вейкворды.\nИмя: кнопка «Имя» или /test имя …")
+	url := strings.TrimSpace(j.URL)
+	if url == "" {
+		b.WriteString("\n\nСсылки нет. Пришли bbb.ssau.ru/b/…")
+		return b.String()
+	}
+	b.WriteString("\n\n")
+	b.WriteString(url)
+	b.WriteString("\n\nСейчас: ")
+	b.WriteString(testStatusLine(j))
+	if j.Status == model.TestJoining {
+		b.WriteString("\n")
+		b.WriteString(testWorkerHint)
+	}
+	return b.String()
+}
+
+func testStatusLine(j model.TestJoin) string {
+	switch j.Status {
+	case model.TestJoining:
+		return "захожу…"
+	case model.TestLobby:
+		return "лобби, жду модератора"
+	case model.TestRoom:
+		if j.Want == model.TestWantListen || j.Mode == model.TestWantListen {
+			return "в комнате · слушаю"
+		}
+		return "в комнате · болванчик"
+	case model.TestError:
+		if j.Message != "" {
+			return "ошибка: " + j.Message
+		}
+		return "ошибка захода"
+	default:
+		return "не в комнате"
+	}
 }
 
 func packDay(date string) string {

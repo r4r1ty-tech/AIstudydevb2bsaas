@@ -227,6 +227,8 @@ func (b *Bot) handleAwait(u *model.User, chatID int64, text string, kind awaitKi
 		b.clearAwait(u.TelegramID)
 		u.ExtraWords = words
 		return b.sendSettings(u, chatID)
+	case awaitTestName:
+		return b.setTestGuestName(chatID, text)
 	default:
 		b.clearAwait(u.TelegramID)
 		return b.sendMain(chatID, fallbackText)
