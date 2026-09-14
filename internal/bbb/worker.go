@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,12 +81,9 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 
 	wanted := make(map[string]struct{})
+	needLecture := false
 	for _, lesson := range lessons {
-		link, err := w.Store.GetBBB(model.BBBKey(w.Cfg.GroupID, lesson.Discipline, lesson.Teacher))
-		url := ""
-		if err == nil && link != nil {
-			url = link.URL
-		}
+		url := strings.TrimSpace(w.Store.GetLessonBBB(lesson.ID))
 		for i := range users {
 			u := users[i]
 			if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
@@ -108,9 +106,17 @@ func (w *Worker) tick(ctx context.Context) {
 				w.leave(ctx, u.TelegramID, lesson.ID, key, "time")
 				continue
 			}
+			needLecture = true
 			wanted[key] = struct{}{}
 			w.ensureIn(ctx, u, lesson, url, key, now)
 		}
+	}
+
+	if needLecture {
+		// Одна chrome-сессия: тестовая комната не должна перебивать пару.
+		w.stopTest(ctx, "lecture", false)
+	} else {
+		w.tickTest(ctx, now, wanted)
 	}
 
 	w.mu.Lock()
@@ -122,6 +128,10 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 	w.mu.Unlock()
 	for _, key := range extra {
+		if key == testSessionKey {
+			w.stopTest(ctx, "idle", false)
+			continue
+		}
 		tgID, lessonID := splitKey(key)
 		w.leave(ctx, tgID, lessonID, key, "slot over")
 	}
@@ -211,7 +221,14 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		return
 	}
 	lobby, err := sess.InLobby(ctx)
-	if err != nil || !lobby {
+	if err != nil {
+		return
+	}
+	if !lobby {
+		_ = w.Store.SetPresence(model.Presence{
+			TelegramID: u.TelegramID, LessonID: lesson.ID,
+			State: model.PresenceRoom, Message: "in room", UpdatedAt: now,
+		})
 		return
 	}
 	_ = w.Store.SetPresence(model.Presence{

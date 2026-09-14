@@ -18,7 +18,7 @@ const (
 	askFIO      = "Как тебя записать в BBB? Строка как в журнале (Фамилия Имя Отчество)."
 	askSub      = "Какая подгруппа? 1 или 2, по умолчанию 1."
 	whitelisted = "Ты в вайтлисте, профиль есть."
-	askBBBLink  = "Кинь ссылку на подключение (bbb.ssau.ru/b/…). Без неё не зайду."
+	askBBBLink  = "Ссылка нужна на ЭТУ пару, не на предмет на семестр. Пришли bbb.ssau.ru/b/… — без неё не зайду. Тестовую комнату сюда не кидай: только /test."
 )
 
 func (b *Bot) onStart(_ *gotgbot.Bot, ctx *ext.Context) error {
@@ -174,10 +174,10 @@ func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
 	}
 	lesson := b.pickBBBTarget(u, b.now())
 	if lesson == nil {
-		return nil
+		return b.send(chatID, "Не понял, к какой паре ссылка. Пришли bbb.ssau.ru/b/… ближе к паре или после карточки за 15 мин.", nil)
 	}
-	key := model.BBBKey(b.cfg.GroupID, lesson.Discipline, lesson.Teacher)
-	if err := b.st.SetBBB(key, url); err != nil {
+	// Только lesson:{id}. Старые ключи «предмет на семестр» воркер больше не читает.
+	if err := b.st.SetLessonBBB(lesson.ID, url); err != nil {
 		return err
 	}
 	if err := b.st.AddEvent(model.Event{
@@ -189,7 +189,17 @@ func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
 	}); err != nil {
 		return err
 	}
-	return b.send(chatID, fmt.Sprintf("запомнил ссылку на %s", lesson.Discipline), nil)
+	return b.send(chatID, fmt.Sprintf(
+		"Привязал ссылку к «%s» %s %s.\nНа другую пару этот URL не пойдёт — перед следующей кинь заново.",
+		lesson.Discipline, lesson.SlotLabel(), lesson.Date,
+	), nil)
+}
+
+func (b *Bot) lookupBBB(lessonID int64) string {
+	if b == nil || b.st == nil {
+		return ""
+	}
+	return b.st.GetLessonBBB(lessonID)
 }
 
 func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
@@ -197,9 +207,14 @@ func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
 	if err != nil {
 		lessons = nil
 	}
-	hasLink := func(discipline, teacher string) bool {
-		link, err := b.st.GetBBB(model.BBBKey(b.cfg.GroupID, discipline, teacher))
-		return err == nil && link != nil && strings.TrimSpace(link.URL) != ""
+	// Ответ на T-15 привязываем к той паре, пока она не закончилась.
+	if lid := b.lastT15Lesson(u.TelegramID); lid != 0 {
+		if l, err := b.st.LessonByID(lid); err == nil && l != nil && !now.After(l.Finish) {
+			return l
+		}
+	}
+	hasLink := func(lessonID int64) bool {
+		return strings.TrimSpace(b.lookupBBB(lessonID)) != ""
 	}
 	intents := make(map[int64]time.Time)
 	for _, l := range lessons {
@@ -213,15 +228,48 @@ func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
 			intents[lid] = now
 		}
 	}
-	if got := pickLessonForBBB(now, u.Subgroup, lessons, hasLink, intents); got != nil {
-		return got
+	return pickLessonForBBB(now, u.Subgroup, lessons, hasLink, intents)
+}
+
+func (b *Bot) onLeaveCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
+	from := b.allowed(ctx)
+	if from == nil || ctx.CallbackQuery == nil {
+		return nil
 	}
-	if lid := b.lastT15Lesson(u.TelegramID); lid != 0 {
-		l, err := b.st.LessonByID(lid)
-		if err == nil && l != nil {
-			return l
-		}
+	lessonID, ok := parseLeaveCallback(ctx.CallbackQuery.Data)
+	if !ok {
+		_, _ = ctx.CallbackQuery.Answer(bot, nil)
+		return nil
 	}
+	now := b.now()
+	err := b.st.SetIntentDecision(from.Id, lessonID, model.JoinNo)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = b.st.PutIntent(model.JoinIntent{
+			TelegramID: from.Id,
+			LessonID:   lessonID,
+			Decision:   model.JoinNo,
+			AskedAt:    now,
+			DecidedAt:  &now,
+		})
+	}
+	if err != nil {
+		_, _ = ctx.CallbackQuery.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: "не вышло", ShowAlert: true})
+		return err
+	}
+	_ = b.st.AddEvent(model.Event{
+		At: now, Type: model.EventLeave,
+		TelegramID: from.Id, LessonID: lessonID, Message: "кнопка",
+	})
+	_, _ = ctx.CallbackQuery.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: "выхожу"})
+	if ctx.CallbackQuery.Message != nil {
+		_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+			Text:        "Выхожу из комнаты… Через несколько секунд отключусь.",
+			ReplyMarkup: gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{}},
+		})
+	}
+	b.mu.Lock()
+	delete(b.live, from.Id)
+	b.mu.Unlock()
 	return nil
 }
 

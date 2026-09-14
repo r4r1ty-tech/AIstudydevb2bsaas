@@ -8,8 +8,12 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-  <div id="gate" class="gate" hidden>
-    <p class="gate-msg">Открой из бота</p>
+  <div id="gate" class="gate">
+    <form id="login-form" class="gate-form">
+      <input id="pw" type="password" name="password" autocomplete="current-password" placeholder="пароль" required>
+      <button type="submit">войти</button>
+      <p id="gate-msg" class="gate-err" hidden></p>
+    </form>
   </div>
   <div id="app" hidden>
     <header class="top">
@@ -20,14 +24,29 @@
       <span id="poll-st" class="muted">—</span>
     </header>
     <nav class="tabs" role="tablist">
-      <button type="button" data-tab="now" class="active">Сейчас</button>
+      <button type="button" data-tab="test" class="active">Тест</button>
+      <button type="button" data-tab="now">Сейчас</button>
       <button type="button" data-tab="people">Люди</button>
       <button type="button" data-tab="lessons">Пары</button>
       <button type="button" data-tab="parser">Парсер</button>
       <button type="button" data-tab="logs">Логи</button>
     </nav>
     <main>
-      <section id="tab-now" class="tab" data-panel="now">
+      <section id="tab-test" class="tab" data-panel="test">
+        <h2>Комната</h2>
+        <p class="muted" id="test-blurb">Один гость «тест». Болванчик сидит в списке. Со звуком — слушает и ловит вейкворды. Пауза Cursor на тесте не включается.</p>
+        <form id="test-form" class="panel form">
+          <label>Ссылка BBB <input id="test-url" name="url" placeholder="https://bbb.ssau.ru/b/…" autocomplete="off"></label>
+          <div class="actions">
+            <button type="submit" class="act" id="test-dummy" data-want="dummy">Болванчик</button>
+            <button type="submit" class="act" id="test-listen" data-want="listen">Со звуком</button>
+            <button type="button" class="act danger" id="test-leave">Выйти</button>
+          </div>
+        </form>
+        <h2>Статус</h2>
+        <div id="test-status" class="panel">не в комнате</div>
+      </section>
+      <section id="tab-now" class="tab" data-panel="now" hidden>
         <h2>Аккаунты</h2>
         <div id="now-accounts" class="list"></div>
         <h2>Текущая пара</h2>

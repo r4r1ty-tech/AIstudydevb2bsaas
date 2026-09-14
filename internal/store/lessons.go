@@ -17,32 +17,65 @@ func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 		return fmt.Errorf("store: replace lessons begin: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM lessons`); err != nil {
-		return fmt.Errorf("store: replace lessons delete: %w", err)
+
+	rows, err := tx.Query(`SELECT ` + lessonCols + ` FROM lessons`)
+	if err != nil {
+		return fmt.Errorf("store: replace lessons list: %w", err)
 	}
-	stmt, err := tx.Prepare(`INSERT INTO lessons (date, start, end, begin, finish, discipline, teacher, place, subgroup, type, online)
+	oldByIdent := make(map[string]int64)
+	for rows.Next() {
+		l, err := scanLesson(rows)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("store: replace lessons scan: %w", err)
+		}
+		oldByIdent[l.Identity()] = l.ID
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("store: replace lessons rows: %w", err)
+	}
+	rows.Close()
+
+	upd, err := tx.Prepare(`UPDATE lessons SET date=?, start=?, end=?, begin=?, finish=?, discipline=?, teacher=?, place=?, subgroup=?, type=?, online=? WHERE id=?`)
+	if err != nil {
+		return fmt.Errorf("store: replace lessons update: %w", err)
+	}
+	defer upd.Close()
+	ins, err := tx.Prepare(`INSERT INTO lessons (date, start, end, begin, finish, discipline, teacher, place, subgroup, type, online)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("store: replace lessons prepare: %w", err)
 	}
-	defer stmt.Close()
+	defer ins.Close()
+
+	keep := make(map[int64]struct{}, len(lessons))
 	for _, l := range lessons {
-		if _, err := stmt.Exec(
-			l.Date,
-			l.Start,
-			l.End,
-			timeArg(l.Begin),
-			timeArg(l.Finish),
-			l.Discipline,
-			l.Teacher,
-			l.Place,
-			l.Subgroup,
-			l.Type,
-			btoi(l.Online),
-		); err != nil {
+		args := []any{
+			l.Date, l.Start, l.End, timeArg(l.Begin), timeArg(l.Finish),
+			l.Discipline, l.Teacher, l.Place, l.Subgroup, l.Type, btoi(l.Online),
+		}
+		if id, ok := oldByIdent[l.Identity()]; ok {
+			if _, err := upd.Exec(append(args, id)...); err != nil {
+				return fmt.Errorf("store: replace lessons update row: %w", err)
+			}
+			keep[id] = struct{}{}
+			continue
+		}
+		if _, err := ins.Exec(args...); err != nil {
 			return fmt.Errorf("store: replace lessons insert: %w", err)
 		}
 	}
+
+	for _, id := range oldByIdent {
+		if _, ok := keep[id]; ok {
+			continue
+		}
+		if _, err := tx.Exec(`DELETE FROM lessons WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("store: replace lessons prune: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: replace lessons commit: %w", err)
 	}

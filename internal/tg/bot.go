@@ -27,6 +27,7 @@ type Bot struct {
 	mu      sync.Mutex
 	t15Mu   sync.Mutex
 	lastT15 map[int64]int64 // telegram id → last T-15 lesson id
+	live    map[int64]liveSnap
 }
 
 func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) {
@@ -64,11 +65,13 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 		api:     api,
 		updater: updater,
 		lastT15: make(map[int64]int64),
+		live:    make(map[int64]liveSnap),
 	}
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("j:"), b.onJoinCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("x:"), b.onLeaveCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
 	return b, nil
@@ -98,6 +101,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	t15Ctx, cancelT15 := context.WithCancel(ctx)
 	defer cancelT15()
 	go b.t15Loop(t15Ctx)
+	go b.liveLoop(t15Ctx)
 
 	<-ctx.Done()
 	cancelT15()

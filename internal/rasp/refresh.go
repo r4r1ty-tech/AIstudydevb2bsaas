@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -27,7 +28,7 @@ var (
 	nowFn        = time.Now
 
 	selectedWeekRe = regexp.MustCompile(`selectedWeek=(\d+)`)
-	nearCurrentRe  = regexp.MustCompile(`(?is)(?:selectedWeek=(\d+)[\s\S]{0,240}(?:current|active|selected)|(?:current|active|selected)[\s\S]{0,240}selectedWeek=(\d+))`)
+	weekLabelRe    = regexp.MustCompile(`(\d+)\s*недел`)
 )
 
 type Refresher struct {
@@ -79,16 +80,6 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 		return run, err
 	}
 
-	if week, ok := extractSelectedWeek(body); ok {
-		nextBody, nextStatus, nextErr := Fetch(ctx, r.GroupID, week+1)
-		if nextErr == nil && nextStatus == http.StatusOK {
-			more, perr := Parse(nextBody, r.loc())
-			if perr == nil {
-				lessons = mergeLessons(lessons, more)
-			}
-		}
-	}
-
 	old, err := r.Store.ListLessons()
 	if err != nil {
 		run.OK = false
@@ -96,6 +87,22 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 		r.persistFail(run)
 		return run, err
 	}
+
+	fetchedNext := false
+	if nextWeek, ok := extractNextWeek(body); ok {
+		nextBody, nextStatus, nextErr := Fetch(ctx, r.GroupID, nextWeek)
+		if nextErr == nil && nextStatus == http.StatusOK {
+			more, perr := Parse(nextBody, r.loc())
+			if perr == nil {
+				lessons = mergeLessons(lessons, more)
+				fetchedNext = true
+			}
+		}
+	}
+	if !fetchedNext {
+		lessons = keepFutureLessons(lessons, old)
+	}
+
 	diff := Diff(old, lessons)
 	if err := r.Store.ReplaceLessons(lessons); err != nil {
 		run.OK = false
@@ -118,6 +125,7 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	if err := r.Store.SaveParseRun(run); err != nil {
 		return run, err
 	}
+	log.Printf("lessons=%d online=%d next_week=%v", run.LessonCount, run.OnlineCount, fetchedNext)
 	msg := fmt.Sprintf("ok lessons=%d online=%d", run.LessonCount, run.OnlineCount)
 	if diff != "" {
 		msg = msg + "\n" + diff
@@ -184,21 +192,100 @@ func (r *Refresher) StartCron(ctx context.Context) {
 }
 
 func extractSelectedWeek(html []byte) (int, bool) {
+	if n, ok := weekFromCurrentLabel(html); ok {
+		return n, true
+	}
+	if n, ok := weekFromPrevNext(html); ok {
+		return n, true
+	}
 	if n, ok := selectedWeekFromCurrentLink(html); ok {
 		return n, true
 	}
-	if m := nearCurrentRe.FindSubmatch(html); len(m) >= 3 {
-		for _, g := range m[1:] {
-			if len(g) == 0 {
-				continue
-			}
-			n, err := strconv.Atoi(string(g))
-			if err == nil {
-				return n, true
-			}
-		}
+	return 0, false
+}
+
+func extractNextWeek(html []byte) (int, bool) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(html)))
+	if err != nil {
+		return 0, false
+	}
+	href := doc.Find("a.week-nav-next").First().AttrOr("href", "")
+	if n, ok := weekFromHref(href); ok {
+		return n, true
+	}
+	if cur, ok := extractSelectedWeek(html); ok {
+		return cur + 1, true
 	}
 	return 0, false
+}
+
+func keepFutureLessons(parsed, old []model.Lesson) []model.Lesson {
+	maxNew := ""
+	for _, l := range parsed {
+		if l.Date > maxNew {
+			maxNew = l.Date
+		}
+	}
+	var extra []model.Lesson
+	for _, l := range old {
+		if maxNew == "" || l.Date > maxNew {
+			extra = append(extra, l)
+		}
+	}
+	if len(extra) == 0 {
+		return parsed
+	}
+	return mergeLessons(parsed, extra)
+}
+
+func weekFromCurrentLabel(html []byte) (int, bool) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(html)))
+	if err != nil {
+		return 0, false
+	}
+	text := strings.TrimSpace(doc.Find(".week-nav-current_week").First().Text())
+	if text == "" {
+		text = strings.TrimSpace(doc.Find(".week-nav-current").First().Text())
+	}
+	return parseWeekLabel(text)
+}
+
+func weekFromPrevNext(html []byte) (int, bool) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(html)))
+	if err != nil {
+		return 0, false
+	}
+	if n, ok := weekFromHref(doc.Find("a.week-nav-prev").First().AttrOr("href", "")); ok {
+		return n + 1, true
+	}
+	if n, ok := weekFromHref(doc.Find("a.week-nav-next").First().AttrOr("href", "")); ok {
+		return n - 1, true
+	}
+	return 0, false
+}
+
+func parseWeekLabel(text string) (int, bool) {
+	m := weekLabelRe.FindStringSubmatch(text)
+	if len(m) < 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func weekFromHref(href string) (int, bool) {
+	m := selectedWeekRe.FindStringSubmatch(href)
+	if len(m) < 2 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func selectedWeekFromCurrentLink(html []byte) (int, bool) {
@@ -213,18 +300,16 @@ func selectedWeekFromCurrentLink(html []byte) (int, bool) {
 			return
 		}
 		class := strings.ToLower(s.AttrOr("class", ""))
+		if strings.Contains(class, "weekday-nav") {
+			return
+		}
 		if !strings.Contains(class, "current") &&
 			!strings.Contains(class, "active") &&
 			!strings.Contains(class, "selected") {
 			return
 		}
-		href := s.AttrOr("href", "")
-		m := selectedWeekRe.FindStringSubmatch(href)
-		if len(m) < 2 {
-			return
-		}
-		n, err := strconv.Atoi(m[1])
-		if err != nil {
+		n, wok := weekFromHref(s.AttrOr("href", ""))
+		if !wok {
 			return
 		}
 		found = n
