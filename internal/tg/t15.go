@@ -78,8 +78,7 @@ func (b *Bot) tickT15() {
 }
 
 func (b *Bot) sendT15Card(u model.User, lesson model.Lesson) error {
-	link, err := b.st.GetBBB(model.BBBKey(b.cfg.GroupID, lesson.Discipline, lesson.Teacher))
-	hasLink := err == nil && link != nil && strings.TrimSpace(link.URL) != ""
+	hasLink := strings.TrimSpace(b.lookupBBB(lesson.ID)) != ""
 	text := formatT15Card(lesson, b.now(), b.loc, hasLink)
 	mk := t15Keyboard(lesson.ID)
 	return b.send(u.TelegramID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mk})

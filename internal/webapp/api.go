@@ -58,6 +58,7 @@ type lessonsResponse struct {
 type bbbRequest struct {
 	Key        string `json:"key"`
 	URL        string `json:"url"`
+	LessonID   int64  `json:"lesson_id"`
 	Discipline string `json:"discipline"`
 	Teacher    string `json:"teacher"`
 }
@@ -141,21 +142,17 @@ func (s *Server) lessonWithBBB(l *model.Lesson) *lessonDTO {
 		return nil
 	}
 	dto := &lessonDTO{Lesson: *l}
-	if u := s.lookupBBB(l.Discipline, l.Teacher); u != "" {
+	if u := s.lookupBBB(l.ID); u != "" {
 		dto.BBBURL = u
 	}
 	return dto
 }
 
-func (s *Server) lookupBBB(discipline, teacher string) string {
+func (s *Server) lookupBBB(lessonID int64) string {
 	if s.st == nil {
 		return ""
 	}
-	b, err := s.st.GetBBB(model.BBBKey(s.cfg.GroupID, discipline, teacher))
-	if err != nil || b == nil {
-		return ""
-	}
-	return b.URL
+	return s.st.GetLessonBBB(lessonID)
 }
 
 func (s *Server) handlePeople(w http.ResponseWriter, r *http.Request) {
@@ -262,7 +259,7 @@ func (s *Server) handleLessons(w http.ResponseWriter, r *http.Request) {
 	out := make([]lessonDTO, 0, len(lessons))
 	for _, l := range lessons {
 		dto := lessonDTO{Lesson: l}
-		if u, ok := byKey[model.BBBKey(s.cfg.GroupID, l.Discipline, l.Teacher)]; ok {
+		if u, ok := byKey[model.BBBLessonKey(l.ID)]; ok {
 			dto.BBBURL = u
 		}
 		out = append(out, dto)
@@ -290,9 +287,12 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := strings.TrimSpace(req.Key)
+	if req.LessonID > 0 {
+		key = model.BBBLessonKey(req.LessonID)
+	}
 	if key == "" {
 		if strings.TrimSpace(req.Discipline) == "" && strings.TrimSpace(req.Teacher) == "" {
-			writeErr(w, http.StatusBadRequest, "need key or discipline+teacher")
+			writeErr(w, http.StatusBadRequest, "need lesson_id or key or discipline+teacher")
 			return
 		}
 		key = model.BBBKey(s.cfg.GroupID, req.Discipline, req.Teacher)

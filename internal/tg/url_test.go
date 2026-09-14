@@ -101,13 +101,13 @@ func TestPickLessonForBBB(t *testing.T) {
 	b := model.Lesson{ID: 2, Discipline: "B", Teacher: "T2", Begin: now.Add(40 * time.Minute), Online: true, Subgroup: 0}
 	c := model.Lesson{ID: 3, Discipline: "C", Teacher: "T3", Begin: now.Add(-time.Hour), Online: true, Subgroup: 0}
 
-	has := func(disc, _ string) bool { return disc == "A" }
+	has := func(id int64) bool { return id == 1 }
 	got := pickLessonForBBB(now, 1, []model.Lesson{a, b, c}, has, nil)
 	if got == nil || got.ID != 2 {
 		t.Fatalf("want nearest without BBB id=2, got %#v", got)
 	}
 
-	allLinked := func(string, string) bool { return true }
+	allLinked := func(int64) bool { return true }
 	intents := map[int64]time.Time{1: now.Add(-time.Minute), 3: now}
 	got = pickLessonForBBB(now, 1, []model.Lesson{a, b, c}, allLinked, intents)
 	if got == nil || got.ID != 3 {

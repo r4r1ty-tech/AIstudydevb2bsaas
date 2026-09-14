@@ -85,14 +85,14 @@ func isCommandText(text string) bool {
 	return strings.HasPrefix(text, "/")
 }
 
-func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLink func(discipline, teacher string) bool, intents map[int64]time.Time) *model.Lesson {
+func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLink func(lessonID int64) bool, intents map[int64]time.Time) *model.Lesson {
 	var nearest *model.Lesson
 	for i := range lessons {
 		l := lessons[i]
 		if !l.Online || !l.Begin.After(now) || !l.MatchesSubgroup(subgroup) {
 			continue
 		}
-		if hasLink != nil && hasLink(l.Discipline, l.Teacher) {
+		if hasLink != nil && hasLink(l.ID) {
 			continue
 		}
 		if nearest == nil || l.Begin.Before(nearest.Begin) {

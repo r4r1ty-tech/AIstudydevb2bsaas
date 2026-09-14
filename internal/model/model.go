@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -132,6 +133,22 @@ func (l Lesson) SlotLabel() string {
 	return l.Start + "–" + l.End
 }
 
+func (l Lesson) Identity() string {
+	on := "0"
+	if l.Online {
+		on = "1"
+	}
+	return strings.Join([]string{
+		l.Date,
+		l.Start,
+		l.Discipline,
+		l.Teacher,
+		l.Place,
+		fmt.Sprintf("%d", l.Subgroup),
+		on,
+	}, "|")
+}
+
 type BBBLink struct {
 	Key       string    `json:"key"`
 	URL       string    `json:"url"`
@@ -140,6 +157,86 @@ type BBBLink struct {
 
 func BBBKey(groupID int64, discipline, teacher string) string {
 	return fmt.Sprintf("%d|%s|%s", groupID, strings.TrimSpace(discipline), strings.TrimSpace(teacher))
+}
+
+func BBBLessonKey(lessonID int64) string {
+	if lessonID <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("lesson:%d", lessonID)
+}
+
+func ParseBBBLessonID(key string) (int64, bool) {
+	key = strings.TrimSpace(key)
+	if !strings.HasPrefix(key, "lesson:") {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimPrefix(key, "lesson:"), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func ParseBBBKey(key string) (discipline, teacher string) {
+	parts := strings.Split(key, "|")
+	switch len(parts) {
+	case 0, 1:
+		return strings.TrimSpace(key), ""
+	case 2:
+		return strings.TrimSpace(parts[1]), ""
+	default:
+		return strings.TrimSpace(parts[1]), strings.TrimSpace(strings.Join(parts[2:], "|"))
+	}
+}
+
+const TestGuestName = "тест"
+
+const (
+	TestWantOff    = ""
+	TestWantDummy  = "dummy"
+	TestWantListen = "listen"
+)
+
+const (
+	TestIdle    = "idle"
+	TestJoining = "joining"
+	TestLobby   = "lobby"
+	TestRoom    = "room"
+	TestError   = "error"
+)
+
+type TestJoin struct {
+	URL       string    `json:"url"`
+	Want      string    `json:"want"`
+	Status    string    `json:"status"`
+	Mode      string    `json:"mode"`
+	Name      string    `json:"name"`
+	Message   string    `json:"message"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (t TestJoin) GuestName() string {
+	if strings.TrimSpace(t.Name) != "" {
+		return strings.TrimSpace(t.Name)
+	}
+	return TestGuestName
+}
+
+func BBBLabel(key string) string {
+	if id, ok := ParseBBBLessonID(key); ok {
+		return fmt.Sprintf("пара %d", id)
+	}
+	d, t := ParseBBBKey(key)
+	d = strings.TrimSpace(d)
+	t = strings.TrimSpace(t)
+	if d == "" {
+		return strings.TrimSpace(key)
+	}
+	if t == "" {
+		return d
+	}
+	return d + " · " + t
 }
 
 type Event struct {

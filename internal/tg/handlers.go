@@ -433,7 +433,7 @@ func (b *Bot) formatLinkReply(u *model.User) (string, error) {
 			break
 		}
 		mark := "нет ссылки"
-		if url := b.lookupBBB(l.Discipline, l.Teacher); url != "" {
+		if url := b.lookupBBB(l.ID); url != "" {
 			mark = "ссылка есть"
 		}
 		upcoming = append(upcoming, fmt.Sprintf("• %s · %s — %s", l.Discipline, l.SlotLabel(), mark))
@@ -443,14 +443,6 @@ func (b *Bot) formatLinkReply(u *model.User) (string, error) {
 		urls = append(urls, "• "+link.URL)
 	}
 	return formatLinkList(upcoming, urls), nil
-}
-
-func (b *Bot) lookupBBB(discipline, teacher string) string {
-	link, err := b.st.GetBBB(model.BBBKey(b.cfg.GroupID, discipline, teacher))
-	if err != nil || link == nil {
-		return ""
-	}
-	return strings.TrimSpace(link.URL)
 }
 
 func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
@@ -468,8 +460,8 @@ func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
 		}
 		return b.send(chatID, noBBBTarget, nil)
 	}
-	key := model.BBBKey(b.cfg.GroupID, lesson.Discipline, lesson.Teacher)
-	if err := b.st.SetBBB(key, url); err != nil {
+	// Только lesson:{id}. Старые ключи «предмет на семестр» воркер больше не читает.
+	if err := b.st.SetLessonBBB(lesson.ID, url); err != nil {
 		return err
 	}
 	if err := b.st.AddEvent(model.Event{
@@ -481,11 +473,18 @@ func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
 	}); err != nil {
 		return err
 	}
-	text := formatSavedLink(lesson.Discipline)
+	text := formatSavedLink(*lesson)
 	if u.Onboarded {
 		return b.sendMain(chatID, text)
 	}
 	return b.send(chatID, text, nil)
+}
+
+func (b *Bot) lookupBBB(lessonID int64) string {
+	if b == nil || b.st == nil {
+		return ""
+	}
+	return b.st.GetLessonBBB(lessonID)
 }
 
 func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
@@ -493,9 +492,14 @@ func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
 	if err != nil {
 		lessons = nil
 	}
-	hasLink := func(discipline, teacher string) bool {
-		link, err := b.st.GetBBB(model.BBBKey(b.cfg.GroupID, discipline, teacher))
-		return err == nil && link != nil && strings.TrimSpace(link.URL) != ""
+	// Ответ на T-15 привязываем к той паре, пока она не закончилась.
+	if lid := b.lastT15Lesson(u.TelegramID); lid != 0 {
+		if l, err := b.st.LessonByID(lid); err == nil && l != nil && !now.After(l.Finish) {
+			return l
+		}
+	}
+	hasLink := func(lessonID int64) bool {
+		return strings.TrimSpace(b.lookupBBB(lessonID)) != ""
 	}
 	intents := make(map[int64]time.Time)
 	for _, l := range lessons {
@@ -509,15 +513,48 @@ func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
 			intents[lid] = now
 		}
 	}
-	if got := pickLessonForBBB(now, u.Subgroup, lessons, hasLink, intents); got != nil {
-		return got
+	return pickLessonForBBB(now, u.Subgroup, lessons, hasLink, intents)
+}
+
+func (b *Bot) onLeaveCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
+	from := b.allowed(ctx)
+	if from == nil || ctx.CallbackQuery == nil {
+		return nil
 	}
-	if lid := b.lastT15Lesson(u.TelegramID); lid != 0 {
-		l, err := b.st.LessonByID(lid)
-		if err == nil && l != nil {
-			return l
-		}
+	lessonID, ok := parseLeaveCallback(ctx.CallbackQuery.Data)
+	if !ok {
+		_, _ = ctx.CallbackQuery.Answer(bot, nil)
+		return nil
 	}
+	now := b.now()
+	err := b.st.SetIntentDecision(from.Id, lessonID, model.JoinNo)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = b.st.PutIntent(model.JoinIntent{
+			TelegramID: from.Id,
+			LessonID:   lessonID,
+			Decision:   model.JoinNo,
+			AskedAt:    now,
+			DecidedAt:  &now,
+		})
+	}
+	if err != nil {
+		_, _ = ctx.CallbackQuery.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: "не вышло", ShowAlert: true})
+		return err
+	}
+	_ = b.st.AddEvent(model.Event{
+		At: now, Type: model.EventLeave,
+		TelegramID: from.Id, LessonID: lessonID, Message: "кнопка",
+	})
+	_, _ = ctx.CallbackQuery.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: "выхожу"})
+	if ctx.CallbackQuery.Message != nil {
+		_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+			Text:        "Выхожу из комнаты… Через несколько секунд отключусь.",
+			ReplyMarkup: gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{}},
+		})
+	}
+	b.mu.Lock()
+	delete(b.live, from.Id)
+	b.mu.Unlock()
 	return nil
 }
 
@@ -559,7 +596,7 @@ func (b *Bot) formatTodayReply(u *model.User) (string, error) {
 		}
 		row := todayRow{
 			Lesson:  l,
-			HasLink: b.lookupBBB(l.Discipline, l.Teacher) != "",
+			HasLink: b.lookupBBB(l.ID) != "",
 		}
 		if p, ok := byLesson[l.ID]; ok {
 			row.Presence = p.State
@@ -757,7 +794,7 @@ func (b *Bot) onJoinCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	hasLink := false
 	if lesson != nil {
-		hasLink = b.lookupBBB(lesson.Discipline, lesson.Teacher) != ""
+		hasLink = b.lookupBBB(lesson.ID) != ""
 	}
 	reply := formatSkipAck(lesson, b.loc)
 	if yes {

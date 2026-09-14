@@ -215,5 +215,13 @@ button:disabled { opacity: .55; cursor: wait; }
 .empty { color: var(--muted); padding: 8px 2px; }
 
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-
+.actions .act { flex: 1 1 120px; min-height: 40px; }
+button.act.on {
+  background: #14301c;
+  border-color: #2f6f3e;
+  color: var(--ok);
+}
 #btn-refresh { margin-top: 10px; width: 100%; }
+
+#test-blurb { margin: 0 0 10px; }
+#test-status .row-item { margin: 0; padding: 0; border: 0; background: transparent; }
