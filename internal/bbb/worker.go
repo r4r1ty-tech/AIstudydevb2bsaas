@@ -24,12 +24,14 @@ type Worker struct {
 
 	Hogs Hogs
 
-	mu       sync.Mutex
-	sessions map[string]Session
-	leaveAt  map[string]time.Time
-	noBBB    map[string]struct{}
-	lobbyAt  map[string]time.Time
-	busy     bool
+	mu         sync.Mutex
+	sessions   map[string]Session
+	leaveAt    map[string]time.Time
+	noBBB      map[string]struct{}
+	lobbyAt    map[string]time.Time
+	blockedAt  map[string]time.Time // fail → стоп до JoinYes после этого
+	dropRetry  map[string]int       // mid-session: 0/1, второй drop → block
+	busy       bool
 }
 
 func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker {
@@ -57,10 +59,12 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		Loc:      loc,
 		Joiner:   j,
 		Hogs:     hogs,
-		sessions: make(map[string]Session),
-		leaveAt:  make(map[string]time.Time),
-		noBBB:    make(map[string]struct{}),
-		lobbyAt:  make(map[string]time.Time),
+		sessions:  make(map[string]Session),
+		leaveAt:   make(map[string]time.Time),
+		noBBB:     make(map[string]struct{}),
+		lobbyAt:   make(map[string]time.Time),
+		blockedAt: make(map[string]time.Time),
+		dropRetry: make(map[string]int),
 	}
 }
 
@@ -125,6 +129,9 @@ func (w *Worker) tick(ctx context.Context) {
 				leave := w.ensureLeave(key, lesson.Finish)
 				if !ShouldBeInRoom(now, EnterAt(lesson.Begin, intent), leave) {
 					w.leave(ctx, u.TelegramID, lesson.ID, key, "time")
+					continue
+				}
+				if w.isBlocked(key, intent) {
 					continue
 				}
 				needLecture = true
@@ -213,39 +220,52 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson, url, key string, now time.Time, record bool) {
 	w.mu.Lock()
 	_, live := w.sessions[key]
+	_, blocked := w.blockedAt[key]
 	w.mu.Unlock()
+	if blocked {
+		return
+	}
 	if live {
 		w.watchLobby(ctx, u, lesson, key, now)
 		return
 	}
-	w.hogs().Hold()
 	role := RolePresence
 	if record {
 		role = RoleRecord
 	}
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: u.FIO, SOCKS5: u.SOCKS5, Role: role})
 	if err != nil {
-		w.hogs().Release()
-		_ = w.Store.SetPresence(model.Presence{
-			TelegramID: u.TelegramID, LessonID: lesson.ID,
-			State: model.PresenceError, Message: err.Error(), UpdatedAt: now,
-		})
-		_ = w.Store.AddEvent(model.Event{
-			At: now, Type: model.EventError,
-			TelegramID: u.TelegramID, LessonID: lesson.ID, Message: err.Error(),
-		})
-		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не смог зайти на «%s».", lesson.Discipline))
+		w.joinFail(ctx, u, lesson, key, now, err.Error())
 		return
 	}
+	lobby, err := sess.InLobby(ctx)
+	if err != nil {
+		_ = sess.Close()
+		w.joinFail(ctx, u, lesson, key, now, err.Error())
+		return
+	}
+	room, err := sess.InRoom(ctx)
+	if err != nil {
+		_ = sess.Close()
+		w.joinFail(ctx, u, lesson, key, now, err.Error())
+		return
+	}
+	if !lobby && !room {
+		_ = sess.Close()
+		w.joinFail(ctx, u, lesson, key, now, "страница не комната и не лобби")
+		return
+	}
+	w.hogs().Hold()
 	if record {
 		sess = w.attachRecorder(ctx, sess, lesson, url)
 	}
 	state := model.PresenceRoom
-	if lobby, _ := sess.InLobby(ctx); lobby {
+	if lobby {
 		state = model.PresenceLobby
 	}
 	w.mu.Lock()
 	w.sessions[key] = sess
+	delete(w.dropRetry, key)
 	if state == model.PresenceLobby {
 		w.lobbyAt[key] = now
 	}
@@ -272,6 +292,40 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	))
 }
 
+func (w *Worker) isBlocked(key string, intent *model.JoinIntent) bool {
+	w.mu.Lock()
+	at, ok := w.blockedAt[key]
+	w.mu.Unlock()
+	if !ok {
+		return false
+	}
+	// JoinYes после стопа (кнопка / T-15) снимает блок.
+	if intent != nil && intent.Decision == model.JoinYes && intent.DecidedAt != nil && intent.DecidedAt.After(at) {
+		w.mu.Lock()
+		delete(w.blockedAt, key)
+		delete(w.dropRetry, key)
+		w.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+func (w *Worker) joinFail(ctx context.Context, u model.User, lesson model.Lesson, key string, now time.Time, reason string) {
+	w.mu.Lock()
+	w.blockedAt[key] = now
+	delete(w.dropRetry, key)
+	w.mu.Unlock()
+	_ = w.Store.SetPresence(model.Presence{
+		TelegramID: u.TelegramID, LessonID: lesson.ID,
+		State: model.PresenceError, Message: reason, UpdatedAt: now,
+	})
+	_ = w.Store.AddEvent(model.Event{
+		At: now, Type: model.EventError,
+		TelegramID: u.TelegramID, LessonID: lesson.ID, Message: reason,
+	})
+	notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не зашёл на «%s»: %s", lesson.Discipline, reason))
+}
+
 func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Lesson, key string, now time.Time) {
 	w.mu.Lock()
 	sess := w.sessions[key]
@@ -282,6 +336,16 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 	}
 	lobby, err := sess.InLobby(ctx)
 	if err != nil {
+		w.dropDead(ctx, u, lesson, key, err.Error())
+		return
+	}
+	room, err := sess.InRoom(ctx)
+	if err != nil {
+		w.dropDead(ctx, u, lesson, key, err.Error())
+		return
+	}
+	if !lobby && !room {
+		w.dropDead(ctx, u, lesson, key, "страница не комната")
 		return
 	}
 	if !lobby {
@@ -306,6 +370,12 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		TelegramID: u.TelegramID, LessonID: lesson.ID,
 		State: model.PresenceLobby, Message: "waiting room", UpdatedAt: now,
 	})
+	if since.IsZero() {
+		w.mu.Lock()
+		w.lobbyAt[key] = now
+		w.mu.Unlock()
+		since = now
+	}
 	if now.Sub(since) >= 2*time.Minute {
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("не пустили из лобби: %s / %d", u.FIO, u.TelegramID))
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
@@ -316,8 +386,38 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 			At: now, Type: model.EventLobby,
 			TelegramID: u.TelegramID, LessonID: lesson.ID, Message: "лобби >2 мин",
 		})
-		w.lobbyAt[key] = now // don't spam every tick
+		w.mu.Lock()
+		w.lobbyAt[key] = now
+		w.mu.Unlock()
 	}
+}
+
+// dropDead: первый вылет — тихий retry; второй — стоп до JoinYes.
+func (w *Worker) dropDead(ctx context.Context, u model.User, lesson model.Lesson, key, reason string) {
+	w.mu.Lock()
+	sess, ok := w.sessions[key]
+	delete(w.sessions, key)
+	delete(w.lobbyAt, key)
+	n := w.dropRetry[key] + 1
+	w.dropRetry[key] = n
+	w.mu.Unlock()
+	if !ok {
+		return
+	}
+	if sess != nil {
+		_ = sess.Close()
+	}
+	w.hogs().Release()
+	now := time.Now()
+	if n == 1 {
+		_ = w.Store.ClearPresence(u.TelegramID)
+		_ = w.Store.AddEvent(model.Event{
+			At: now, Type: model.EventError,
+			TelegramID: u.TelegramID, LessonID: lesson.ID, Message: "retry: " + reason,
+		})
+		return
+	}
+	w.joinFail(ctx, u, lesson, key, now, reason)
 }
 
 func (w *Worker) leave(ctx context.Context, telegramID, lessonID int64, key, reason string) {
@@ -326,6 +426,8 @@ func (w *Worker) leave(ctx context.Context, telegramID, lessonID int64, key, rea
 	delete(w.sessions, key)
 	delete(w.leaveAt, key)
 	delete(w.lobbyAt, key)
+	delete(w.blockedAt, key)
+	delete(w.dropRetry, key)
 	w.mu.Unlock()
 	if !ok {
 		return

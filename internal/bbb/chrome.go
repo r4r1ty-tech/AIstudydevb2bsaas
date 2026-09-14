@@ -147,37 +147,6 @@ type chromeSession struct {
 	greeted bool
 }
 
-func (s *chromeSession) InLobby(ctx context.Context) (bool, error) {
-	if s == nil || s.page == nil {
-		return false, nil
-	}
-	p := s.page.Context(ctx)
-	html, err := p.Timeout(5 * time.Second).HTML()
-	if err != nil {
-		return false, err
-	}
-	low := strings.ToLower(html)
-	for _, m := range []string{
-		"please wait",
-		"ожидайте",
-		"waiting for a moderator",
-		"waiting for the moderator",
-		"you'll join when",
-		"guest lobby",
-		`data-test="waitingusers"`,
-		"waitingusers",
-	} {
-		if strings.Contains(low, m) {
-			return true, nil
-		}
-	}
-	ok, _, err := p.Timeout(2 * time.Second).Has("[data-test='waitingUsers']")
-	if err != nil {
-		return false, nil
-	}
-	return ok, nil
-}
-
 func (s *chromeSession) Greet(ctx context.Context) error {
 	if s == nil || s.page == nil {
 		return nil
@@ -191,11 +160,11 @@ func (s *chromeSession) Greet(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lobby, err := s.InLobby(ctx)
+	st, err := s.seat(ctx)
 	if err != nil {
 		return err
 	}
-	if lobby {
+	if st != seatRoom {
 		return nil
 	}
 	if err := sendHello(s.page.Context(ctx)); err != nil {
@@ -282,16 +251,12 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	}
 	_ = page.Timeout(15 * time.Second).WaitLoad()
 
-	if err := fillGuestName(page, req.FIO); err != nil {
-		log.Printf("bbb: guest form: %v", err)
+	if err := sess.waitSeated(ctx, req); err != nil {
+		_ = sess.Close()
+		return nil, err
 	}
-	if req.Role == RolePresence {
-		if err := dismissAudio(page); err != nil {
-			log.Printf("bbb: skip audio: %v", err)
-		}
-	} else if err := clickListenOnly(page); err != nil {
-		log.Printf("bbb: listen-only: %v", err)
-	}
+	st, _ := sess.seat(ctx)
+	log.Printf("bbb: seat=%s %s", st, pageHint(page))
 	return sess, nil
 }
 
@@ -327,7 +292,7 @@ func fillGuestName(page *rod.Page, fio string) error {
 	} else if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
 		return err
 	}
-	_ = page.Timeout(20 * time.Second).WaitLoad()
+	_ = page.Timeout(8 * time.Second).WaitLoad()
 	return nil
 }
 
@@ -339,11 +304,7 @@ var listenOnlySels = []string{
 	`button[aria-label='Только слушать']`,
 }
 
-var inMeetingSels = []string{
-	"[data-test='waitingUsers']",
-	"[data-test='waitingusers']",
-	"[data-test='userListItem']",
-}
+var inMeetingSels = roomSels
 
 const (
 	listenOnlyRE = `(?i)listen\s*only|только\s*слушать`

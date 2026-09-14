@@ -19,6 +19,7 @@ type JoinReq struct {
 
 type Session interface {
 	InLobby(ctx context.Context) (bool, error)
+	InRoom(ctx context.Context) (bool, error)
 	Greet(ctx context.Context) error
 	Close() error
 	GrabSlides(ctx context.Context, dir string) (int, error)
@@ -31,6 +32,7 @@ type Joiner interface {
 type drySession struct{}
 
 func (drySession) InLobby(context.Context) (bool, error) { return false, nil }
+func (drySession) InRoom(context.Context) (bool, error)  { return true, nil }
 func (drySession) Greet(context.Context) error           { return nil }
 func (drySession) Close() error                          { return nil }
 func (drySession) GrabSlides(context.Context, string) (int, error) {
