@@ -89,6 +89,10 @@ func (w *Worker) onWake(ctx context.Context, lesson model.Lesson, users []model.
 			At: time.Now(), Type: model.EventWake, LessonID: lesson.ID, Message: word,
 		})
 	}
+	if lesson.Discipline == "тест" {
+		notify.Admin(ctx, w.Cfg, "тест услышал: «"+word+"»")
+		return
+	}
 	for _, u := range wake.WhoGets(word, users) {
 		notify.User(ctx, w.Cfg, u.TelegramID, msg)
 	}
