@@ -201,3 +201,35 @@ func TestJSRegexpNotUsedInT15Buttons(t *testing.T) {
 		t.Fatalf("profile button: %+v", kb.Keyboard)
 	}
 }
+
+func TestFormatTestCardAndKeyboard(t *testing.T) {
+	t.Parallel()
+	empty := formatTestCard(model.TestJoin{})
+	if !strings.Contains(empty, "Ссылки нет") || !strings.Contains(empty, "Отдельная комната") {
+		t.Fatalf("empty:\n%s", empty)
+	}
+	live := model.TestJoin{
+		URL:    "https://bbb.ssau.ru/b/x",
+		Want:   model.TestWantListen,
+		Status: model.TestRoom,
+		Mode:   model.TestWantListen,
+		Name:   "тест",
+	}
+	got := formatTestCard(live)
+	for _, want := range []string{"Сейчас тест", "bbb.ssau.ru/b/x", "со звуком", "тест", "в комнате"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	idleKB := testKeyboard(model.TestJoin{})
+	if idleKB.InlineKeyboard[0][0].CallbackData != "tx:dummy" || idleKB.InlineKeyboard[0][1].CallbackData != "tx:listen" {
+		t.Fatalf("idle kb: %+v", idleKB)
+	}
+	inKB := testKeyboard(live)
+	if inKB.InlineKeyboard[0][0].CallbackData != "tx:leave" {
+		t.Fatalf("in kb: %+v", inKB)
+	}
+	if !testAlready(live, model.TestWantListen) || testAlready(live, model.TestWantDummy) {
+		t.Fatal("testAlready")
+	}
+}

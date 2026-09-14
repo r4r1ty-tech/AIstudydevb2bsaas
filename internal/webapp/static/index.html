@@ -33,19 +33,28 @@
     </nav>
     <main>
       <section id="tab-test" class="tab" data-panel="test">
-        <h2>Комната</h2>
-        <p class="muted" id="test-blurb">Имя в списке BBB задаёшь сам. Болванчик просто сидит. Со звуком — слушает вейкворды. Пауза Cursor на тесте не включается.</p>
-        <form id="test-form" class="panel form">
-          <label>Ссылка BBB <input id="test-url" name="url" placeholder="https://bbb.ssau.ru/b/…" autocomplete="off"></label>
-          <label>Имя в BBB <input id="test-name" name="name" placeholder="тест" autocomplete="off" maxlength="64"></label>
-          <div class="actions">
-            <button type="submit" class="act" id="test-dummy" data-want="dummy">Болванчик</button>
-            <button type="submit" class="act" id="test-listen" data-want="listen">Со звуком</button>
-            <button type="button" class="act danger" id="test-leave">Выйти</button>
-          </div>
-        </form>
-        <h2>Статус</h2>
-        <div id="test-status" class="panel">не в комнате</div>
+        <div id="test-live" class="live-card" hidden>
+          <p class="live-eyebrow">Сейчас тест</p>
+          <dl class="live-dl">
+            <div><dt>Ссылка</dt><dd id="live-url">—</dd></div>
+            <div><dt>Имя в BBB</dt><dd id="live-name">—</dd></div>
+            <div><dt>Статус</dt><dd id="live-status">—</dd></div>
+            <div><dt>Режим</dt><dd id="live-mode">—</dd></div>
+          </dl>
+          <button type="button" class="act danger" id="test-leave-live">Выйти</button>
+        </div>
+        <div id="test-setup">
+          <h2>Тестовая комната</h2>
+          <p class="muted" id="test-blurb">Отдельная сущность: ссылка и имя живут только тут, на пары не уходят. Зашёл — карточка как на паре, с «Выйти».</p>
+          <form id="test-form" class="panel form">
+            <label>Ссылка BBB <input id="test-url" name="url" placeholder="https://bbb.ssau.ru/b/…" autocomplete="off"></label>
+            <label>Имя в BBB <input id="test-name" name="name" placeholder="тест" autocomplete="off" maxlength="64"></label>
+            <div class="actions">
+              <button type="submit" class="act" id="test-dummy" data-want="dummy">Болванчик</button>
+              <button type="submit" class="act" id="test-listen" data-want="listen">Со звуком</button>
+            </div>
+          </form>
+        </div>
       </section>
       <section id="tab-now" class="tab" data-panel="now" hidden>
         <h2>Аккаунты</h2>

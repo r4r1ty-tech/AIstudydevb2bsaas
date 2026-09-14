@@ -224,4 +224,40 @@ button.act.on {
 #btn-refresh { margin-top: 10px; width: 100%; }
 
 #test-blurb { margin: 0 0 10px; }
-#test-status .row-item { margin: 0; padding: 0; border: 0; background: transparent; }
+
+.live-card {
+  padding: 14px 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #12161e 0%, #0e1218 100%);
+  margin-bottom: 14px;
+}
+.live-eyebrow {
+  margin: 0 0 10px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--acc, #7db7ff);
+}
+.live-dl {
+  margin: 0 0 14px;
+  display: grid;
+  gap: 10px;
+}
+.live-dl > div {
+  display: grid;
+  gap: 2px;
+}
+.live-dl dt {
+  margin: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.live-dl dd {
+  margin: 0;
+  font-size: 15px;
+  word-break: break-all;
+  line-height: 1.35;
+}
+#test-leave-live { width: 100%; min-height: 44px; }
+#test-setup[hidden], #test-live[hidden] { display: none !important; }

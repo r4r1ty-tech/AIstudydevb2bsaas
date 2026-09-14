@@ -39,6 +39,7 @@ type Bot struct {
 	lastT15  map[int64]int64 // telegram id → last T-15 lesson id
 	awaiting map[int64]awaitKind
 	live     map[int64]liveSnap
+	testLive *testLiveSnap
 }
 
 func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) {

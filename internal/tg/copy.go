@@ -293,22 +293,47 @@ func formatLinkList(upcoming []string, saved []string) string {
 
 func formatTestCard(j model.TestJoin) string {
 	var b strings.Builder
-	b.WriteString("Тест BBB\n\nВ списке зайду как «")
+	active := j.Want != model.TestWantOff &&
+		(j.Status == model.TestJoining || j.Status == model.TestLobby || j.Status == model.TestRoom)
+
+	if active {
+		b.WriteString("Сейчас тест\n\n")
+		b.WriteString("Ссылка: ")
+		if strings.TrimSpace(j.URL) == "" {
+			b.WriteString("нет")
+		} else {
+			b.WriteString(strings.TrimSpace(j.URL))
+		}
+		b.WriteString("\nИмя в BBB: ")
+		b.WriteString(j.GuestName())
+		b.WriteString("\nСтатус: ")
+		b.WriteString(testStatusLine(j))
+		b.WriteString("\nРежим: ")
+		if j.Want == model.TestWantListen || j.Mode == model.TestWantListen {
+			b.WriteString("со звуком")
+		} else {
+			b.WriteString("болванчик")
+		}
+		b.WriteString("\nПока не выйдешь — сам не отключится.")
+		if j.Status == model.TestJoining {
+			b.WriteString("\n")
+			b.WriteString(testWorkerHint)
+		}
+		return b.String()
+	}
+
+	b.WriteString("Тест BBB\n\nОтдельная комната: ссылка сюда не пишется в пары.\nВ списке зайду как «")
 	b.WriteString(j.GuestName())
-	b.WriteString("».\nБолванчик — просто сидеть, без звука.\nСо звуком — слушать и ловить вейкворды.\nИмя: кнопка «Имя» или /test имя …")
+	b.WriteString("».\nИмя: кнопка «Имя» или /test имя …")
 	url := strings.TrimSpace(j.URL)
 	if url == "" {
-		b.WriteString("\n\nСсылки нет. Пришли bbb.ssau.ru/b/…")
+		b.WriteString("\n\nСсылки нет. Пришли bbb.ssau.ru/b/… или /test <url>")
 		return b.String()
 	}
 	b.WriteString("\n\n")
 	b.WriteString(url)
 	b.WriteString("\n\nСейчас: ")
 	b.WriteString(testStatusLine(j))
-	if j.Status == model.TestJoining {
-		b.WriteString("\n")
-		b.WriteString(testWorkerHint)
-	}
 	return b.String()
 }
 
