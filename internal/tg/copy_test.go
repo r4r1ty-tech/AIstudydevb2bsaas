@@ -225,9 +225,15 @@ func TestFormatTestCardAndKeyboard(t *testing.T) {
 	if idleKB.InlineKeyboard[0][0].CallbackData != "tx:dummy" || idleKB.InlineKeyboard[0][1].CallbackData != "tx:listen" {
 		t.Fatalf("idle kb: %+v", idleKB)
 	}
+	if len(idleKB.InlineKeyboard) < 2 || idleKB.InlineKeyboard[1][0].CallbackData != "tx:url" {
+		t.Fatalf("url btn: %+v", idleKB)
+	}
 	inKB := testKeyboard(live)
 	if inKB.InlineKeyboard[0][0].CallbackData != "tx:leave" {
 		t.Fatalf("in kb: %+v", inKB)
+	}
+	if len(inKB.InlineKeyboard) < 2 || inKB.InlineKeyboard[1][0].CallbackData != "tx:url" {
+		t.Fatalf("url btn in live: %+v", inKB)
 	}
 	if !testAlready(live, model.TestWantListen) || testAlready(live, model.TestWantDummy) {
 		t.Fatal("testAlready")

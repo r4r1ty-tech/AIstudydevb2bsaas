@@ -70,6 +70,7 @@ func testAlready(j model.TestJoin, want string) bool {
 func testKeyboard(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
 	in := j.Want != model.TestWantOff && (j.Status == model.TestJoining || j.Status == model.TestLobby || j.Status == model.TestRoom)
 	nameBtn := gotgbot.InlineKeyboardButton{Text: "Имя", CallbackData: "tx:name"}
+	urlBtn := gotgbot.InlineKeyboardButton{Text: "Ссылка", CallbackData: "tx:url"}
 	if !in {
 		return gotgbot.InlineKeyboardMarkup{
 			InlineKeyboard: [][]gotgbot.InlineKeyboardButton{
@@ -77,7 +78,7 @@ func testKeyboard(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
 					{Text: "Болванчик", CallbackData: "tx:dummy"},
 					{Text: "Со звуком", CallbackData: "tx:listen"},
 				},
-				{nameBtn},
+				{urlBtn, nameBtn},
 			},
 		}
 	}
@@ -87,7 +88,7 @@ func testKeyboard(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
 	} else {
 		row = append(row, gotgbot.InlineKeyboardButton{Text: "Со звуком", CallbackData: "tx:listen"})
 	}
-	return gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{row, {nameBtn}}}
+	return gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{row, {urlBtn, nameBtn}}}
 }
 
 func t15Keyboard(lessonID int64) gotgbot.InlineKeyboardMarkup {

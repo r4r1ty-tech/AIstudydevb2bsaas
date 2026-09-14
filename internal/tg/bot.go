@@ -25,6 +25,7 @@ const (
 	awaitFIO
 	awaitWords
 	awaitTestName
+	awaitTestURL
 )
 
 type Bot struct {

@@ -10,6 +10,7 @@ import (
 )
 
 const askTestName = "Как подписывать тестового гостя в BBB?\nНапиши имя одной строкой. «-» — снова «тест»."
+const askTestURL = "Кинь ссылку bbb.ssau.ru/b/… — привяжу только к тесту, не к паре."
 
 func (b *Bot) onTest(_ *gotgbot.Bot, ctx *ext.Context) error {
 	from := b.allowed(ctx)
@@ -99,6 +100,7 @@ func (b *Bot) armTestURL(chatID int64, url, extra string) error {
 	if err := b.st.PutTestJoin(j); err != nil {
 		return err
 	}
+	b.clearAwait(chatID)
 	text := formatTestCard(j)
 	if extra != "" {
 		text = extra + "\n\n" + text
@@ -131,6 +133,10 @@ func (b *Bot) onTestCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return err
 	}
 	switch want {
+	case "url":
+		b.setAwait(from.Id, awaitTestURL)
+		answerToast(bot, ctx, "ссылка")
+		return b.send(from.Id, askTestURL, nil)
 	case "name":
 		b.setAwait(from.Id, awaitTestName)
 		answerToast(bot, ctx, "имя")
