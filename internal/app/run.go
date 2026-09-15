@@ -41,10 +41,12 @@ func Run(name string, needToken bool, fn func(context.Context, *config.Config, *
 		log.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.RememberAdmin(config.DefaultAdminID); err != nil {
-		logx.Warnf("app", "admin id: %v", err)
+
+	// Админ задаётся в env (ADMIN_TELEGRAM_ID), дефолт config.DefaultAdminID.
+	if cfg.AdminID == 0 {
+		cfg.AdminID = config.DefaultAdminID
 	}
-	cfg.AdminID = config.DefaultAdminID
+	logx.Infof("app", "admin=%d whitelist=%d", cfg.AdminID, len(cfg.Whitelist))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

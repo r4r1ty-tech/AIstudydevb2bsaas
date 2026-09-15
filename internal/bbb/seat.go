@@ -49,6 +49,28 @@ var formSels = []string{
 	"input[autocomplete='name']",
 }
 
+// Приглашёнческая страница BBB: сначала кнопка «Join Room», только потом форма/звук.
+var welcomeJoinSels = []string{
+	"[data-test='joinButton']",
+	"[data-test='join-room']",
+	"[data-test='sessionJoinButton']",
+	`button[aria-label='Join Room']`,
+	`button[aria-label='Войти в комнату']`,
+}
+
+var welcomeJoinRE = `(?i)join\s*room|войти в комнату|войти в конференцию|присоединиться к|подключиться к`
+
+func clickWelcomeJoin(page *rod.Page) bool {
+	if page == nil {
+		return false
+	}
+	p := page.Timeout(2 * time.Second)
+	if clickFirst(p, welcomeJoinSels) {
+		return true
+	}
+	return clickByText(p, welcomeJoinRE)
+}
+
 var roomSels = []string{
 	"[data-test='userListItem']",
 	"[data-test='userListContent']",
@@ -201,6 +223,7 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 		ctx = context.Background()
 	}
 	filled := false
+	joinClicks := 0
 	deadline := time.Now().Add(afterJoinWait)
 	var last seat
 	for time.Now().Before(deadline) {
@@ -225,6 +248,14 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 			}
 			filled = true
 			continue
+		}
+		// Приглашённая страница: пока не нажмём «Join Room», формы/лобби не будет.
+		if last == seatUnknown && !sig.hasAudio && joinClicks < 3 {
+			if clickWelcomeJoin(s.page.Context(ctx)) {
+				joinClicks++
+				time.Sleep(800 * time.Millisecond)
+				continue
+			}
 		}
 		time.Sleep(400 * time.Millisecond)
 	}

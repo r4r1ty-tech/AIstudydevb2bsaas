@@ -49,6 +49,10 @@ func (b *Bot) notePacks() (ready, pending []model.LecturePack, err error) {
 	}
 	for _, p := range all {
 		if p.Status == model.PackDone {
+			// Локальные файлы живут ~сутки; после очистки они только в GitHub.
+			if p.CleanedAt != nil {
+				continue
+			}
 			if len(ready) < 10 {
 				ready = append(ready, p)
 			}

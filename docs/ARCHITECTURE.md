@@ -39,7 +39,7 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 
 | Таблица | Ключ | Что хранит |
 | --- | --- | --- |
-| `users` | `telegram_id` | ФИО для BBB, подгруппа, on/off, `disabled_until`, SOCKS5, вейкворды, стадия онбординга |
+| `users` | `telegram_id` | ФИО для BBB, подгруппа, on/off, `disabled_until`, вейкворды, стадия онбординга |
 | `lessons` | `id` | день, слот, дисциплина, препод, место, подгруппа, тип, `online` |
 | `join_intents` | `(telegram_id, lesson_id)` | решение по T-15: `pending/yes/no`, `asked_at`, `decided_at` |
 | `presence` | `telegram_id` | текущее состояние в BBB: `none/lobby/room/error` + сообщение |

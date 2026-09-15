@@ -122,7 +122,6 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /api/parser/refresh", s.handleParserRefresh)
 	api.HandleFunc("GET /api/logs", s.handleLogs)
 	api.HandleFunc("GET /api/settings", s.handleSettingsGet)
-	api.HandleFunc("POST /api/settings", s.handleSettingsPost)
 	api.HandleFunc("GET /api/test", s.handleTestGet)
 	api.HandleFunc("POST /api/test", s.handleTestPost)
 

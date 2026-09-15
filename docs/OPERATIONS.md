@@ -21,7 +21,7 @@
 | `BBB_DRY_RUN` | `0` | `1` — не трогать Chromium (заглушка) |
 | `LECTURE_PAUSE` | `1` | Замораживать сторонние «тяжёлые» процессы на время пары |
 | `CHROME_BIN` / `CHROME_USER_DATA_DIR` | — | Путь к Chromium и его профилю |
-| `DEEPSEEK_API_KEY` / `DEEPSEEK_API_URL` / `DEEPSEEK_MODEL` | `.../deepseek.com` / `deepseek-chat` | LLM для конспекта (OpenAI-совместимый `chat/completions`). URL можно и с `/v1`, и без |
+| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | LLM для конспекта. Любой OpenAI-совместимый endpoint `chat/completions` (DeepSeek, Groq, OpenRouter, локальный и т.п.). URL можно и с `/v1`, и без; `LLM_MODEL` обязателен |
 | `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Ключи STT/vision/конспектов |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH` | `r4r1ty-tech` / `LectionsSSAU` / `main` | Выгрузка конспектов в GitHub. Токен `remote.sh` берёт из `LECTURES_TOKEN` или `gh auth token` на сервере |
 | `VOSK_MODEL` / `VOSK_SCRIPT` | `/opt/ssau-bot/vosk-model`, `/opt/ssau-bot/wake.py` | Вейкворды |
@@ -135,6 +135,7 @@ ssh ssau env-keys
 2. Нет `join` вообще — проверь, что `ssau-bbb.service` запущен и пара `online` в `/api/now`.
 3. `no bbb link` — нет ссылки на пару; пришли её боту (привяжется к идущей паре).
 4. `join fail ... форма гостя` — не нашлась форма/кнопка входа; смотри `LOG_LEVEL=debug` и `pageHint` в логе.
+5. `не в комнате (unknown)` и в `pageHint` «You have been invited to join … / Join Room» — приглашёнческая страница BBB; бот сам жмёт «Join Room» (`clickWelcomeJoin` в `internal/bbb/seat.go`). Если повторяется — добавить селектор/текст в `welcomeJoinSels`.
 5. `лобби >2 мин` — модератор не пускает; алерт приходит админу.
 
 **Панель не открывается**

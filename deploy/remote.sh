@@ -186,9 +186,9 @@ grep -q '^LOG_FILE=' "$APP/.env" || echo 'LOG_FILE=/opt/ssau-bot/ssau.log' >> "$
 grep -q '^WEBAPP_URL_FILE=' "$APP/.env" || echo 'WEBAPP_URL_FILE=/opt/ssau-bot/webapp_url' >> "$APP/.env"
 
 set_env_vars \
-  "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}" \
-  "DEEPSEEK_API_URL=${DEEPSEEK_API_URL:-}" \
-  "DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-}"
+  "LLM_API_KEY=${LLM_API_KEY:-}" \
+  "LLM_API_URL=${LLM_API_URL:-}" \
+  "LLM_MODEL=${LLM_MODEL:-}"
 
 github_token="${LECTURES_TOKEN:-}"
 if [[ -z "$github_token" ]] && command -v gh >/dev/null 2>&1; then

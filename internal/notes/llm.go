@@ -32,12 +32,15 @@ type chatResp struct {
 }
 
 func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int, transcript, slides string) (string, error) {
-	if cfg == nil || strings.TrimSpace(cfg.DeepSeekAPIKey) == "" {
-		return "", fmt.Errorf("нет DEEPSEEK_API_KEY")
+	if cfg == nil || strings.TrimSpace(cfg.LLMAPIKey) == "" {
+		return "", fmt.Errorf("нет LLM_API_KEY")
 	}
-	model := strings.TrimSpace(cfg.DeepSeekModel)
+	if strings.TrimSpace(cfg.LLMAPIURL) == "" {
+		return "", fmt.Errorf("нет LLM_API_URL")
+	}
+	model := strings.TrimSpace(cfg.LLMModel)
 	if model == "" {
-		model = "deepseek-chat"
+		return "", fmt.Errorf("нет LLM_MODEL")
 	}
 	sys := "Ты составляешь подробный конспект университетской лекции на русском, Markdown. " +
 		"В САМОМ НАЧАЛЕ — отдельный блок «## Организационное»: что и к какому сроку сдавать, дедлайны, " +
@@ -59,11 +62,11 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatEndpoint(cfg.DeepSeekAPIURL), bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatEndpoint(cfg.LLMAPIURL), bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.DeepSeekAPIKey)
+	req.Header.Set("Authorization", "Bearer "+cfg.LLMAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	cli := &http.Client{Timeout: 4 * time.Minute}
@@ -74,22 +77,23 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("deepseek HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
+		return "", fmt.Errorf("llm HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
 	}
 	var out chatResp
 	if err := json.Unmarshal(b, &out); err != nil {
 		return "", err
 	}
 	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
-		return "", fmt.Errorf("deepseek: пустой ответ")
+		return "", fmt.Errorf("llm: пустой ответ")
 	}
 	return strings.TrimSpace(out.Choices[0].Message.Content), nil
 }
 
+// chatEndpoint принимает любой OpenAI-совместимый base URL: и с /v1, и без.
 func chatEndpoint(base string) string {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
-		base = "https://api.deepseek.com"
+		return ""
 	}
 	if strings.HasSuffix(base, "/v1") {
 		return base + "/chat/completions"

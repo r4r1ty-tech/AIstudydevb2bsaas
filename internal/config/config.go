@@ -43,9 +43,9 @@ type Config struct {
 	BBBDryRun        bool
 	LecturePause     bool
 	PanelPassword    string
-	DeepSeekAPIKey   string
-	DeepSeekAPIURL   string
-	DeepSeekModel    string
+	LLMAPIKey        string
+	LLMAPIURL        string
+	LLMModel         string
 	FishStudioAPIKey string
 	FishStudioAPIURL string
 	GrokAPIKey       string
@@ -83,9 +83,9 @@ func Load() (*Config, error) {
 		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
 		LecturePause:     boolEnv("LECTURE_PAUSE", true),
 		PanelPassword:    strEnv("PANEL_PASSWORD", ""),
-		DeepSeekAPIKey:   strEnv("DEEPSEEK_API_KEY", ""),
-		DeepSeekAPIURL:   strEnv("DEEPSEEK_API_URL", "https://api.deepseek.com"),
-		DeepSeekModel:    strEnv("DEEPSEEK_MODEL", "deepseek-chat"),
+		LLMAPIKey:        strEnv("LLM_API_KEY", ""),
+		LLMAPIURL:        strings.TrimRight(strEnv("LLM_API_URL", ""), "/"),
+		LLMModel:         strEnv("LLM_MODEL", ""),
 		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),
 		FishStudioAPIURL: strEnv("FISH_STUDIO_API_URL", "https://api.fish.audio"),
 		GrokAPIKey:       strEnv("GROK_API_KEY", ""),
