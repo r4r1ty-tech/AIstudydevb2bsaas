@@ -6,6 +6,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
@@ -53,6 +54,7 @@ func (b *Bot) setTestGuestName(chatID int64, raw string) error {
 		return err
 	}
 	b.clearAwait(chatID)
+	logx.Infof("tg", "test guest name=%q", j.Name)
 	return b.send(chatID, formatTestCard(j), &gotgbot.SendMessageOpts{ReplyMarkup: b.testMarkup(j)})
 }
 
@@ -74,6 +76,7 @@ func (b *Bot) sendTestCard(chatID int64) error {
 		return err
 	}
 	msg, err := b.api.SendMessage(chatID, formatTestCard(j), &gotgbot.SendMessageOpts{
+		ParseMode:          htmlMode,
 		ReplyMarkup:        b.testMarkup(j),
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 	})
@@ -100,12 +103,14 @@ func (b *Bot) armTestURL(chatID int64, url, extra string) error {
 	if err := b.st.PutTestJoin(j); err != nil {
 		return err
 	}
+	logx.Infof("tg", "test url armed url=%s", url)
 	b.clearAwait(chatID)
 	text := formatTestCard(j)
 	if extra != "" {
 		text = extra + "\n\n" + text
 	}
 	msg, err := b.api.SendMessage(chatID, text, &gotgbot.SendMessageOpts{
+		ParseMode:          htmlMode,
 		ReplyMarkup:        b.testMarkup(j),
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 	})
@@ -176,10 +181,12 @@ func (b *Bot) onTestCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if err := b.st.PutTestJoin(j); err != nil {
 		return err
 	}
+	logx.Infof("tg", "test callback want=%s status=%s", j.Want, j.Status)
 	if ctx.CallbackQuery.Message != nil {
 		_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
-			Text:        formatTestCard(j),
-			ReplyMarkup: b.testMarkup(j),
+			ParseMode:          htmlMode,
+			Text:               formatTestCard(j),
+			ReplyMarkup:        b.testMarkup(j),
 			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 		})
 		b.rememberTestLive(from.Id, ctx.CallbackQuery.Message.GetMessageId(), j)

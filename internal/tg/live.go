@@ -92,10 +92,11 @@ func (b *Bot) syncLiveCard(p model.Presence, now time.Time) {
 
 	if ok && prev.messageID != 0 {
 		_, _, err := b.api.EditMessageText(&gotgbot.EditMessageTextOpts{
-			ChatId:      prev.chatID,
-			MessageId:   prev.messageID,
-			Text:        text,
-			ReplyMarkup: mk,
+			ParseMode:          htmlMode,
+			ChatId:             prev.chatID,
+			MessageId:          prev.messageID,
+			Text:               text,
+			ReplyMarkup:        mk,
 			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 		})
 		if err == nil {
@@ -110,6 +111,7 @@ func (b *Bot) syncLiveCard(p model.Presence, now time.Time) {
 	}
 
 	msg, err := b.api.SendMessage(p.TelegramID, text, &gotgbot.SendMessageOpts{
+		ParseMode:          htmlMode,
 		ReplyMarkup:        mk,
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 	})
@@ -133,10 +135,11 @@ func (b *Bot) clearLiveCard(telegramID int64, text string) {
 		return
 	}
 	_, _, _ = b.api.EditMessageText(&gotgbot.EditMessageTextOpts{
-		ChatId:      prev.chatID,
-		MessageId:   prev.messageID,
-		Text:        text,
-		ReplyMarkup: gotgbot.InlineKeyboardMarkup{},
+		ParseMode:          htmlMode,
+		ChatId:             prev.chatID,
+		MessageId:          prev.messageID,
+		Text:               text,
+		ReplyMarkup:        gotgbot.InlineKeyboardMarkup{},
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 	})
 }
@@ -146,18 +149,14 @@ func formatLiveCard(l model.Lesson, url, fio, state string, now time.Time, loc *
 		loc = time.Local
 	}
 	var b strings.Builder
-	b.WriteString("Сейчас на паре\n\n")
+	b.WriteString("<b>Сейчас на паре</b>\n\n")
 	b.WriteString("Предмет: ")
-	if strings.TrimSpace(l.Discipline) == "" {
-		b.WriteString("—")
-	} else {
-		b.WriteString(strings.TrimSpace(l.Discipline))
-	}
+	b.WriteString(bold(dashOr(l.Discipline)))
 	b.WriteString("\nСсылка: ")
 	if strings.TrimSpace(url) == "" {
 		b.WriteString("нет")
 	} else {
-		b.WriteString(strings.TrimSpace(url))
+		b.WriteString(hlink(strings.TrimSpace(url), strings.TrimSpace(url)))
 	}
 	b.WriteString("\nОсталось: ")
 	b.WriteString(remainPhrase(now, l.Finish))
@@ -167,12 +166,12 @@ func formatLiveCard(l model.Lesson, url, fio, state string, now time.Time, loc *
 		b.WriteString(")")
 	}
 	b.WriteString("\nСтатус: ")
-	b.WriteString(presenceLabel(state))
+	b.WriteString(bold(presenceLabel(state)))
 	b.WriteString("\nИмя в BBB: ")
 	if strings.TrimSpace(fio) == "" {
 		b.WriteString("не задано")
 	} else {
-		b.WriteString(strings.TrimSpace(fio))
+		b.WriteString(bold(fio))
 	}
 	return b.String()
 }
@@ -278,10 +277,11 @@ func (b *Bot) syncTestLive() {
 
 	if prev != nil && prev.messageID != 0 {
 		_, _, err := b.api.EditMessageText(&gotgbot.EditMessageTextOpts{
-			ChatId:      prev.chatID,
-			MessageId:   prev.messageID,
-			Text:        text,
-			ReplyMarkup: mk,
+			ParseMode:          htmlMode,
+			ChatId:             prev.chatID,
+			MessageId:          prev.messageID,
+			Text:               text,
+			ReplyMarkup:        mk,
 			LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 		})
 		if err == nil {
@@ -291,6 +291,7 @@ func (b *Bot) syncTestLive() {
 	}
 
 	msg, err := b.api.SendMessage(admin, text, &gotgbot.SendMessageOpts{
+		ParseMode:          htmlMode,
 		ReplyMarkup:        mk,
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 	})
@@ -315,11 +316,11 @@ func (b *Bot) clearTestLive(text string) {
 		return
 	}
 	_, _, _ = b.api.EditMessageText(&gotgbot.EditMessageTextOpts{
-		ChatId:      prev.chatID,
-		MessageId:   prev.messageID,
-		Text:        text,
-		ReplyMarkup: gotgbot.InlineKeyboardMarkup{},
+		ParseMode:          htmlMode,
+		ChatId:             prev.chatID,
+		MessageId:          prev.messageID,
+		Text:               text,
+		ReplyMarkup:        gotgbot.InlineKeyboardMarkup{},
 		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
 	})
 }
-

@@ -10,6 +10,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
@@ -84,6 +85,15 @@ func (b *Bot) onPanel(_ *gotgbot.Bot, ctx *ext.Context) error {
 	return b.send(chatID, "Панель — кнопка под этим сообщением. В браузере не открывай: Telegram тогда не даёт сессию.", &gotgbot.SendMessageOpts{ReplyMarkup: *mk})
 }
 
+func (b *Bot) onCancel(_ *gotgbot.Bot, ctx *ext.Context) error {
+	from := b.allowed(ctx)
+	if from == nil || ctx.EffectiveMessage == nil {
+		return nil
+	}
+	b.clearAwait(from.Id)
+	return b.sendMain(ctx.EffectiveMessage.Chat.Id, cancelText)
+}
+
 func (b *Bot) onHelp(_ *gotgbot.Bot, ctx *ext.Context) error {
 	from := b.allowed(ctx)
 	if from == nil || ctx.EffectiveMessage == nil {
@@ -146,7 +156,10 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 		return b.handleBBBURL(from.Id, chatID, url)
 	}
 	if isCommandText(text) {
-		return nil
+		if knownCommand(text) {
+			return nil
+		}
+		return b.sendMain(chatID, fallbackText)
 	}
 
 	u, err := b.st.GetUser(from.Id)
@@ -197,12 +210,14 @@ func (b *Bot) sendAskFIO(chatID, userID int64, text string) error {
 func (b *Bot) sendAskWords(u *model.User, chatID int64) error {
 	b.setAwait(u.TelegramID, awaitWords)
 	return b.send(chatID, formatWakeReply(*u)+"\n\n"+askWordsNext, &gotgbot.SendMessageOpts{
+		ParseMode:   htmlMode,
 		ReplyMarkup: cancelKeyboard(),
 	})
 }
 
 func (b *Bot) sendSettings(u *model.User, chatID int64) error {
 	return b.send(chatID, formatSettings(*u), &gotgbot.SendMessageOpts{
+		ParseMode:   htmlMode,
 		ReplyMarkup: settingsKeyboard(u.Subgroup),
 	})
 }
@@ -321,6 +336,7 @@ func (b *Bot) finishOnboarding(u *model.User, chatID int64, text string) error {
 	}); err != nil {
 		return err
 	}
+	logx.Infof("tg", "onboard done tg=%d fio=%q subgroup=%d", fresh.TelegramID, fresh.FIO, fresh.Subgroup)
 	return b.sendMain(chatID, formatOnboardDone(*fresh))
 }
 
@@ -477,6 +493,7 @@ func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
 	if err := b.st.SetLessonBBB(lesson.ID, url); err != nil {
 		return err
 	}
+	logx.Infof("tg", "bbb link lesson=%d tg=%d %q url=%s", lesson.ID, userID, lesson.Discipline, url)
 	if err := b.st.AddEvent(model.Event{
 		At:         b.now(),
 		Type:       "bbb",
@@ -554,6 +571,7 @@ func (b *Bot) onLeaveCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		_, _ = ctx.CallbackQuery.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: "не вышло", ShowAlert: true})
 		return err
 	}
+	logx.Infof("tg", "leave button tg=%d lesson=%d", from.Id, lessonID)
 	_ = b.st.AddEvent(model.Event{
 		At: now, Type: model.EventLeave,
 		TelegramID: from.Id, LessonID: lessonID, Message: "кнопка",
@@ -561,6 +579,7 @@ func (b *Bot) onLeaveCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 	_, _ = ctx.CallbackQuery.Answer(bot, &gotgbot.AnswerCallbackQueryOpts{Text: "выхожу"})
 	if ctx.CallbackQuery.Message != nil {
 		_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+			ParseMode:   htmlMode,
 			Text:        "Выхожу из комнаты… Через несколько секунд отключусь.",
 			ReplyMarkup: gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{}},
 		})
@@ -658,6 +677,7 @@ func (b *Bot) onOnboardCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		}
 		if ctx.CallbackQuery.Message != nil {
 			_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+				ParseMode:   htmlMode,
 				Text:        fmt.Sprintf("Подгруппа %d", n),
 				ReplyMarkup: emptyInline(),
 			})
@@ -666,6 +686,7 @@ func (b *Bot) onOnboardCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 	case "skipw":
 		if ctx.CallbackQuery.Message != nil {
 			_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+				ParseMode:   htmlMode,
 				Text:        "Свои слова пропускаю.",
 				ReplyMarkup: emptyInline(),
 			})
@@ -721,6 +742,7 @@ func (b *Bot) onSettingsCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		b.clearAwait(from.Id)
 		if ctx.CallbackQuery.Message != nil {
 			_, _, err := ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+				ParseMode:   htmlMode,
 				Text:        formatSettings(*u),
 				ReplyMarkup: settingsKeyboard(u.Subgroup),
 			})
@@ -737,6 +759,7 @@ func (b *Bot) onSettingsCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		u.Subgroup = n
 		if ctx.CallbackQuery.Message != nil {
 			_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+				ParseMode:   htmlMode,
 				Text:        formatSettings(*u),
 				ReplyMarkup: settingsKeyboard(n),
 			})
@@ -786,6 +809,7 @@ func (b *Bot) onJoinCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 	if err != nil {
 		return err
 	}
+	logx.Infof("tg", "t15 decision tg=%d lesson=%d join=%v", from.Id, lessonID, yes)
 
 	if !yes {
 		if err := b.st.AddEvent(model.Event{
@@ -816,6 +840,7 @@ func (b *Bot) onJoinCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 
 	if ctx.CallbackQuery.Message != nil {
 		_, _, _ = ctx.CallbackQuery.Message.EditText(bot, &gotgbot.EditMessageTextOpts{
+			ParseMode:   htmlMode,
 			Text:        reply,
 			ReplyMarkup: t15Keyboard(lessonID),
 		})

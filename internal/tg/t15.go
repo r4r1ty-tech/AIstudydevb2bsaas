@@ -7,6 +7,7 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
@@ -55,6 +56,7 @@ func (b *Bot) tickT15() {
 				continue
 			}
 			if err := b.sendT15Card(u, lesson); err != nil {
+				logx.Warnf("tg", "t15 card tg=%d lesson=%d: %v", u.TelegramID, lesson.ID, err)
 				continue
 			}
 			if err := b.st.PutIntent(model.JoinIntent{
@@ -63,8 +65,10 @@ func (b *Bot) tickT15() {
 				Decision:   model.JoinPending,
 				AskedAt:    now,
 			}); err != nil {
+				logx.Errorf("tg", "t15 intent tg=%d lesson=%d: %v", u.TelegramID, lesson.ID, err)
 				continue
 			}
+			logx.Infof("tg", "t15 sent tg=%d lesson=%d %q", u.TelegramID, lesson.ID, lesson.Discipline)
 			_ = b.st.AddEvent(model.Event{
 				At:         now,
 				Type:       model.EventT15,

@@ -118,7 +118,8 @@ func (b *Bot) sendPackPDF(chatID int64, p *model.LecturePack) error {
 	defer f.Close()
 	name := archive.PDFFileName(p.Discipline, p.Number)
 	_, err = b.api.SendDocument(chatID, gotgbot.InputFileByReader(name, f), &gotgbot.SendDocumentOpts{
-		Caption: archive.Label(p.Discipline, p.Number),
+		ParseMode: htmlMode,
+		Caption:   archive.Label(p.Discipline, p.Number),
 	})
 	return err
 }
