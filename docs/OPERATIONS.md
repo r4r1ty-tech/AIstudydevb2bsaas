@@ -113,6 +113,18 @@ ssh root@95.182.114.82 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 
 `Actions → Reset VDS data → Run workflow` вызывает `deploy/reset-data.sh` на сервере (БД, конспекты, профиль Chrome). Данные профиля Chrome нужно сбрасывать, если Chromium залип на битом профиле.
 
+## Доступ агента (opencode) к VDS
+
+Агенту не нужен root-shell и не нужно видеть секреты. Схема: юзер `agent` + SSH **forced command** на whitelisted диспетчер + правила `opencode.json` (`.env` и ключи на чтение закрыты). Агент умеет только `status`/`units`/`logs`/`restart`/`webapp-url`/`env-keys`/`disk`.
+
+Установка идёт через CI/CD (на VDS ничего не собирается): публичный ключ кладётся в секрет `AGENT_SSH_PUBKEY`, и `remote.sh` при деплое идемпотентно ставит юзера/диспетчер/sudoers/ключ. Отзыв и детали — [../deploy/agent-ssh/README.md](../deploy/agent-ssh/README.md).
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/ssau_agent_ed25519 -C opencode-agent -N ""
+gh secret set AGENT_SSH_PUBKEY --repo r4r1ty-tech/AIstudydevb2bsaas < ~/.ssh/ssau_agent_ed25519.pub
+ssh ssau env-keys
+```
+
 ## Диагностика
 
 **Бот не заходит на пару**
