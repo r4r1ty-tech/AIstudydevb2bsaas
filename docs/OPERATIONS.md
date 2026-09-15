@@ -23,6 +23,7 @@
 | `CHROME_BIN` / `CHROME_USER_DATA_DIR` | — | Путь к Chromium и его профилю |
 | `DEEPSEEK_API_KEY` / `DEEPSEEK_API_URL` / `DEEPSEEK_MODEL` | `.../deepseek.com` / `deepseek-chat` | LLM для конспекта (OpenAI-совместимый `chat/completions`). URL можно и с `/v1`, и без |
 | `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Ключи STT/vision/конспектов |
+| `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH` | `r4r1ty-tech` / `LectionsSSAU` / `main` | Выгрузка конспектов в GitHub. Токен `remote.sh` берёт из `LECTURES_TOKEN` или `gh auth token` на сервере |
 | `VOSK_MODEL` / `VOSK_SCRIPT` | `/opt/ssau-bot/vosk-model`, `/opt/ssau-bot/wake.py` | Вейкворды |
 | `WHITELIST_EXTRA` | — | Доп. Telegram id через запятую |
 | `LOG_LEVEL` | `info` | `debug/info/warn/error` |

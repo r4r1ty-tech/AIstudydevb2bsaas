@@ -57,6 +57,10 @@ type Config struct {
 	GroqSTTModel     string
 	VoskModel        string
 	VoskScript       string
+	GitHubToken      string
+	GitHubOwner      string
+	GitHubRepo       string
+	GitHubBranch     string
 	Whitelist        []int64
 }
 
@@ -93,6 +97,10 @@ func Load() (*Config, error) {
 		GroqSTTModel:     strEnv("GROQ_STT_MODEL", "whisper-large-v3"),
 		VoskModel:        strEnv("VOSK_MODEL", "/opt/ssau-bot/vosk-model"),
 		VoskScript:       strEnv("VOSK_SCRIPT", "/opt/ssau-bot/wake.py"),
+		GitHubToken:      strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
+		GitHubOwner:      strEnv("GITHUB_OWNER", "r4r1ty-tech"),
+		GitHubRepo:       strEnv("GITHUB_REPO", "LectionsSSAU"),
+		GitHubBranch:     strEnv("GITHUB_BRANCH", "main"),
 		Whitelist:        append([]int64(nil), DefaultWhitelist...),
 	}
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {

@@ -281,20 +281,23 @@ const (
 )
 
 type LecturePack struct {
-	ID         int64     `json:"id"`
-	LessonID   int64     `json:"lesson_id"`
-	Discipline string    `json:"discipline"`
-	Number     int       `json:"number"`
-	Date       string    `json:"date"`
-	Dir        string    `json:"dir"`
-	BBBURL     string    `json:"bbb_url"`
-	Status     string    `json:"status"`
-	Audio      string    `json:"audio"`
-	Transcript string    `json:"transcript"`
-	NotesPDF   string    `json:"notes_pdf"`
-	Err        string    `json:"err,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID            int64      `json:"id"`
+	LessonID      int64      `json:"lesson_id"`
+	Discipline    string     `json:"discipline"`
+	Number        int        `json:"number"`
+	Date          string     `json:"date"`
+	Dir           string     `json:"dir"`
+	BBBURL        string     `json:"bbb_url"`
+	Status        string     `json:"status"`
+	Audio         string     `json:"audio"`
+	Transcript    string     `json:"transcript"`
+	NotesPDF      string     `json:"notes_pdf"`
+	Err           string     `json:"err,omitempty"`
+	PublishStatus string     `json:"publish_status,omitempty"`
+	PublishedAt   *time.Time `json:"published_at,omitempty"`
+	CleanedAt     *time.Time `json:"cleaned_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 type ParseRun struct {

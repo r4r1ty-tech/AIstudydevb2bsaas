@@ -185,6 +185,7 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 	w.maybeHarvest(ctx, now)
 	w.maybeNotes(ctx, now)
+	w.maybePublish(ctx, now)
 }
 
 func (w *Worker) ensureLeave(key string, finish time.Time) time.Time {
