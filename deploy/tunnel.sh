@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ENV_FILE=/opt/ssau-bot/.env
+URL_FILE=/opt/ssau-bot/webapp_url
 BIN=/usr/local/bin/cloudflared
 ORIGIN=http://127.0.0.1:8080
 
@@ -34,6 +35,12 @@ print("changed" if changed else "same")
 PY
 }
 
+write_url_file() {
+  local url=$1
+  printf '%s\n' "$url" > "$URL_FILE.tmp"
+  mv "$URL_FILE.tmp" "$URL_FILE"
+}
+
 if [[ ! -x "$BIN" ]]; then
   echo "нет $BIN" >&2
   exit 1
@@ -44,10 +51,8 @@ echo "tunnel origin $ORIGIN"
   printf '%s\n' "$line"
   if [[ "$line" =~ https://[a-zA-Z0-9.-]+\.trycloudflare\.com ]]; then
     url="${BASH_REMATCH[0]}"
+    write_url_file "$url"
     st=$(set_webapp_url "$url")
-    echo "webapp $url $st"
-    if [[ "$st" == "changed" ]]; then
-      systemctl restart ssau-tg.service || true
-    fi
+    echo "webapp $url file=saved env=$st"
   fi
 done

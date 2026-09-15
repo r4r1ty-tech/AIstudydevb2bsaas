@@ -11,7 +11,8 @@
 | `TELEGRAM_BOT_TOKEN` | — | Bot API-токен. Нужен `tg` и `panel` |
 | `ADMIN_TELEGRAM_ID` | `1074442235` | Админ: `/panel`, `/test`, пуш-уведомления |
 | `PANEL_PASSWORD` | — | Пароль API панели (заголовок `X-Panel-Password` или `Authorization: Bearer`) |
-| `WEBAPP_PUBLIC_URL` | — | HTTPS-адрес туннеля для Mini App |
+| `WEBAPP_PUBLIC_URL` | — | HTTPS-адрес туннеля для Mini App (фолбэк, если нет файла) |
+| `WEBAPP_URL_FILE` | — | Файл с текущим URL туннеля. Если задан и непуст — важнее `WEBAPP_PUBLIC_URL` |
 | `LISTEN_ADDR` | `:8080` | Порт панели |
 | `DATABASE_PATH` | `data/bot.db` | Путь к sqlite |
 | `GROUP_ID` / `GROUP_CODE` | `531023229` / `6301-090301D` | Группа-якорь |
@@ -125,7 +126,8 @@ ssh root@95.182.114.82 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 **Панель не открывается**
 
 - `systemctl status ssau-panel` и `ssau-tunnel`;
-- Telegram Mini App требует валидный HTTPS — `WEBAPP_PUBLIC_URL` из туннеля; после смены URL перезапусти `ssau-tg` (он обновит кнопку админу);
+- Telegram Mini App требует валидный HTTPS. При быстром `cloudflared` URL меняется при каждом рестарте туннеля: `tunnel.sh` пишет его в `WEBAPP_URL_FILE` (`/opt/ssau-bot/webapp_url`), а `ssau-tg` читает файл каждые 20 с и сам переставляет кнопку админу — рестарт не нужен. Проверь `cat /opt/ssau-bot/webapp_url` и `journalctl -u ssau-tg | grep 'webapp url='`;
+- если файла нет, используется статичный `WEBAPP_PUBLIC_URL` — годится для именованного туннеля/ngrok со своим доменом;
 - 401 — неверный `PANEL_PASSWORD`.
 
 **VDS «встал» на старте пары**

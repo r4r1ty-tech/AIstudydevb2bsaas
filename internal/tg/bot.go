@@ -3,7 +3,6 @@ package tg
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +40,7 @@ type Bot struct {
 	awaiting map[int64]awaitKind
 	live     map[int64]liveSnap
 	testLive *testLiveSnap
+	webURL   string
 }
 
 func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) {
@@ -130,6 +130,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	defer cancelT15()
 	go b.t15Loop(t15Ctx)
 	go b.liveLoop(t15Ctx)
+	go b.webappLoop(t15Ctx)
 
 	<-ctx.Done()
 	cancelT15()
@@ -181,11 +182,41 @@ func (b *Bot) sendInline(chatID int64, text string, mk gotgbot.InlineKeyboardMar
 }
 
 func (b *Bot) webAppURL() string {
-	u := strings.TrimRight(strings.TrimSpace(b.cfg.WebAppURL), "/")
+	if b == nil || b.cfg == nil {
+		return ""
+	}
+	u := b.cfg.ResolveWebAppURL()
 	if u == "" {
 		return ""
 	}
 	return u + "/"
+}
+
+func (b *Bot) webappLoop(ctx context.Context) {
+	b.syncWebAppURL()
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			b.syncWebAppURL()
+		}
+	}
+}
+
+func (b *Bot) syncWebAppURL() {
+	u := b.webAppURL()
+	b.mu.Lock()
+	prev := b.webURL
+	b.webURL = u
+	b.mu.Unlock()
+	if u == "" || u == prev {
+		return
+	}
+	b.setAdminMenuButton()
+	logx.Infof("tg", "webapp url=%s", u)
 }
 
 func (b *Bot) publishProfile() {
@@ -234,6 +265,9 @@ func (b *Bot) setAdminMenuButton() {
 	if url == "" {
 		return
 	}
+	b.mu.Lock()
+	b.webURL = url
+	b.mu.Unlock()
 	admin := b.cfg.AdminID
 	_, err := b.api.SetChatMenuButton(&gotgbot.SetChatMenuButtonOpts{
 		ChatId: &admin,

@@ -102,6 +102,8 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 
 `internal/webapp`: статика + JSON API под паролем (`X-Panel-Password`/`Bearer`). Вкладки читают `/api/now`, `/api/people`, `/api/lessons`, `/api/parser`, `/api/logs`; пульт пишет `/api/people/{id}`, `/api/bbb`, `/api/settings`, `/api/test`. WebSocket не используется — обычный пуллинг.
 
+Публичный адрес Mini App резолвится в `config.ResolveWebAppURL`: свежий URL туннеля из `WEBAPP_URL_FILE` важнее статичного `WEBAPP_PUBLIC_URL`. `tg` опрашивает файл каждые 20 с (`webappLoop`) и при смене переставляет кнопку админу через `setChatMenuButton` — рестарт не требуется.
+
 ## Конкурентность (bbb)
 
 - Один тик-цикл (`Run`) + горутины заходов и фоновых джобов.
