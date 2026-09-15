@@ -135,6 +135,9 @@ func (s *Store) migrate() error {
 			transcript TEXT,
 			notes_pdf TEXT,
 			err TEXT,
+			publish_status TEXT,
+			published_at TEXT,
+			cleaned_at TEXT,
 			created_at TEXT,
 			updated_at TEXT
 		)`,
@@ -152,7 +155,26 @@ func (s *Store) migrate() error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: migrate commit: %w", err)
 	}
-	return s.ensureUserColumns()
+	if err := s.ensureUserColumns(); err != nil {
+		return err
+	}
+	return s.ensurePackColumns()
+}
+
+func (s *Store) ensurePackColumns() error {
+	alters := []string{
+		`ALTER TABLE lecture_packs ADD COLUMN publish_status TEXT`,
+		`ALTER TABLE lecture_packs ADD COLUMN published_at TEXT`,
+		`ALTER TABLE lecture_packs ADD COLUMN cleaned_at TEXT`,
+	}
+	for _, q := range alters {
+		if _, err := s.db.Exec(q); err != nil {
+			if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("store: migrate packs: %w", err)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureUserColumns() error {

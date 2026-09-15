@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
@@ -13,6 +14,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notes"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/publish"
 )
 
 const (
@@ -20,6 +22,9 @@ const (
 	notesDoneKey  = "notes_done:"
 
 	minRecordedBytes = 20000
+
+	publishedTTL = 24 * time.Hour
+	publishRetry = 5 * time.Minute
 )
 
 func (w *Worker) recRoot() string {
@@ -266,6 +271,125 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) {
 		Message: archive.Rel(p.Discipline, p.Number),
 	})
 	w.announceNotes(ctx, p)
+	w.publishPack(ctx, p)
+}
+
+func (w *Worker) publisher() *publish.GitHub {
+	if w == nil || w.Cfg == nil || w.Cfg.GitHubToken == "" {
+		return nil
+	}
+	return &publish.GitHub{
+		Token:  w.Cfg.GitHubToken,
+		Owner:  w.Cfg.GitHubOwner,
+		Repo:   w.Cfg.GitHubRepo,
+		Branch: w.Cfg.GitHubBranch,
+	}
+}
+
+func (w *Worker) packFile(p *model.LecturePack, rel, fallback string) string {
+	if strings.TrimSpace(rel) != "" {
+		return filepath.Join(w.recRoot(), rel)
+	}
+	return filepath.Join(w.recRoot(), p.Dir, fallback)
+}
+
+func (w *Worker) publishPack(ctx context.Context, p *model.LecturePack) {
+	pub := w.publisher()
+	if pub == nil || p == nil || p.Status != model.PackDone {
+		return
+	}
+	tr, err := os.ReadFile(w.packFile(p, p.Transcript, "transcript.txt"))
+	if err != nil {
+		w.publishFail(p, "transcript: "+err.Error())
+		return
+	}
+	pdf, err := os.ReadFile(w.packFile(p, p.NotesPDF, "notes.pdf"))
+	if err != nil {
+		w.publishFail(p, "pdf: "+err.Error())
+		return
+	}
+	dir := filepath.ToSlash(p.Dir)
+	if _, err := pub.Upsert(ctx, dir+"/transcript.txt", tr, "add "+dir); err != nil {
+		w.publishFail(p, err.Error())
+		return
+	}
+	if _, err := pub.Upsert(ctx, dir+"/notes.pdf", pdf, "add "+dir); err != nil {
+		w.publishFail(p, err.Error())
+		return
+	}
+	now := time.Now().UTC()
+	p.PublishStatus = "published"
+	p.PublishedAt = &now
+	p.Err = ""
+	_ = w.Store.SavePack(p)
+	_ = os.Remove(filepath.Join(w.recRoot(), p.Audio))
+	logx.Infof("bbb", "published %s", dir)
+	notify.Admin(ctx, w.Cfg, "конспект выгружен: "+archive.Rel(p.Discipline, p.Number))
+}
+
+func (w *Worker) publishFail(p *model.LecturePack, reason string) {
+	p.PublishStatus = "error"
+	p.Err = reason
+	_ = w.Store.SavePack(p)
+	logx.Warnf("bbb", "publish %s: %s", p.Dir, reason)
+}
+
+func (w *Worker) maybePublish(ctx context.Context, now time.Time) {
+	if w == nil || w.Store == nil || w.publisher() == nil {
+		return
+	}
+	if !w.beginJob(false) {
+		return
+	}
+	w.jobWG.Add(1)
+	go func() {
+		defer w.jobWG.Done()
+		defer w.endJob()
+		w.publishSweep(ctx, now)
+	}()
+}
+
+func (w *Worker) publishSweep(ctx context.Context, now time.Time) {
+	packs, err := w.Store.ListPacks()
+	if err != nil {
+		logx.Warnf("bbb", "publish list: %v", err)
+		return
+	}
+	for i := range packs {
+		p := packs[i]
+		if p.Status != model.PackDone || p.PublishStatus == "published" {
+			continue
+		}
+		if !p.UpdatedAt.IsZero() && now.Sub(p.UpdatedAt) < publishRetry {
+			continue
+		}
+		w.publishPack(ctx, &p)
+	}
+	for i := range packs {
+		p := packs[i]
+		if p.PublishedAt == nil || p.CleanedAt != nil {
+			continue
+		}
+		if now.Sub(*p.PublishedAt) < publishedTTL {
+			continue
+		}
+		w.cleanPack(&p)
+	}
+}
+
+func (w *Worker) cleanPack(p *model.LecturePack) {
+	base := filepath.Join(w.recRoot(), p.Dir)
+	for _, f := range []string{
+		archive.TranscriptFile(base),
+		archive.NotesMD(base),
+		archive.NotesPDF(base),
+	} {
+		_ = os.Remove(f)
+	}
+	now := time.Now().UTC()
+	p.CleanedAt = &now
+	_ = w.Store.SavePack(p)
+	logx.Infof("bbb", "cleaned local %s", p.Dir)
 }
 
 func (w *Worker) announceNotes(ctx context.Context, p *model.LecturePack) {

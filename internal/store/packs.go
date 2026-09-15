@@ -12,7 +12,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-const packCols = `id, lesson_id, discipline, number, date, dir, bbb_url, status, audio, transcript, notes_pdf, err, created_at, updated_at`
+const packCols = `id, lesson_id, discipline, number, date, dir, bbb_url, status, audio, transcript, notes_pdf, err, publish_status, published_at, cleaned_at, created_at, updated_at`
 
 func (s *Store) EnsurePack(l model.Lesson, bbbURL, root string) (*model.LecturePack, error) {
 	if s == nil {
@@ -52,9 +52,10 @@ func (s *Store) EnsurePack(l model.Lesson, bbbURL, root string) (*model.LectureP
 		UpdatedAt:  now,
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO lecture_packs (lesson_id, discipline, number, date, dir, bbb_url, status, audio, transcript, notes_pdf, err, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO lecture_packs (lesson_id, discipline, number, date, dir, bbb_url, status, audio, transcript, notes_pdf, err, publish_status, published_at, cleaned_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.LessonID, p.Discipline, p.Number, p.Date, p.Dir, p.BBBURL, p.Status, p.Audio, p.Transcript, p.NotesPDF, p.Err,
+		p.PublishStatus, nullTimeArg(p.PublishedAt), nullTimeArg(p.CleanedAt),
 		timeArg(p.CreatedAt), timeArg(p.UpdatedAt),
 	)
 	if err != nil {
@@ -104,8 +105,9 @@ func (s *Store) SavePack(p *model.LecturePack) error {
 	}
 	p.UpdatedAt = time.Now().UTC()
 	_, err := s.db.Exec(
-		`UPDATE lecture_packs SET discipline=?, number=?, date=?, dir=?, bbb_url=?, status=?, audio=?, transcript=?, notes_pdf=?, err=?, updated_at=? WHERE id=?`,
-		p.Discipline, p.Number, p.Date, p.Dir, p.BBBURL, p.Status, p.Audio, p.Transcript, p.NotesPDF, p.Err, timeArg(p.UpdatedAt), p.ID,
+		`UPDATE lecture_packs SET discipline=?, number=?, date=?, dir=?, bbb_url=?, status=?, audio=?, transcript=?, notes_pdf=?, err=?, publish_status=?, published_at=?, cleaned_at=?, updated_at=? WHERE id=?`,
+		p.Discipline, p.Number, p.Date, p.Dir, p.BBBURL, p.Status, p.Audio, p.Transcript, p.NotesPDF, p.Err,
+		p.PublishStatus, nullTimeArg(p.PublishedAt), nullTimeArg(p.CleanedAt), timeArg(p.UpdatedAt), p.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("store: save pack: %w", err)
@@ -158,10 +160,11 @@ func (s *Store) AnyRecording() (bool, error) {
 
 func scanPack(sc scanner) (*model.LecturePack, error) {
 	var p model.LecturePack
-	var disc, date, dir, url, status, audio, tr, pdf, errMsg, created, updated sql.NullString
+	var disc, date, dir, url, status, audio, tr, pdf, errMsg, pubStatus, created, updated sql.NullString
+	var pubAt, cleaned sql.NullString
 	if err := sc.Scan(
 		&p.ID, &p.LessonID, &disc, &p.Number, &date, &dir, &url, &status,
-		&audio, &tr, &pdf, &errMsg, &created, &updated,
+		&audio, &tr, &pdf, &errMsg, &pubStatus, &pubAt, &cleaned, &created, &updated,
 	); err != nil {
 		return nil, err
 	}
@@ -174,6 +177,17 @@ func scanPack(sc scanner) (*model.LecturePack, error) {
 	p.Transcript = nullStr(tr)
 	p.NotesPDF = nullStr(pdf)
 	p.Err = nullStr(errMsg)
+	p.PublishStatus = nullStr(pubStatus)
+	if pub, err := parseNullTime(pubAt); err != nil {
+		return nil, err
+	} else {
+		p.PublishedAt = pub
+	}
+	if cl, err := parseNullTime(cleaned); err != nil {
+		return nil, err
+	} else {
+		p.CleanedAt = cl
+	}
 	if created.Valid && created.String != "" {
 		t, err := parseTime(created.String)
 		if err != nil {
