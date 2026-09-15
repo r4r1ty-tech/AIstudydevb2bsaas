@@ -3,7 +3,6 @@ package tg
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
 
@@ -65,7 +65,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		Error: func(_ *gotgbot.Bot, _ *ext.Context, err error) ext.DispatcherAction {
-			log.Printf("tg: handler: %v", err)
+			logx.Errorf("tg", "handler: %v", err)
 			return ext.DispatcherActionNoop
 		},
 	})
@@ -83,6 +83,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	}
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
+	dispatcher.AddHandler(handlers.NewCommand("cancel", b.onCancel))
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
 	dispatcher.AddHandler(handlers.NewCommand("test", b.onTest))
 	dispatcher.AddHandler(handlers.NewCommand("help", b.onHelp))
@@ -123,7 +124,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	}
 
 	b.publishProfile()
-	log.Printf("webapp=%s", b.webAppURL())
+	logx.Infof("tg", "webapp=%s", b.webAppURL())
 
 	t15Ctx, cancelT15 := context.WithCancel(ctx)
 	defer cancelT15()
@@ -161,6 +162,12 @@ func (b *Bot) allowed(ctx *ext.Context) *gotgbot.User {
 }
 
 func (b *Bot) send(chatID int64, text string, opts *gotgbot.SendMessageOpts) error {
+	if opts == nil {
+		opts = &gotgbot.SendMessageOpts{}
+	}
+	if opts.ParseMode == "" {
+		opts.ParseMode = htmlMode
+	}
 	_, err := b.api.SendMessage(chatID, text, opts)
 	return err
 }
@@ -187,10 +194,11 @@ func (b *Bot) publishProfile() {
 		{Command: "today", Description: "Пары на сегодня"},
 		{Command: "notes", Description: "Конспекты PDF"},
 		{Command: "settings", Description: "Профиль: имя, подгруппа, пинг"},
+		{Command: "cancel", Description: "Отменить ввод"},
 		{Command: "help", Description: "Как это работает"},
 	}
 	if _, err := b.api.SetMyCommands(cmds, nil); err != nil {
-		log.Printf("tg: setMyCommands: %v", err)
+		logx.Warnf("tg", "setMyCommands: %v", err)
 	}
 	if admin := b.cfg.AdminID; admin != 0 {
 		adminCmds := append(append([]gotgbot.BotCommand{}, cmds...),
@@ -200,23 +208,23 @@ func (b *Bot) publishProfile() {
 		if _, err := b.api.SetMyCommands(adminCmds, &gotgbot.SetMyCommandsOpts{
 			Scope: gotgbot.BotCommandScopeChat{ChatId: admin},
 		}); err != nil {
-			log.Printf("tg: setMyCommands admin: %v", err)
+			logx.Warnf("tg", "setMyCommands admin: %v", err)
 		}
 	}
 	if _, err := b.api.SetChatMenuButton(&gotgbot.SetChatMenuButtonOpts{
 		MenuButton: gotgbot.MenuButtonCommands{},
 	}); err != nil {
-		log.Printf("tg: setChatMenuButton default: %v", err)
+		logx.Warnf("tg", "setChatMenuButton default: %v", err)
 	}
 	if _, err := b.api.SetMyShortDescription(&gotgbot.SetMyShortDescriptionOpts{
 		ShortDescription: botShortDesc,
 	}); err != nil {
-		log.Printf("tg: setMyShortDescription: %v", err)
+		logx.Warnf("tg", "setMyShortDescription: %v", err)
 	}
 	if _, err := b.api.SetMyDescription(&gotgbot.SetMyDescriptionOpts{
 		Description: botDescription,
 	}); err != nil {
-		log.Printf("tg: setMyDescription: %v", err)
+		logx.Warnf("tg", "setMyDescription: %v", err)
 	}
 	b.setAdminMenuButton()
 }
@@ -235,7 +243,7 @@ func (b *Bot) setAdminMenuButton() {
 		},
 	})
 	if err != nil {
-		log.Printf("tg: setChatMenuButton: %v", err)
+		logx.Warnf("tg", "setChatMenuButton: %v", err)
 	}
 }
 

@@ -9,17 +9,17 @@ import (
 )
 
 const (
-	introText      = "Захожу на онлайн-пары вместо тебя: в BBB в списке будет твоё ФИО, без микрофона и камеры.\n\nКак тебя записать в журнал? Фамилия Имя Отчество, как в ведомости."
+	introText      = "Захожу на онлайн-пары вместо тебя: в списке BBB будет твоё ФИО, без микрофона и камеры.\n\n<b>Как тебя записать в журнал?</b>\nФамилия Имя Отчество, как в ведомости."
 	askFIO         = "Напиши ФИО как в ведомости — три слова: Фамилия Имя Отчество.\nПод этим именем зайду в комнату."
 	askSub         = "Какая подгруппа? Чужие подгрупповые пары пропускаю."
-	askWords       = "На лекции слушаю короткие слова и пишу тебе, если препод их сказал.\nУже есть: фамилия, «тест», «контрольная», «мудл».\nМожно добавить свои через запятую или пропустить."
-	askWordsNext   = "Напиши свои слова через запятую — например: лаба, зачёт.\n«-» — убрать только свои, базовые останутся."
-	askBBBLink     = "Ссылка нужна на ЭТУ пару, не на предмет на семестр. Пришли bbb.ssau.ru/b/… — без неё не зайду."
-	helpText       = "Внизу три кнопки.\n\nПары — что сегодня и зайду ли.\nКонспекты — PDF после полуночи.\nПрофиль — имя в журнале, подгруппа, слова для пинга.\n\nЗа 15 мин до онлайн-пары спрошу. «Зайти за меня» — иду сразу. Молчишь — зайду за 5 мин до звонка, без микрофона.\nСсылку bbb.ssau.ru/b/… кинь перед каждой парой — привяжу только к этой."
+	askWords       = "На лекции слушаю короткие слова и пишу тебе, если препод их сказал.\nУже есть: фамилия, «тест», «контрольная», «мудл».\nМожно добавить свои."
+	askWordsNext   = "Напиши свои слова через запятую — например: лаба, зачёт.\n«-» — убрать свои, базовые останутся."
+	askBBBLink     = "Ссылка нужна <b>на эту пару</b>. Пришли bbb.ssau.ru/b/… — без неё не зайду."
+	helpText       = "<b>Что умею</b>\nЗахожу на онлайн-пары вместо тебя: в BBB в списке твоё ФИО, микрофон выключен.\n\n<b>Кнопки внизу</b>\nПары — что сегодня и зайду ли\nКонспекты — PDF после полуночи\nПрофиль — имя в журнале, подгруппа, слова\n\n<b>Как это работает</b>\nЗа 15 минут спрошу: заходить? Молчишь — зайду за 5 минут до звонка.\nСсылку bbb.ssau.ru/b/… кинь перед парой — привяжу к ней.\nОтключиться можно кнопкой в карточке пары."
 	fallbackText   = "Не понял. Внизу три кнопки: Пары, Конспекты, Профиль."
 	noBBBTarget    = "Не понял, к какой паре ссылка. Открой Профиль → Комнаты BBB или пришли bbb.ssau.ru/b/… ближе к паре."
 	testNeedURL    = "Кинь ссылку bbb.ssau.ru/b/… — сразу покажу кнопки захода."
-	testWorkerHint = "Воркер BBB подхватит за несколько секунд. Если молчит — ssau-bbb не запущен."
+	testWorkerHint = "Захожу за несколько секунд. Если тихо — служба ssau-bbb не запущена."
 	notesEmpty     = "Готовых конспектов пока нет.\nНа лекции пишу звук, PDF собираю после полуночи — кнопка появится здесь."
 	notesHint      = "Готовый PDF — кнопкой под сообщением."
 	botShortDesc   = "Захожу на онлайн-пары СГАУ вместо тебя"
@@ -27,6 +27,7 @@ const (
 	inputHint      = "Пары, Конспекты или Профиль"
 	fioHint        = "Фамилия Имя Отчество"
 	changeHint     = "Передумать можно в карточке пары."
+	cancelText     = "Отменил. Внизу три кнопки: Пары, Конспекты, Профиль."
 )
 
 const (
@@ -55,12 +56,12 @@ func formatWakeReply(u model.User) string {
 	if extra == "" {
 		extra = "пока нет"
 	}
-	return fmt.Sprintf("На лекции напишу, если услышу: %s.\nСвои добавки: %s", base, extra)
+	return fmt.Sprintf("На лекции напишу, если услышу: <b>%s</b>.\nСвои добавки: %s", esc(base), esc(extra))
 }
 
 func formatOnboardDone(u model.User) string {
-	return fmt.Sprintf("Готово. В журнале — %s, подгруппа %d.\n\nВнизу: Пары, Конспекты, Профиль.\nЗа 15 мин спрошу. Молчишь — зайду за 5 мин до начала.",
-		u.FIO, u.Subgroup)
+	return fmt.Sprintf("<b>Готово.</b>\nВ журнале — %s, подгруппа %d.\n\nВнизу: Пары, Конспекты, Профиль.\nЗа 15 мин спрошу. Молчишь — зайду за 5 мин до начала.",
+		esc(u.FIO), u.Subgroup)
 }
 
 func formatSettings(u model.User) string {
@@ -73,8 +74,8 @@ func formatSettings(u model.User) string {
 		extra = "нет"
 	}
 	return fmt.Sprintf(
-		"Профиль\n\nИмя в журнале\n%s\nПод этим ФИО захожу в BBB. Камеру и микрофон не включаю.\n\nПодгруппа: %d\nПары другой подгруппы пропускаю.\n\nПинг на лекции\nВсегда: %s\nТвои слова: %s\nЕсли препод скажет — напишу сюда.",
-		fio, u.Subgroup, strings.Join(u.WakeList(), ", "), extra,
+		"<b>Профиль</b>\n\nИмя в журнале: %s\nПод этим ФИО захожу в BBB. Камеру и микрофон не включаю.\n\nПодгруппа: %d\nПары другой подгруппы пропускаю.\n\nПинг на лекции\nВсегда: %s\nТвои слова: %s\nЕсли препод скажет — напишу сюда.",
+		esc(fio), u.Subgroup, esc(strings.Join(u.WakeList(), ", ")), esc(extra),
 	)
 }
 
@@ -94,13 +95,13 @@ func lessonStamp(l model.Lesson, loc *time.Location) string {
 
 func formatLessonHead(l model.Lesson, loc *time.Location) string {
 	var b strings.Builder
-	b.WriteString(l.Discipline)
-	if l.Teacher != "" {
+	b.WriteString(bold(dashOr(l.Discipline)))
+	if strings.TrimSpace(l.Teacher) != "" {
 		b.WriteString("\n")
-		b.WriteString(l.Teacher)
+		b.WriteString(esc(l.Teacher))
 	}
 	b.WriteString("\n")
-	b.WriteString(lessonStamp(l, loc))
+	b.WriteString(code(lessonStamp(l, loc)))
 	return b.String()
 }
 
@@ -126,16 +127,16 @@ func untilPhrase(now, begin time.Time) string {
 
 func formatT15Card(l model.Lesson, now time.Time, loc *time.Location, hasLink bool) string {
 	var b strings.Builder
+	b.WriteString("<b>")
 	b.WriteString(untilPhrase(now, l.Begin))
-	b.WriteString("\n\n")
+	b.WriteString("</b>\n\n")
 	b.WriteString(formatLessonHead(l, loc))
 	b.WriteString("\n\nЗайти за тебя? Если не ответишь — зайду за 5 минут до звонка.\nБез микрофона, имя в списке как в журнале.")
-	b.WriteString("\n\nСсылка — только на эту пару. Прошлые комнаты того же предмета не беру.")
 	if !hasLink {
-		b.WriteString("\n")
+		b.WriteString("\n\n")
 		b.WriteString(askBBBLink)
 	} else {
-		b.WriteString("\nСсылка этой пары уже есть. Другая комната — пришли новый bbb.ssau.ru/b/…")
+		b.WriteString("\n\nСсылка этой пары уже есть. Другая комната — пришли новый bbb.ssau.ru/b/…")
 	}
 	return b.String()
 }
@@ -147,7 +148,7 @@ func formatJoinAck(l *model.Lesson, loc *time.Location, fio string, hasLink bool
 		b.WriteString("\n\n")
 	}
 	if strings.TrimSpace(fio) != "" {
-		fmt.Fprintf(&b, "Ок, зайду не дожидаясь звонка как %s.\nБез микрофона. Если не пустят — напишу.", fio)
+		fmt.Fprintf(&b, "Ок, зайду не дожидаясь звонка как <b>%s</b>.\nБез микрофона. Если не пустят — напишу.", esc(fio))
 	} else {
 		b.WriteString("Ок, зайду не дожидаясь звонка. Без микрофона. Если не пустят — напишу.")
 	}
@@ -182,7 +183,7 @@ func formatSavedLink(l model.Lesson) string {
 	if stamp == "–" || stamp == "" {
 		return "Привязал ссылку к этой паре. На следующую сам не перенесу — кинь заново."
 	}
-	return fmt.Sprintf("Привязал ссылку к %s %s.\nНа другую пару этот URL не пойдёт — перед следующей кинь заново.", title, stamp)
+	return fmt.Sprintf("Привязал ссылку к %s %s.\nНа другую пару этот URL не пойдёт — перед следующей кинь заново.", esc(title), esc(stamp))
 }
 
 type todayRow struct {
@@ -199,9 +200,9 @@ func formatToday(now time.Time, loc *time.Location, fio string, rows []todayRow)
 	if loc != nil {
 		day = now.In(loc).Format("02.01")
 	}
-	fmt.Fprintf(&b, "Сегодня, %s", day)
+	fmt.Fprintf(&b, "<b>Сегодня, %s</b>", day)
 	if strings.TrimSpace(fio) != "" {
-		fmt.Fprintf(&b, "\nВ журнале: %s", fio)
+		fmt.Fprintf(&b, "\nВ журнале: %s", esc(fio))
 	}
 	if len(rows) == 0 {
 		b.WriteString("\n\nОнлайн-пар на сегодня больше нет.")
@@ -217,13 +218,13 @@ func formatToday(now time.Time, loc *time.Location, fio string, rows []todayRow)
 		}
 	}
 	if len(nowRows) > 0 {
-		b.WriteString("\n\nСейчас")
+		b.WriteString("\n\n<b>Сейчас</b>")
 		for _, r := range nowRows {
 			writeTodayRow(&b, r, loc)
 		}
 	}
 	if len(later) > 0 {
-		b.WriteString("\n\nДальше")
+		b.WriteString("\n\n<b>Дальше</b>")
 		for _, r := range later {
 			writeTodayRow(&b, r, loc)
 		}
@@ -233,7 +234,7 @@ func formatToday(now time.Time, loc *time.Location, fio string, rows []todayRow)
 
 func writeTodayRow(b *strings.Builder, r todayRow, loc *time.Location) {
 	l := r.Lesson
-	fmt.Fprintf(b, "\n• %s · %s", l.Discipline, lessonStamp(l, loc))
+	fmt.Fprintf(b, "\n• %s · %s", bold(dashOr(l.Discipline)), code(lessonStamp(l, loc)))
 	if note := todayNote(r); note != "" {
 		fmt.Fprintf(b, "\n  %s", note)
 	}
@@ -247,7 +248,7 @@ func todayNote(r todayRow) string {
 		return "лобби, жду модератора"
 	case model.PresenceError:
 		if r.Detail != "" {
-			return r.Detail
+			return esc(r.Detail)
 		}
 		return "ошибка захода"
 	}
@@ -277,16 +278,16 @@ func formatWordsHint() string {
 
 func formatLinkList(upcoming []string, saved []string) string {
 	var b strings.Builder
-	b.WriteString("Комнаты BBB\n\nПришли сюда ссылку bbb.ssau.ru/b/… — запомню на предмет. Один раз хватит.")
-	b.WriteString("\n\nЖдут ссылку:\n")
+	b.WriteString("<b>Комнаты BBB</b>\n\nПришли сюда ссылку bbb.ssau.ru/b/… — запомню на пару. Один раз хватит.")
+	b.WriteString("\n\n<b>Ждут ссылку</b>\n")
 	if len(upcoming) == 0 {
 		b.WriteString("сейчас все комнаты известны")
 	} else {
-		b.WriteString(strings.Join(upcoming, "\n"))
+		b.WriteString(esc(strings.Join(upcoming, "\n")))
 	}
 	if len(saved) > 0 {
-		b.WriteString("\n\nУже запомнил:\n")
-		b.WriteString(strings.Join(saved, "\n"))
+		b.WriteString("\n\n<b>Уже запомнил</b>\n")
+		b.WriteString(esc(strings.Join(saved, "\n")))
 	}
 	return b.String()
 }
@@ -297,15 +298,15 @@ func formatTestCard(j model.TestJoin) string {
 		(j.Status == model.TestJoining || j.Status == model.TestLobby || j.Status == model.TestRoom)
 
 	if active {
-		b.WriteString("Сейчас тест\n\n")
+		b.WriteString("<b>Сейчас тест</b>\n\n")
 		b.WriteString("Ссылка: ")
 		if strings.TrimSpace(j.URL) == "" {
 			b.WriteString("нет")
 		} else {
-			b.WriteString(strings.TrimSpace(j.URL))
+			b.WriteString(hlink(strings.TrimSpace(j.URL), strings.TrimSpace(j.URL)))
 		}
 		b.WriteString("\nИмя в BBB: ")
-		b.WriteString(j.GuestName())
+		b.WriteString(bold(j.GuestName()))
 		b.WriteString("\nСтатус: ")
 		b.WriteString(testStatusLine(j))
 		b.WriteString("\nРежим: ")
@@ -322,16 +323,16 @@ func formatTestCard(j model.TestJoin) string {
 		return b.String()
 	}
 
-	b.WriteString("Тест BBB\n\nОтдельная комната: ссылка сюда не пишется в пары.\nВ списке зайду как «")
-	b.WriteString(j.GuestName())
-	b.WriteString("».\nСсылка / имя: кнопки ниже или /test <url>")
+	b.WriteString("<b>Тест BBB</b>\n\nОтдельная комната: ссылка сюда не пишется в пары.\nВ списке зайду как «")
+	b.WriteString(esc(j.GuestName()))
+	b.WriteString("».\nСсылка / имя: кнопки ниже или /test &lt;url&gt;")
 	url := strings.TrimSpace(j.URL)
 	if url == "" {
 		b.WriteString("\n\nСсылки нет. Жми «Ссылка» или пришли bbb.ssau.ru/b/…")
 		return b.String()
 	}
 	b.WriteString("\n\n")
-	b.WriteString(url)
+	b.WriteString(hlink(url, url))
 	b.WriteString("\n\nСейчас: ")
 	b.WriteString(testStatusLine(j))
 	return b.String()
@@ -350,7 +351,7 @@ func testStatusLine(j model.TestJoin) string {
 		return "в комнате · болванчик"
 	case model.TestError:
 		if j.Message != "" {
-			return "ошибка: " + j.Message
+			return "ошибка: " + esc(j.Message)
 		}
 		return "ошибка захода"
 	default:
@@ -382,17 +383,17 @@ func formatNotesList(ready, pending []model.LecturePack) string {
 		return notesEmpty
 	}
 	var b strings.Builder
-	b.WriteString("Конспекты лекций")
+	b.WriteString("<b>Конспекты лекций</b>")
 	if len(ready) > 0 {
 		b.WriteString("\n\nГотовы — жми кнопку:")
 		for i, p := range ready {
-			fmt.Fprintf(&b, "\n%d. %s (%s)", i+1, archiveLabel(p), packDay(p.Date))
+			fmt.Fprintf(&b, "\n%d. %s (%s)", i+1, esc(archiveLabel(p)), packDay(p.Date))
 		}
 	}
 	if len(pending) > 0 {
 		b.WriteString("\n\nЕщё собираю:")
 		for _, p := range pending {
-			fmt.Fprintf(&b, "\n• %s — %s", archiveLabel(p), notesStatus(p.Status))
+			fmt.Fprintf(&b, "\n• %s — %s", esc(archiveLabel(p)), notesStatus(p.Status))
 		}
 	}
 	b.WriteString("\n\n")
