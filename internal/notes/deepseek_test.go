@@ -29,7 +29,7 @@ func TestChatEndpoint(t *testing.T) {
 }
 
 func TestSummarizeOpenAICompatible(t *testing.T) {
-	var gotPath, gotAuth, gotModel string
+	var gotPath, gotAuth, gotModel, gotSys string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
@@ -37,6 +37,9 @@ func TestSummarizeOpenAICompatible(t *testing.T) {
 		var req chatReq
 		_ = json.Unmarshal(b, &req)
 		gotModel = req.Model
+		if len(req.Messages) > 0 {
+			gotSys = req.Messages[0].Content
+		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"  конспект  "}}]}`))
 	}))
 	defer srv.Close()
@@ -61,6 +64,9 @@ func TestSummarizeOpenAICompatible(t *testing.T) {
 	}
 	if gotModel != "deepseek-v4-flash-0731" {
 		t.Fatalf("model = %q", gotModel)
+	}
+	if !strings.Contains(gotSys, "Организационное") {
+		t.Fatalf("system prompt must ask for the operational block first: %q", gotSys)
 	}
 }
 
