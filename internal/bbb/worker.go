@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
@@ -31,7 +31,11 @@ type Worker struct {
 	lobbyAt    map[string]time.Time
 	blockedAt  map[string]time.Time // fail → стоп до JoinYes после этого
 	dropRetry  map[string]int       // mid-session: 0/1, второй drop → block
+	joining    map[string]struct{}
+	testPaused bool
 	busy       bool
+	joinWG     sync.WaitGroup
+	jobWG      sync.WaitGroup
 }
 
 func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker {
@@ -54,17 +58,18 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		hogs = newProcHogs()
 	}
 	return &Worker{
-		Cfg:      cfg,
-		Store:    st,
-		Loc:      loc,
-		Joiner:   j,
-		Hogs:     hogs,
+		Cfg:       cfg,
+		Store:     st,
+		Loc:       loc,
+		Joiner:    j,
+		Hogs:      hogs,
 		sessions:  make(map[string]Session),
 		leaveAt:   make(map[string]time.Time),
 		noBBB:     make(map[string]struct{}),
 		lobbyAt:   make(map[string]time.Time),
 		blockedAt: make(map[string]time.Time),
 		dropRetry: make(map[string]int),
+		joining:   make(map[string]struct{}),
 	}
 }
 
@@ -99,9 +104,9 @@ func (w *Worker) tick(ctx context.Context) {
 
 	lessons, err := w.Store.LessonsInJoinWindow(now, JoinEarlyYes)
 	if err != nil {
-		log.Printf("bbb: lessons: %v", err)
+		logx.Errorf("bbb", "lessons: %v", err)
 	} else if users, err := w.Store.ListUsers(); err != nil {
-		log.Printf("bbb: users: %v", err)
+		logx.Errorf("bbb", "users: %v", err)
 	} else {
 		for _, lesson := range lessons {
 			url := strings.TrimSpace(w.Store.GetLessonBBB(lesson.ID))
@@ -146,14 +151,20 @@ func (w *Worker) tick(ctx context.Context) {
 	// Тест — отдельная сущность (settings.test_join). Chrome один:
 	// если идёт пара — тест гасим; иначе крутим тест.
 	if needLecture {
-		w.stopTest(ctx, "lecture", false)
+		w.pauseTest(ctx)
 	} else {
+		w.resumeTest()
 		w.tickTest(ctx, now, wanted)
 	}
 
+	logx.Debugf("bbb", "tick lessons=%d joins=%d lecture=%v", len(lessons), len(joins), needLecture)
 	for _, j := range joins {
 		wanted[j.key] = struct{}{}
-		w.ensureIn(ctx, j.u, j.lesson, j.url, j.key, now, j.record)
+		w.joinWG.Add(1)
+		go func() {
+			defer w.joinWG.Done()
+			w.ensureIn(ctx, j.u, j.lesson, j.url, j.key, now, j.record)
+		}()
 	}
 
 	w.mu.Lock()
@@ -205,6 +216,7 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 		Message:    "нет ссылки BBB",
 		UpdatedAt:  time.Now(),
 	})
+	logx.Warnf("bbb", "no bbb link lesson=%d tg=%d %q", lesson.ID, u.TelegramID, lesson.Discipline)
 	_ = w.Store.AddEvent(model.Event{
 		At: time.Now(), Type: model.EventNoBBB,
 		TelegramID: u.TelegramID, LessonID: lesson.ID,
@@ -229,10 +241,22 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		w.watchLobby(ctx, u, lesson, key, now)
 		return
 	}
+	if !w.beginJoin(key) {
+		return
+	}
+	defer w.endJoin(key)
+	w.mu.Lock()
+	_, live = w.sessions[key]
+	w.mu.Unlock()
+	if live {
+		w.watchLobby(ctx, u, lesson, key, now)
+		return
+	}
 	role := RolePresence
 	if record {
 		role = RoleRecord
 	}
+	logx.Infof("bbb", "join key=%s tg=%d fio=%q record=%v url=%s", key, u.TelegramID, u.FIO, record, url)
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: u.FIO, SOCKS5: u.SOCKS5, Role: role})
 	if err != nil {
 		w.joinFail(ctx, u, lesson, key, now, err.Error())
@@ -270,6 +294,7 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		w.lobbyAt[key] = now
 	}
 	w.mu.Unlock()
+	logx.Infof("bbb", "seated key=%s state=%s tg=%d", key, state, u.TelegramID)
 	_ = w.Store.SetPresence(model.Presence{
 		TelegramID: u.TelegramID, LessonID: lesson.ID,
 		State: state, Message: "join", UpdatedAt: now,
@@ -279,17 +304,9 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		TelegramID: u.TelegramID, LessonID: lesson.ID, Message: lesson.Discipline,
 	})
 	if state == model.PresenceLobby {
-		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
-			"На «%s» жду в лобби. Имя в списке: %s.",
-			lesson.Discipline, u.FIO,
-		))
 		return
 	}
 	w.greet(ctx, sess)
-	notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
-		"Зашёл на «%s» как %s. Без микрофона, имя в списке.",
-		lesson.Discipline, u.FIO,
-	))
 }
 
 func (w *Worker) isBlocked(key string, intent *model.JoinIntent) bool {
@@ -323,6 +340,7 @@ func (w *Worker) joinFail(ctx context.Context, u model.User, lesson model.Lesson
 		At: now, Type: model.EventError,
 		TelegramID: u.TelegramID, LessonID: lesson.ID, Message: reason,
 	})
+	logx.Warnf("bbb", "join fail %s tg=%d: %s", key, u.TelegramID, reason)
 	notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не зашёл на «%s»: %s", lesson.Discipline, reason))
 }
 
@@ -354,15 +372,8 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 			State: model.PresenceRoom, Message: "join", UpdatedAt: now,
 		})
 		w.mu.Lock()
-		_, wasLobby := w.lobbyAt[key]
 		delete(w.lobbyAt, key)
 		w.mu.Unlock()
-		if wasLobby {
-			notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
-				"Пустили на «%s» как %s. Без микрофона.",
-				lesson.Discipline, u.FIO,
-			))
-		}
 		w.greet(ctx, sess)
 		return
 	}
@@ -377,6 +388,7 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		since = now
 	}
 	if now.Sub(since) >= 2*time.Minute {
+		logx.Warnf("bbb", "lobby >2m key=%s tg=%d fio=%q", key, u.TelegramID, u.FIO)
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("не пустили из лобби: %s / %d", u.FIO, u.TelegramID))
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
 			"На «%s» всё ещё лобби — модератор пока не пускает.",
@@ -410,6 +422,7 @@ func (w *Worker) dropDead(ctx context.Context, u model.User, lesson model.Lesson
 	w.hogs().Release()
 	now := time.Now()
 	if n == 1 {
+		logx.Warnf("bbb", "drop retry key=%s tg=%d: %s", key, u.TelegramID, reason)
 		_ = w.Store.ClearPresence(u.TelegramID)
 		_ = w.Store.AddEvent(model.Event{
 			At: now, Type: model.EventError,
@@ -438,15 +451,12 @@ func (w *Worker) leave(ctx context.Context, telegramID, lessonID int64, key, rea
 		At: time.Now(), Type: model.EventLeave,
 		TelegramID: telegramID, LessonID: lessonID, Message: reason,
 	})
-	title := reason
-	if l, err := w.Store.LessonByID(lessonID); err == nil && l != nil && l.Discipline != "" {
-		title = l.Discipline
-	}
-	notify.User(ctx, w.Cfg, telegramID, fmt.Sprintf("Вышел с «%s».", title))
 	w.hogs().Release()
 }
 
 func (w *Worker) closeAll() {
+	w.joinWG.Wait()
+	w.jobWG.Wait()
 	w.mu.Lock()
 	for k, s := range w.sessions {
 		_ = s.Close()
@@ -466,6 +476,39 @@ func (w *Worker) hogs() Hogs {
 	return w.Hogs
 }
 
+func (w *Worker) beginJoin(key string) bool {
+	if w == nil || key == "" {
+		return true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.joining[key]; ok {
+		return false
+	}
+	if w.joining == nil {
+		w.joining = make(map[string]struct{})
+	}
+	w.joining[key] = struct{}{}
+	return true
+}
+
+func (w *Worker) endJoin(key string) {
+	if w == nil || key == "" {
+		return
+	}
+	w.mu.Lock()
+	delete(w.joining, key)
+	w.mu.Unlock()
+}
+
+func (w *Worker) WaitIdle() {
+	if w == nil {
+		return
+	}
+	w.joinWG.Wait()
+	w.jobWG.Wait()
+}
+
 func splitKey(key string) (int64, int64) {
 	var a, b int64
 	fmt.Sscanf(key, "%d:%d", &a, &b)
@@ -477,6 +520,6 @@ func (w *Worker) greet(ctx context.Context, sess Session) {
 		return
 	}
 	if err := sess.Greet(ctx); err != nil {
-		log.Printf("bbb: hello: %v", err)
+		logx.Warnf("bbb", "hello: %v", err)
 	}
 }

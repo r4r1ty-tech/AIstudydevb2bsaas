@@ -2,7 +2,6 @@ package bbb
 
 import (
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -10,6 +9,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notes"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
@@ -53,13 +53,13 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 	}
 	pack, err := w.Store.EnsurePack(lesson, url, w.recRoot())
 	if err != nil || pack == nil {
-		log.Printf("bbb: pack: %v", err)
+		logx.Errorf("bbb", "pack: %v", err)
 		return sess
 	}
 	abs := filepath.Join(w.recRoot(), pack.Dir)
 	rec, err := capture.Start(ctx, archive.AudioFile(abs))
 	if err != nil {
-		log.Printf("bbb: ffmpeg: %v", err)
+		logx.Errorf("bbb", "ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"» не стартовала: "+err.Error())
 		return sess
 	}
@@ -98,7 +98,9 @@ func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
 	if !w.beginJob(false) {
 		return
 	}
+	w.jobWG.Add(1)
 	go func() {
+		defer w.jobWG.Done()
 		defer w.endJob()
 		w.harvestDay(ctx, day)
 		w.setSetting(slidesDoneKey+day, "1")
@@ -116,7 +118,9 @@ func (w *Worker) maybeNotes(ctx context.Context, now time.Time) {
 	if !w.beginJob(true) {
 		return
 	}
+	w.jobWG.Add(1)
 	go func() {
+		defer w.jobWG.Done()
 		defer w.endJob()
 		if w.buildNotesDay(ctx, day) {
 			w.setSetting(notesDoneKey+day, "1")
@@ -127,7 +131,7 @@ func (w *Worker) maybeNotes(ctx context.Context, now time.Time) {
 func (w *Worker) harvestDay(ctx context.Context, day string) {
 	packs, err := w.Store.PacksByDate(day)
 	if err != nil {
-		log.Printf("bbb: packs %s: %v", day, err)
+		logx.Errorf("bbb", "packs %s: %v", day, err)
 		return
 	}
 	for i := range packs {
@@ -141,7 +145,7 @@ func (w *Worker) harvestDay(ctx context.Context, day string) {
 func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 	packs, err := w.Store.PacksByDate(day)
 	if err != nil {
-		log.Printf("bbb: notes packs %s: %v", day, err)
+		logx.Errorf("bbb", "notes packs %s: %v", day, err)
 		return false
 	}
 	done := true
@@ -195,7 +199,7 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	}
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: p.BBBURL, FIO: fio, Role: RoleSlides})
 	if err != nil {
-		log.Printf("bbb: slides join %s/%d: %v", p.Discipline, p.Number, err)
+		logx.Warnf("bbb", "slides join %s/%d: %v", p.Discipline, p.Number, err)
 		return
 	}
 	w.hogs().Hold()
@@ -205,7 +209,7 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	}()
 	n, err := sess.GrabSlides(ctx, archive.SlidesDir(filepath.Join(w.recRoot(), p.Dir)))
 	if err != nil {
-		log.Printf("bbb: slides grab %s/%d: %v", p.Discipline, p.Number, err)
+		logx.Warnf("bbb", "slides grab %s/%d: %v", p.Discipline, p.Number, err)
 	}
 	p.Status = model.PackSlides
 	_ = w.Store.SavePack(p)
@@ -213,7 +217,7 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 		At: time.Now(), Type: model.EventSlides, LessonID: p.LessonID,
 		Message: archive.Rel(p.Discipline, p.Number),
 	})
-	log.Printf("bbb: slides %s/%d n=%d", p.Discipline, p.Number, n)
+	logx.Infof("bbb", "slides %s/%d n=%d", p.Discipline, p.Number, n)
 	notify.Admin(ctx, w.Cfg, "слайды сняты: "+archive.Rel(p.Discipline, p.Number))
 }
 

@@ -96,14 +96,14 @@ func classifySeat(sig seatSignals) seat {
 	if sig.hasLobby {
 		return seatLobby
 	}
+	if sig.hasForm {
+		return seatForm
+	}
 	low := strings.ToLower(sig.text)
 	for _, m := range lobbyTextMarks {
 		if strings.Contains(low, m) {
 			return seatLobby
 		}
-	}
-	if sig.hasForm {
-		return seatForm
 	}
 	return seatUnknown
 }

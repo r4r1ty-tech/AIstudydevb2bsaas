@@ -17,6 +17,7 @@ func TestClassifySeat(t *testing.T) {
 		{"form", seatSignals{hasForm: true}, seatForm},
 		{"unknown", seatSignals{text: "Greenlight"}, seatUnknown},
 		{"ru lobby", seatSignals{text: "Ожидайте модератора"}, seatLobby},
+		{"form beats fuzzy lobby text", seatSignals{hasForm: true, text: "Waiting for a moderator to join"}, seatForm},
 	}
 	for _, c := range cases {
 		if got := classifySeat(c.sig); got != c.want {

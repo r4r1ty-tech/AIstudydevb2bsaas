@@ -2,12 +2,12 @@ package bbb
 
 import (
 	"context"
-	"log"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
 )
@@ -32,7 +32,52 @@ func (w *Worker) tickTest(ctx context.Context, now time.Time, wanted map[string]
 }
 
 func (w *Worker) ensureTest(ctx context.Context, tj model.TestJoin, now time.Time) {
-	w.ensureTestN(ctx, tj, now, 0)
+	if !w.beginJoin(testSessionKey) {
+		return
+	}
+	w.joinWG.Add(1)
+	go func() {
+		defer w.joinWG.Done()
+		defer w.endJoin(testSessionKey)
+		w.ensureTestN(ctx, tj, now, 0)
+	}()
+}
+
+func (w *Worker) pauseTest(ctx context.Context) {
+	tj, err := w.Store.GetTestJoin()
+	if err != nil {
+		return
+	}
+	active := tj.Want != model.TestWantOff &&
+		(tj.Status == model.TestJoining || tj.Status == model.TestLobby || tj.Status == model.TestRoom)
+	w.stopTest(ctx, "lecture", false)
+	if !active {
+		return
+	}
+	w.mu.Lock()
+	already := w.testPaused
+	w.testPaused = true
+	w.mu.Unlock()
+	if already {
+		return
+	}
+	latest, err := w.Store.GetTestJoin()
+	if err != nil {
+		return
+	}
+	latest.Want = model.TestWantOff
+	latest.Status = model.TestError
+	latest.Mode = ""
+	latest.Message = "идёт пара: Chrome занят лекцией"
+	_ = w.Store.PutTestJoin(latest)
+	logx.Warnf("bbb", "test paused: lecture in progress")
+	notify.Admin(ctx, w.Cfg, "тест отложен: идёт пара, один Chrome занят лекцией. Запусти заново после пары.")
+}
+
+func (w *Worker) resumeTest() {
+	w.mu.Lock()
+	w.testPaused = false
+	w.mu.Unlock()
 }
 
 func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Time, depth int) {
@@ -64,6 +109,7 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 	tj.Status = model.TestJoining
 	tj.Message = "захожу"
 	_ = w.Store.PutTestJoin(tj)
+	logx.Infof("bbb", "test join want=%s name=%q url=%s", tj.Want, tj.GuestName(), url)
 
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: tj.GuestName(), Role: role})
 	if err != nil {
@@ -71,6 +117,7 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		tj.Mode = ""
 		tj.Message = err.Error()
 		_ = w.Store.PutTestJoin(tj)
+		logx.Warnf("bbb", "test join fail: %v", err)
 		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+err.Error())
 		return
 	}
@@ -141,6 +188,7 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 	tj.Mode = tj.Want
 	tj.Message = msg
 	_ = w.Store.PutTestJoin(tj)
+	logx.Infof("bbb", "test seated state=%s mode=%s name=%q", state, tj.Mode, tj.GuestName())
 	_ = w.Store.AddEvent(model.Event{
 		At: now, Type: model.EventJoin, TelegramID: w.adminID(), Message: "тест " + tj.Want,
 	})
@@ -227,7 +275,7 @@ func (w *Worker) attachTestRecorder(ctx context.Context, sess Session) Session {
 	out := filepath.Join(w.recRoot(), "test", "audio.ogg")
 	rec, err := capture.Start(ctx, out)
 	if err != nil {
-		log.Printf("bbb: test ffmpeg: %v", err)
+		logx.Warnf("bbb", "test ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "тест: звук не стартанул — "+err.Error())
 		return sess
 	}

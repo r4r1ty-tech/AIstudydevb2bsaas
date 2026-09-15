@@ -86,6 +86,27 @@ func isCommandText(text string) bool {
 }
 
 func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLink func(lessonID int64) bool, intents map[int64]time.Time) *model.Lesson {
+	var live *model.Lesson
+	for i := range lessons {
+		l := lessons[i]
+		if !l.Online || !l.MatchesSubgroup(subgroup) {
+			continue
+		}
+		if l.Begin.IsZero() || l.Finish.IsZero() {
+			continue
+		}
+		if now.Before(l.Begin) || !now.Before(l.Finish) {
+			continue
+		}
+		if live == nil || l.Begin.After(live.Begin) {
+			cp := l
+			live = &cp
+		}
+	}
+	if live != nil {
+		return live
+	}
+
 	var nearest *model.Lesson
 	for i := range lessons {
 		l := lessons[i]
