@@ -18,6 +18,7 @@
   | `restart <unit>` | рестарт юнита `ssau-*` |
   | `webapp-url` | текущий URL туннеля из `webapp_url` |
   | `env-keys` | **только имена** переменных из `.env`, без значений |
+  | `recordings` | список файлов с размерами под `recordings/` |
   | `disk` | `df -h /`, `free -m` |
 
 - `sudoers` разрешает юзеру только диспетчер: `agent ALL=(root) NOPASSWD: /usr/local/sbin/ssau-agent-dispatch`.

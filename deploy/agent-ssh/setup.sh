@@ -47,6 +47,7 @@ opencode agent dispatcher. allowed:
   restart <unit>            systemctl restart <ssau unit>
   webapp-url                current tunnel url (from file)
   env-keys                  NAMES of keys in .env only, never values
+  recordings                file listing with sizes under recordings/
   disk                      df -h / and free -m
 EOF
 }
@@ -93,6 +94,10 @@ case "${verb}" in
   env-keys )
     if [[ ! -f "${APP}/.env" ]]; then echo "no ${APP}/.env" >&2; exit 1; fi
     exec grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${APP}/.env" | tr -d '=' | sort
+    ;;
+  recordings )
+    if [[ ! -d "${APP}/recordings" ]]; then echo "no ${APP}/recordings" >&2; exit 1; fi
+    exec find "${APP}/recordings" -maxdepth 3 -type f -printf '%10s  %P\n'
     ;;
   disk )
     exec bash -c 'df -h /; echo; free -m'
