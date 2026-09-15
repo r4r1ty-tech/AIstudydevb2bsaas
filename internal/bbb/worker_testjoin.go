@@ -272,8 +272,9 @@ func (w *Worker) attachTestRecorder(ctx context.Context, sess Session) Session {
 	if w == nil || sess == nil {
 		return sess
 	}
-	out := filepath.Join(w.recRoot(), "test", "audio.ogg")
-	rec, err := capture.Start(ctx, out)
+	dir := filepath.Join(w.recRoot(), "test")
+	seg := capture.SegmentPath(dir, time.Now().UnixNano())
+	rec, err := capture.Start(ctx, seg)
 	if err != nil {
 		logx.Warnf("bbb", "test ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "тест: звук не стартанул — "+err.Error())
@@ -285,5 +286,10 @@ func (w *Worker) attachTestRecorder(ctx context.Context, sess Session) Session {
 	}
 	lesson := model.Lesson{Discipline: "тест"}
 	go w.startSpotter(ctx, rec, lesson, users)
-	return &closeHook{Session: sess, fn: func() { _ = rec.Stop() }}
+	return &closeHook{Session: sess, fn: func() {
+		_ = rec.Stop()
+		if _, err := capture.MergeSegments(context.Background(), dir, filepath.Join(dir, "audio.ogg")); err != nil {
+			logx.Warnf("bbb", "test merge: %v", err)
+		}
+	}}
 }
