@@ -218,9 +218,9 @@ if [[ "$bbb_was_active" -eq 1 ]]; then
   systemctl restart ssau-bbb.service
 fi
 sleep 1
-systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service
+systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service || true
 if [[ "$bbb_was_active" -eq 1 ]]; then
-  systemctl --no-pager --full status ssau-bbb.service
+  systemctl --no-pager --full status ssau-bbb.service || true
 else
   echo "ssau-bbb был выключен — бинарник обновил, сервис не стартовал"
 fi
