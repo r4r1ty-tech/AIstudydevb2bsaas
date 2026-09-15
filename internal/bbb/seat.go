@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 type seat int
@@ -243,5 +245,10 @@ func audioOnce(page *rod.Page, role Role) {
 			return
 		}
 	}
-	_ = clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE)
+	if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
+		return
+	}
+	if role == RoleRecord {
+		logx.Warnf("bbb", "listen-only не нажалась — звук может быть пустым")
+	}
 }
