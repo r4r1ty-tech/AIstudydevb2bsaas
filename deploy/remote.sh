@@ -190,6 +190,16 @@ set_env_vars \
   "DEEPSEEK_API_URL=${DEEPSEEK_API_URL:-}" \
   "DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-}"
 
+github_token="${LECTURES_TOKEN:-}"
+if [[ -z "$github_token" ]] && command -v gh >/dev/null 2>&1; then
+  github_token=$(gh auth token 2>/dev/null || true)
+fi
+set_env_vars \
+  "GITHUB_TOKEN=${github_token}" \
+  "GITHUB_OWNER=${LECTURES_OWNER:-r4r1ty-tech}" \
+  "GITHUB_REPO=${LECTURES_REPO:-LectionsSSAU}" \
+  "GITHUB_BRANCH=${LECTURES_BRANCH:-main}"
+
 if [[ -n "${AGENT_SSH_PUBKEY:-}" ]]; then
   if [[ -f "$SRC/agent-ssh/setup.sh" ]]; then
     bash "$SRC/agent-ssh/setup.sh" "$AGENT_SSH_PUBKEY" || echo "agent-ssh: setup не прошёл, продолжаю"
