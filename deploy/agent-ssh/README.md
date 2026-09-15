@@ -17,7 +17,7 @@
   | `logs <unit> [lines]` | хвост journal (unit из белого списка, lines ≤ 500) |
   | `restart <unit>` | рестарт юнита `ssau-*` |
   | `webapp-url` | текущий URL туннеля из `webapp_url` |
-  | `env-keys` | **только имена** переменных из `.env`, без значений |
+  | `env-keys` | имена переменных из `.env` + `set`/`empty`, без значений |
   | `recordings` | список файлов с размерами под `recordings/` |
   | `disk` | `df -h /`, `free -m` |
 
