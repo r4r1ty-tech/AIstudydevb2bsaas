@@ -3,12 +3,12 @@ package notes
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
@@ -25,7 +25,7 @@ func Build(ctx context.Context, cfg *config.Config, root string, p model.Lecture
 
 	var transcript string
 	if t, err := Transcribe(ctx, cfg, audio); err != nil {
-		log.Printf("notes: stt %s/%d: %v", p.Discipline, p.Number, err)
+		logx.Warnf("notes", "stt %s/%d: %v", p.Discipline, p.Number, err)
 	} else {
 		transcript = t
 		_ = os.WriteFile(trPath, []byte(transcript), 0644)
@@ -33,7 +33,7 @@ func Build(ctx context.Context, cfg *config.Config, root string, p model.Lecture
 
 	slideText, err := DescribeSlides(ctx, cfg, slides)
 	if err != nil {
-		log.Printf("notes: slides %s/%d: %v", p.Discipline, p.Number, err)
+		logx.Errorf("notes", "slides %s/%d: %v", p.Discipline, p.Number, err)
 	}
 
 	if transcript == "" && slideText == "" {

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/net/publicsuffix"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 const (
@@ -48,6 +50,7 @@ func fetchFromSSAU(ctx context.Context, groupID int64, week int) ([]byte, int, e
 	if status != http.StatusForbidden {
 		return body, status, nil
 	}
+	logx.Debugf("rasp", "403 on %s, retry via %s", primaryOrigin, wwwOrigin)
 	return fetchOnOrigin(ctx, client, wwwOrigin, path)
 }
 

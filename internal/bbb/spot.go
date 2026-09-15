@@ -3,10 +3,10 @@ package bbb
 import (
 	"context"
 	"io"
-	"log"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/wake"
@@ -49,7 +49,7 @@ func (w *Worker) startSpotter(ctx context.Context, rec *capture.Rec, lesson mode
 		script = w.Cfg.VoskScript
 	}
 	if vosk, err := wake.Open(modelDir, script, vocab); err != nil {
-		log.Printf("wake: %v — пейджер молчит", err)
+		logx.Warnf("wake", "vosk: %v — пейджер молчит", err)
 	} else {
 		eng.Rec = vosk
 		if c, ok := vosk.(io.Closer); ok {
@@ -83,7 +83,7 @@ func (w *Worker) onWake(ctx context.Context, lesson model.Lesson, users []model.
 		return
 	}
 	msg := wake.Message(lesson.Discipline, word)
-	log.Printf("wake: %s", msg)
+	logx.Infof("wake", "%s", msg)
 	if w.Store != nil {
 		_ = w.Store.AddEvent(model.Event{
 			At: time.Now(), Type: model.EventWake, LessonID: lesson.ID, Message: word,

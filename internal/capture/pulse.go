@@ -4,13 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 const (
@@ -92,7 +93,7 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 		cancel()
 		return nil, fmt.Errorf("ffmpeg start: %w", err)
 	}
-	log.Printf("capture: ffmpeg pid=%d -> %s + pcm %dHz", cmd.Process.Pid, outPath, WakeRate)
+	logx.Infof("capture", "ffmpeg pid=%d -> %s + pcm %dHz", cmd.Process.Pid, outPath, WakeRate)
 	return &Rec{cmd: cmd, cancel: cancel, pcm: pcm, path: outPath}, nil
 }
 

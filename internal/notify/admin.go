@@ -3,7 +3,6 @@ package notify
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 func Admin(ctx context.Context, cfg *config.Config, text string) {
@@ -45,7 +45,7 @@ func UserMarkup(ctx context.Context, cfg *config.Config, telegramID int64, text 
 	}
 	bot, err := gotgbot.NewBot(cfg.BotToken, nil)
 	if err != nil {
-		log.Printf("notify: %v", err)
+		logx.Warnf("notify", "%v", err)
 		return
 	}
 	opts := &gotgbot.SendMessageOpts{}
@@ -53,7 +53,7 @@ func UserMarkup(ctx context.Context, cfg *config.Config, telegramID int64, text 
 		opts.ReplyMarkup = *mk
 	}
 	if _, err := bot.SendMessageWithContext(ctx, telegramID, text, opts); err != nil {
-		log.Printf("notify: send %d: %v", telegramID, err)
+		logx.Warnf("notify", "send %d: %v", telegramID, err)
 	}
 }
 
@@ -80,7 +80,7 @@ func Document(ctx context.Context, cfg *config.Config, telegramID int64, path, c
 		Caption: strings.TrimSpace(caption),
 	})
 	if err != nil {
-		log.Printf("notify: document %d: %v", telegramID, err)
+		logx.Warnf("notify", "document %d: %v", telegramID, err)
 	}
 	return err
 }

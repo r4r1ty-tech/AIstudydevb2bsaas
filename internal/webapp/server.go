@@ -5,14 +5,15 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
@@ -126,7 +127,41 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("POST /api/test", s.handleTestPost)
 
 	mux.Handle("/api/", s.requirePassword(api))
-	return mux
+	return logRequests(mux)
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		sw := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(sw, r)
+		if sw.status == 0 {
+			sw.status = http.StatusOK
+		}
+		line := fmt.Sprintf("%s %s %d %s", r.Method, r.URL.Path, sw.status, time.Since(start).Round(time.Millisecond))
+		if sw.status >= 400 {
+			logx.Warnf("panel", "%s", line)
+			return
+		}
+		logx.Debugf("panel", "%s", line)
+	})
 }
 
 func noCache(h http.Handler) http.Handler {
@@ -155,7 +190,7 @@ func (s *Server) requirePassword(next http.Handler) http.Handler {
 			want = s.cfg.PanelPassword
 		}
 		if !passwordOK(passwordFromRequest(r), want) {
-			log.Printf("webapp auth: bad password %s", r.URL.Path)
+			logx.Warnf("panel", "bad password %s", r.URL.Path)
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
