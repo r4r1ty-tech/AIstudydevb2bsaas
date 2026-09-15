@@ -21,7 +21,8 @@
 | `BBB_DRY_RUN` | `0` | `1` — не трогать Chromium (заглушка) |
 | `LECTURE_PAUSE` | `1` | Замораживать сторонние «тяжёлые» процессы на время пары |
 | `CHROME_BIN` / `CHROME_USER_DATA_DIR` | — | Путь к Chromium и его профилю |
-| `DEEPSEEK_*`, `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Ключи STT/vision/конспектов |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_API_URL` / `DEEPSEEK_MODEL` | `.../deepseek.com` / `deepseek-chat` | LLM для конспекта (OpenAI-совместимый `chat/completions`). URL можно и с `/v1`, и без |
+| `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Ключи STT/vision/конспектов |
 | `VOSK_MODEL` / `VOSK_SCRIPT` | `/opt/ssau-bot/vosk-model`, `/opt/ssau-bot/wake.py` | Вейкворды |
 | `WHITELIST_EXTRA` | — | Доп. Telegram id через запятую |
 | `LOG_LEVEL` | `info` | `debug/info/warn/error` |

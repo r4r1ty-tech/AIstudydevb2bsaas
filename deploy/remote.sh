@@ -26,6 +26,34 @@ need() {
   echo "$p"
 }
 
+set_env_vars() {
+  python3 - "$APP/.env" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+pairs = []
+for arg in sys.argv[2:]:
+    key, _, val = arg.partition("=")
+    if key and val:
+        pairs.append((key, val))
+if not pairs:
+    sys.exit(0)
+lines = path.read_text().splitlines() if path.exists() else []
+for key, val in pairs:
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith(key + "="):
+            lines[i] = key + "=" + val
+            found = True
+            break
+    if not found:
+        lines.append(key + "=" + val)
+path.write_text("\n".join(lines) + "\n")
+path.chmod(0o600)
+PY
+}
+
 tg=$(need tg)
 rasp=$(need rasp)
 panel=$(need panel)
@@ -156,6 +184,11 @@ grep -q '^VOSK_SCRIPT=' "$APP/.env" || echo 'VOSK_SCRIPT=/opt/ssau-bot/wake.py' 
 grep -q '^LOG_LEVEL=' "$APP/.env" || echo 'LOG_LEVEL=info' >> "$APP/.env"
 grep -q '^LOG_FILE=' "$APP/.env" || echo 'LOG_FILE=/opt/ssau-bot/ssau.log' >> "$APP/.env"
 grep -q '^WEBAPP_URL_FILE=' "$APP/.env" || echo 'WEBAPP_URL_FILE=/opt/ssau-bot/webapp_url' >> "$APP/.env"
+
+set_env_vars \
+  "DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}" \
+  "DEEPSEEK_API_URL=${DEEPSEEK_API_URL:-}" \
+  "DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-}"
 
 if [[ -n "${AGENT_SSH_PUBKEY:-}" ]]; then
   if [[ -f "$SRC/agent-ssh/setup.sh" ]]; then
