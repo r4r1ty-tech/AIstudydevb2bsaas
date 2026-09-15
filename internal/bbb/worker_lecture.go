@@ -2,6 +2,7 @@ package bbb
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,9 @@ const (
 
 	publishedTTL = 24 * time.Hour
 	publishRetry = 5 * time.Minute
+
+	maxNoteAttempts = 3
+	noteRetryEvery  = 10 * time.Minute
 )
 
 func (w *Worker) recRoot() string {
@@ -113,7 +117,8 @@ func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
 	if w.settingOn(slidesDoneKey + day) {
 		return
 	}
-	if !w.beginJob(false) {
+	// Слайды не поднимают третий Chromium, пока идёт пара/тест.
+	if !w.beginJob(true) {
 		return
 	}
 	w.jobWG.Add(1)
@@ -166,6 +171,7 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 		logx.Errorf("bbb", "notes packs %s: %v", day, err)
 		return false
 	}
+	now := time.Now()
 	done := true
 	for i := range packs {
 		p := packs[i]
@@ -177,12 +183,52 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 				continue
 			}
 		}
+		if p.Status == model.PackError {
+			// Битый конспект пересобираем с паузами, но не бесконечно.
+			if !w.noteRetryReady(&p, now) {
+				if w.noteAttemptsFor(p.ID) < maxNoteAttempts {
+					done = false
+				}
+				continue
+			}
+			w.buildNotes(ctx, p.ID)
+			continue
+		}
 		if !archive.ShouldNotePack(p.Status) {
 			continue
 		}
 		w.buildNotes(ctx, p.ID)
 	}
 	return done
+}
+
+func (w *Worker) noteRetryReady(p *model.LecturePack, now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	if w.noteAttemptsFor(p.ID) >= maxNoteAttempts {
+		return false
+	}
+	return !p.UpdatedAt.After(now.Add(-noteRetryEvery))
+}
+
+func (w *Worker) noteAttemptsFor(id int64) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.noteAttempts[id]
+}
+
+func (w *Worker) noteFail(id int64) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.noteAttempts[id]++
+	return w.noteAttempts[id]
+}
+
+func (w *Worker) noteOK(id int64) {
+	w.mu.Lock()
+	delete(w.noteAttempts, id)
+	w.mu.Unlock()
 }
 
 func (w *Worker) promoteStuckRecording(p *model.LecturePack) bool {
@@ -255,12 +301,20 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) {
 	err = notes.Build(ctx, w.Cfg, w.recRoot(), *p)
 	w.hogs().Release()
 	if err != nil {
+		n := w.noteFail(p.ID)
 		p.Status = model.PackError
 		p.Err = err.Error()
 		_ = w.Store.SavePack(p)
-		notify.Admin(ctx, w.Cfg, "конспект не собрался: "+archive.Rel(p.Discipline, p.Number)+" — "+err.Error())
+		attempt := ""
+		if n < maxNoteAttempts {
+			attempt = fmt.Sprintf(" (попытка %d/%d)", n, maxNoteAttempts)
+		} else {
+			attempt = fmt.Sprintf(" (попыток больше не будет: %d)", n)
+		}
+		notify.Admin(ctx, w.Cfg, "конспект не собрался: "+archive.Rel(p.Discipline, p.Number)+" — "+err.Error()+attempt)
 		return
 	}
+	w.noteOK(p.ID)
 	p.Status = model.PackDone
 	p.Transcript = filepath.ToSlash(filepath.Join(p.Dir, "transcript.txt"))
 	p.NotesPDF = filepath.ToSlash(filepath.Join(p.Dir, "notes.pdf"))
@@ -386,6 +440,7 @@ func (w *Worker) cleanPack(p *model.LecturePack) {
 	} {
 		_ = os.Remove(f)
 	}
+	_ = os.RemoveAll(archive.SlidesDir(base))
 	now := time.Now().UTC()
 	p.CleanedAt = &now
 	_ = w.Store.SavePack(p)

@@ -61,7 +61,6 @@ func (s *Store) migrate() error {
 			subgroup INTEGER DEFAULT 1,
 			enabled INTEGER DEFAULT 1,
 			disabled_until TEXT NULL,
-			socks5 TEXT,
 			onboarded INTEGER DEFAULT 0,
 			created_at TEXT,
 			wake_words TEXT,
@@ -256,7 +255,7 @@ func btoi(b bool) int {
 
 func scanUser(sc scanner) (*model.User, error) {
 	var u model.User
-	var username, firstName, lastName, fio, socks5, createdAt, wakeWords sql.NullString
+	var username, firstName, lastName, fio, createdAt, wakeWords sql.NullString
 	var disabledUntil sql.NullString
 	var subgroup, enabled, onboarded, onboardStage sql.NullInt64
 	if err := sc.Scan(
@@ -268,7 +267,6 @@ func scanUser(sc scanner) (*model.User, error) {
 		&subgroup,
 		&enabled,
 		&disabledUntil,
-		&socks5,
 		&onboarded,
 		&createdAt,
 		&wakeWords,
@@ -280,7 +278,6 @@ func scanUser(sc scanner) (*model.User, error) {
 	u.FirstName = nullStr(firstName)
 	u.LastName = nullStr(lastName)
 	u.FIO = nullStr(fio)
-	u.SOCKS5 = nullStr(socks5)
 	u.ExtraWords = model.ParseWakeWords(nullStr(wakeWords))
 	if subgroup.Valid {
 		u.Subgroup = int(subgroup.Int64)

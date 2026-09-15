@@ -116,7 +116,7 @@ func TestHandlePeopleAndPatch(t *testing.T) {
 	}
 
 	rec = call(t, s, http.MethodPost, "/api/people/1074442235",
-		`{"fio":"Новое Имя","subgroup":2,"socks5":"127.0.0.1:1080","extra_words":"лаба","enabled":false}`)
+		`{"fio":"Новое Имя","subgroup":2,"extra_words":"лаба","enabled":false}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("patch: %d %s", rec.Code, rec.Body.String())
 	}
@@ -124,7 +124,7 @@ func TestHandlePeopleAndPatch(t *testing.T) {
 	if err != nil || u == nil {
 		t.Fatal(err)
 	}
-	if u.FIO != "Новое Имя" || u.Subgroup != 2 || u.SOCKS5 != "127.0.0.1:1080" || u.Enabled {
+	if u.FIO != "Новое Имя" || u.Subgroup != 2 || u.Enabled {
 		t.Fatalf("user = %+v", u)
 	}
 
@@ -226,15 +226,20 @@ func TestHandleLogs(t *testing.T) {
 	}
 }
 
-func TestHandleSettingsPost(t *testing.T) {
-	s, st := newServer(t, nil)
-	rec := call(t, s, http.MethodPost, "/api/settings", `{"group_id":42}`)
+func TestHandleSettingsGet(t *testing.T) {
+	s, _ := newServer(t, nil)
+	rec := call(t, s, http.MethodGet, "/api/settings", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("settings: %d %s", rec.Code, rec.Body.String())
 	}
-	v, ok, err := st.GetSetting("group_id")
-	if err != nil || !ok || v != "42" {
-		t.Fatalf("setting = %q %v %v", v, ok, err)
+	if !strings.Contains(rec.Body.String(), `"group_id":531023229`) {
+		t.Fatalf("group from env expected: %s", rec.Body.String())
+	}
+
+	// Группа задаётся в env, запись из панели убрана.
+	rec = call(t, s, http.MethodPost, "/api/settings", `{"group_id":42}`)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("settings post: %d", rec.Code)
 	}
 }
 

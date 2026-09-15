@@ -156,7 +156,7 @@ func (b *Bot) allowed(ctx *ext.Context) *gotgbot.User {
 	if ctx == nil || ctx.EffectiveUser == nil {
 		return nil
 	}
-	if !b.cfg.IsAllowed(ctx.EffectiveUser.Id) {
+	if !b.cfg.IsAllowed(ctx.EffectiveUser.Id) && !b.cfg.IsAdmin(ctx.EffectiveUser.Id) {
 		return nil
 	}
 	return ctx.EffectiveUser

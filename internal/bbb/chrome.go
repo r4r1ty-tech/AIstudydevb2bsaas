@@ -70,13 +70,15 @@ func (c *ChromeJoiner) ensureBrowser() (*rod.Browser, error) {
 	return c.ensure(false)
 }
 
-func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
+// quality=false — минимальный браузер для зрителей (крошечное окно, без звука).
+// quality=true — окно побольше: запись и снятие слайдов.
+func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if record && c.recBrowser != nil {
+	if quality && c.recBrowser != nil {
 		return c.recBrowser, nil
 	}
-	if !record && c.browser != nil {
+	if !quality && c.browser != nil {
 		return c.browser, nil
 	}
 	bin := c.Bin
@@ -91,7 +93,7 @@ func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 	if dir == "" {
 		dir = chromeUserDir()
 	}
-	if record {
+	if quality {
 		dir = dir + "-rec"
 	}
 	_ = os.MkdirAll(dir, 0o755)
@@ -105,15 +107,32 @@ func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 		Set(flags.Flag("disable-gpu")).
 		Set(flags.Flag("disable-dev-shm-usage")).
 		Set(flags.Flag("disable-crash-reporter")).
+		Set(flags.Flag("disable-breakpad")).
+		Set(flags.Flag("disable-background-networking")).
+		Set(flags.Flag("disable-sync")).
+		Set(flags.Flag("disable-default-apps")).
+		Set(flags.Flag("disable-component-extensions-with-background-pages")).
 		Set(flags.Flag("no-first-run")).
 		Set(flags.Flag("no-default-browser-check")).
 		Set(flags.Flag("autoplay-policy"), "no-user-gesture-required").
-		Set(flags.Flag("use-fake-ui-for-media-stream"))
+		Set(flags.Flag("use-fake-ui-for-media-stream")).
+		Set(flags.Flag("process-per-site")).
+		Set(flags.Flag("renderer-process-limit"), "2").
+		Set(flags.Flag("js-flags"), "--max-old-space-size=128").
+		Set(flags.Flag("disk-cache-size"), "1").
+		Set(flags.Flag("media-cache-size"), "1").
+		Set(flags.Flag("disable-features"), "AudioServiceOutOfProcess")
 
-	if record {
-		l = l.Env(capture.PulseEnv()...)
+	if quality {
+		// Одна вкладка, чей звук идёт в null-sink на запись и вейкворды.
+		l = l.Env(capture.PulseEnv()...).
+			Set(flags.Flag("window-size"), "1280,800")
 	} else {
-		l = l.Set(flags.Flag("use-fake-device-for-media-stream"))
+		// Зрители: крошечное окно, фейковый микрофон, без вывода звука.
+		// Не дублируют запись и жрут минимум CPU/RAM.
+		l = l.Set(flags.Flag("use-fake-device-for-media-stream")).
+			Set(flags.Flag("mute-audio")).
+			Set(flags.Flag("window-size"), "320,240")
 	}
 
 	u, err := l.Launch()
@@ -125,7 +144,7 @@ func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 		l.Kill()
 		return nil, fmt.Errorf("chrome connect: %w", err)
 	}
-	if record {
+	if quality {
 		c.recLauncher = l
 		c.recBrowser = b
 		logx.Infof("bbb", "chromium-rec %s", bin)
@@ -138,10 +157,7 @@ func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 }
 
 type chromeSession struct {
-	page      *rod.Page
-	root      *rod.Browser
-	contextID proto.BrowserBrowserContextID
-	bridge    *socksBridge
+	page *rod.Page
 
 	greetMu sync.Mutex
 	greeted bool
@@ -183,12 +199,6 @@ func (s *chromeSession) Close() error {
 	if s.page != nil {
 		_ = s.page.Close()
 	}
-	if s.root != nil && s.contextID != "" {
-		_ = proto.TargetDisposeBrowserContext{BrowserContextID: s.contextID}.Call(s.root)
-	}
-	if s.bridge != nil {
-		_ = s.bridge.Close()
-	}
 	return nil
 }
 
@@ -196,54 +206,18 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	root, err := c.ensure(req.Role == RoleRecord)
+	root, err := c.ensure(req.Role != RolePresence)
 	if err != nil {
 		return nil, err
 	}
 
-	bridge, err := startSOCKSBridge(req.SOCKS5)
+	page, err := root.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
-		return nil, err
-	}
-	proxyURL, err := chromeProxyURL(req.SOCKS5, bridge)
-	if err != nil {
-		if bridge != nil {
-			_ = bridge.Close()
-		}
-		return nil, err
-	}
-
-	create := proto.TargetCreateBrowserContext{}
-	if proxyURL != "" {
-		create.ProxyServer = proxyURL
-	}
-	res, err := create.Call(root)
-	if err != nil {
-		if bridge != nil {
-			_ = bridge.Close()
-		}
-		return nil, fmt.Errorf("browser context: %w", err)
-	}
-
-	incog := *root
-	incog.BrowserContextID = res.BrowserContextID
-
-	page, err := incog.Page(proto.TargetCreateTarget{URL: "about:blank"})
-	if err != nil {
-		_ = proto.TargetDisposeBrowserContext{BrowserContextID: res.BrowserContextID}.Call(root)
-		if bridge != nil {
-			_ = bridge.Close()
-		}
 		return nil, fmt.Errorf("tab: %w", err)
 	}
 	page = page.Context(ctx)
 
-	sess := &chromeSession{
-		page:      page,
-		root:      root,
-		contextID: res.BrowserContextID,
-		bridge:    bridge,
-	}
+	sess := &chromeSession{page: page}
 
 	if err := page.Timeout(30 * time.Second).Navigate(req.URL); err != nil {
 		_ = sess.Close()

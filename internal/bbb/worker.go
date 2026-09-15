@@ -24,18 +24,19 @@ type Worker struct {
 
 	Hogs Hogs
 
-	mu         sync.Mutex
-	sessions   map[string]Session
-	leaveAt    map[string]time.Time
-	noBBB      map[string]struct{}
-	lobbyAt    map[string]time.Time
-	blockedAt  map[string]time.Time // fail → стоп до JoinYes после этого
-	dropRetry  map[string]int       // mid-session: 0/1, второй drop → block
-	joining    map[string]struct{}
-	testPaused bool
-	busy       bool
-	joinWG     sync.WaitGroup
-	jobWG      sync.WaitGroup
+	mu           sync.Mutex
+	sessions     map[string]Session
+	leaveAt      map[string]time.Time
+	noBBB        map[string]struct{}
+	lobbyAt      map[string]time.Time
+	blockedAt    map[string]time.Time // fail → стоп до JoinYes после этого
+	dropRetry    map[string]int       // mid-session: 0/1, второй drop → block
+	noteAttempts map[int64]int        // pack id → сколько раз не собрался конспект
+	joining      map[string]struct{}
+	testPaused   bool
+	busy         bool
+	joinWG       sync.WaitGroup
+	jobWG        sync.WaitGroup
 }
 
 func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker {
@@ -58,18 +59,19 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		hogs = newProcHogs()
 	}
 	return &Worker{
-		Cfg:       cfg,
-		Store:     st,
-		Loc:       loc,
-		Joiner:    j,
-		Hogs:      hogs,
-		sessions:  make(map[string]Session),
-		leaveAt:   make(map[string]time.Time),
-		noBBB:     make(map[string]struct{}),
-		lobbyAt:   make(map[string]time.Time),
-		blockedAt: make(map[string]time.Time),
-		dropRetry: make(map[string]int),
-		joining:   make(map[string]struct{}),
+		Cfg:          cfg,
+		Store:        st,
+		Loc:          loc,
+		Joiner:       j,
+		Hogs:         hogs,
+		sessions:     make(map[string]Session),
+		leaveAt:      make(map[string]time.Time),
+		noBBB:        make(map[string]struct{}),
+		lobbyAt:      make(map[string]time.Time),
+		blockedAt:    make(map[string]time.Time),
+		dropRetry:    make(map[string]int),
+		noteAttempts: make(map[int64]int),
+		joining:      make(map[string]struct{}),
 	}
 }
 
@@ -101,6 +103,7 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 	var joins []pending
 	needLecture := false
+	validLessons := make(map[int64]struct{})
 
 	lessons, err := w.Store.LessonsInJoinWindow(now, JoinEarlyYes)
 	if err != nil {
@@ -109,6 +112,7 @@ func (w *Worker) tick(ctx context.Context) {
 		logx.Errorf("bbb", "users: %v", err)
 	} else {
 		for _, lesson := range lessons {
+			validLessons[lesson.ID] = struct{}{}
 			url := strings.TrimSpace(w.Store.GetLessonBBB(lesson.ID))
 			recID := int64(0)
 			if url != "" && model.IsLecture(lesson.Type) {
@@ -183,6 +187,17 @@ func (w *Worker) tick(ctx context.Context) {
 		tgID, lessonID := splitKey(key)
 		w.leave(ctx, tgID, lessonID, key, "slot over")
 	}
+
+	// noBBB живёт только пока пара в окне входа — иначе карта течёт.
+	w.mu.Lock()
+	for key := range w.noBBB {
+		_, lessonID := splitKey(key)
+		if _, ok := validLessons[lessonID]; !ok {
+			delete(w.noBBB, key)
+		}
+	}
+	w.mu.Unlock()
+
 	w.maybeHarvest(ctx, now)
 	w.maybeNotes(ctx, now)
 	w.maybePublish(ctx, now)
@@ -258,7 +273,7 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		role = RoleRecord
 	}
 	logx.Infof("bbb", "join key=%s tg=%d fio=%q record=%v url=%s", key, u.TelegramID, u.FIO, record, url)
-	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: u.FIO, SOCKS5: u.SOCKS5, Role: role})
+	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: u.FIO, Role: role})
 	if err != nil {
 		w.joinFail(ctx, u, lesson, key, now, err.Error())
 		return
@@ -409,14 +424,16 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 func (w *Worker) dropDead(ctx context.Context, u model.User, lesson model.Lesson, key, reason string) {
 	w.mu.Lock()
 	sess, ok := w.sessions[key]
+	if !ok {
+		// Нет живой сессии — это не вылет, счётчик не трогаем.
+		w.mu.Unlock()
+		return
+	}
 	delete(w.sessions, key)
 	delete(w.lobbyAt, key)
 	n := w.dropRetry[key] + 1
 	w.dropRetry[key] = n
 	w.mu.Unlock()
-	if !ok {
-		return
-	}
 	if sess != nil {
 		_ = sess.Close()
 	}

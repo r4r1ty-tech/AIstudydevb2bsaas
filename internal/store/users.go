@@ -9,7 +9,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-const userCols = `telegram_id, username, first_name, last_name, fio, subgroup, enabled, disabled_until, socks5, onboarded, created_at, wake_words, onboard_stage`
+const userCols = `telegram_id, username, first_name, last_name, fio, subgroup, enabled, disabled_until, onboarded, created_at, wake_words, onboard_stage`
 
 func (s *Store) GetUser(id int64) (*model.User, error) {
 	u, err := scanUser(s.db.QueryRow(`SELECT `+userCols+` FROM users WHERE telegram_id = ?`, id))
@@ -32,7 +32,7 @@ func (s *Store) UpsertUser(u *model.User) error {
 	}
 	_, err := s.db.Exec(
 		`INSERT INTO users (`+userCols+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(telegram_id) DO UPDATE SET
 			username = excluded.username,
 			first_name = excluded.first_name,
@@ -41,7 +41,6 @@ func (s *Store) UpsertUser(u *model.User) error {
 			subgroup = excluded.subgroup,
 			enabled = excluded.enabled,
 			disabled_until = excluded.disabled_until,
-			socks5 = excluded.socks5,
 			onboarded = excluded.onboarded,
 			wake_words = excluded.wake_words,
 			onboard_stage = excluded.onboard_stage`,
@@ -53,7 +52,6 @@ func (s *Store) UpsertUser(u *model.User) error {
 		u.Subgroup,
 		btoi(u.Enabled),
 		nullTimeArg(u.DisabledUntil),
-		u.SOCKS5,
 		btoi(u.Onboarded),
 		timeArg(created),
 		model.FormatWakeWords(u.ExtraWords),
@@ -99,10 +97,6 @@ func (s *Store) SetFIO(id int64, fio string) error {
 
 func (s *Store) SetSubgroup(id int64, n int) error {
 	return s.updateUser(id, `UPDATE users SET subgroup = ? WHERE telegram_id = ? RETURNING telegram_id`, n, id)
-}
-
-func (s *Store) SetSOCKS5(id int64, v string) error {
-	return s.updateUser(id, `UPDATE users SET socks5 = ? WHERE telegram_id = ? RETURNING telegram_id`, v, id)
 }
 
 func (s *Store) SetExtraWords(id int64, words []string) error {

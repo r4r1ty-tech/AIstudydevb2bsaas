@@ -24,7 +24,6 @@ type User struct {
 	Subgroup      int        `json:"subgroup"`
 	Enabled       bool       `json:"enabled"`
 	DisabledUntil *time.Time `json:"disabled_until,omitempty"`
-	SOCKS5        string     `json:"socks5"`
 	ExtraWords    []string   `json:"extra_words"`
 	OnboardStage  int        `json:"onboard_stage"`
 	Onboarded     bool       `json:"onboarded"`
@@ -252,7 +251,6 @@ const (
 	EventJoin    = "join"
 	EventLeave   = "leave"
 	EventLobby   = "lobby"
-	EventProxy   = "proxy"
 	EventReparse = "reparse"
 	EventWake    = "wake"
 	EventNoBBB   = "no_bbb"

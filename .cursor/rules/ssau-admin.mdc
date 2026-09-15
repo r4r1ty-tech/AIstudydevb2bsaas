@@ -1,9 +1,14 @@
 ---
-description: SSAU bot admin is Telegram id 1074442235
+description: SSAU bot admin comes from ADMIN_TELEGRAM_ID
 alwaysApply: true
 ---
 
 # Admin
 
-Telegram admin (Mini App, /panel, /test, тестовый BBB) — всегда `1074442235`.
-Это значение пишется в sqlite `settings.admin_id` при старте процессов и не меняется без явной просьбы.
+Telegram admin (Mini App, /panel, /test, тестовый BBB, уведомления) — id из
+`ADMIN_TELEGRAM_ID` в `.env`, дефолт `1074442235` (`config.DefaultAdminID`).
+
+- Админ **всегда** имеет доступ к боту, даже если его нет в вайтлисте.
+  Вайтлист — это кенты; админ отдельно.
+- Панель, `/test` и пуш-уведомления — только у админа.
+- Админ задаётся в env, а не в sqlite и не хардкодом.

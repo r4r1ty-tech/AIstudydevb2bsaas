@@ -6,12 +6,35 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
+
+var (
+	botMu   sync.Mutex
+	botTok  string
+	botInst *gotgbot.Bot
+)
+
+// botFor переиспользует один и тот же Bot на процесс вместо создания нового
+// клиента на каждое сообщение. gotgbot.Bot безопасен для конкурентных вызовов.
+func botFor(token string) (*gotgbot.Bot, error) {
+	botMu.Lock()
+	defer botMu.Unlock()
+	if botInst != nil && botTok == token {
+		return botInst, nil
+	}
+	b, err := gotgbot.NewBot(token, nil)
+	if err != nil {
+		return nil, err
+	}
+	botInst, botTok = b, token
+	return b, nil
+}
 
 func Admin(ctx context.Context, cfg *config.Config, text string) {
 	if cfg == nil {
@@ -43,7 +66,7 @@ func UserMarkup(ctx context.Context, cfg *config.Config, telegramID int64, text 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	bot, err := gotgbot.NewBot(cfg.BotToken, nil)
+	bot, err := botFor(cfg.BotToken)
 	if err != nil {
 		logx.Warnf("notify", "%v", err)
 		return
@@ -72,7 +95,7 @@ func Document(ctx context.Context, cfg *config.Config, telegramID int64, path, c
 	if filename == "" {
 		filename = filepath.Base(path)
 	}
-	bot, err := gotgbot.NewBot(cfg.BotToken, nil)
+	bot, err := botFor(cfg.BotToken)
 	if err != nil {
 		return err
 	}

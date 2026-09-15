@@ -39,7 +39,6 @@ func TestOpenTempDBAndUserUpsert(t *testing.T) {
 		Subgroup:      1,
 		Enabled:       true,
 		DisabledUntil: &until,
-		SOCKS5:        "user:pass@127.0.0.1:1080",
 		Onboarded:     true,
 	}
 	if err := st.UpsertUser(u); err != nil {
@@ -86,9 +85,6 @@ func TestOpenTempDBAndUserUpsert(t *testing.T) {
 	if err := st.SetSubgroup(u.TelegramID, 2); err != nil {
 		t.Fatalf("SetSubgroup: %v", err)
 	}
-	if err := st.SetSOCKS5(u.TelegramID, "socks://x"); err != nil {
-		t.Fatalf("SetSOCKS5: %v", err)
-	}
 	if err := st.SetDisabledUntil(u.TelegramID, nil); err != nil {
 		t.Fatalf("SetDisabledUntil nil: %v", err)
 	}
@@ -96,7 +92,7 @@ func TestOpenTempDBAndUserUpsert(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("GetUser after setters: (%v, %v)", got, err)
 	}
-	if got.Enabled || got.FIO != "Сидоров Сидор" || got.Subgroup != 2 || got.SOCKS5 != "socks://x" || got.DisabledUntil != nil {
+	if got.Enabled || got.FIO != "Сидоров Сидор" || got.Subgroup != 2 || got.DisabledUntil != nil {
 		t.Fatalf("setters: %+v", got)
 	}
 
@@ -491,11 +487,5 @@ func TestTestJoinAndAdmin(t *testing.T) {
 	back, err := st.GetTestJoin()
 	if err != nil || back.URL != got.URL || back.Want != model.TestWantDummy || back.Name != "тест" {
 		t.Fatalf("roundtrip: %+v %v", back, err)
-	}
-	if err := st.RememberAdmin(1074442235); err != nil {
-		t.Fatal(err)
-	}
-	if st.RememberedAdmin() != 1074442235 {
-		t.Fatalf("admin %d", st.RememberedAdmin())
 	}
 }

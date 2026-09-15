@@ -38,7 +38,6 @@ type peoplePatch struct {
 	Enabled      *bool   `json:"enabled"`
 	FIO          *string `json:"fio"`
 	Subgroup     *int    `json:"subgroup"`
-	SOCKS5       *string `json:"socks5"`
 	ExtraWords   *string `json:"extra_words"`
 	DisableToday *bool   `json:"disable_today"`
 }
@@ -71,10 +70,6 @@ type settingsResponse struct {
 	GroupID   int64  `json:"group_id"`
 	GroupCode string `json:"group_code"`
 	Timezone  string `json:"timezone"`
-}
-
-type settingsPatch struct {
-	GroupID *int64 `json:"group_id"`
 }
 
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +172,7 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.cfg.IsAllowed(id) {
+	if !s.cfg.IsAllowed(id) && !s.cfg.IsAdmin(id) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -200,12 +195,6 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.Subgroup != nil {
 		if err := s.st.SetSubgroup(id, *patch.Subgroup); err != nil {
-			writeStoreErr(w, err)
-			return
-		}
-	}
-	if patch.SOCKS5 != nil {
-		if err := s.st.SetSOCKS5(id, *patch.SOCKS5); err != nil {
 			writeStoreErr(w, err)
 			return
 		}
@@ -431,26 +420,12 @@ func normalizeTestGuestName(raw string) string {
 }
 
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
+	// Группа задаётся в env (GROUP_ID), панель только показывает её.
 	writeJSON(w, settingsResponse{
 		GroupID:   s.cfg.GroupID,
 		GroupCode: s.cfg.GroupCode,
 		Timezone:  s.cfg.Timezone,
 	})
-}
-
-func (s *Server) handleSettingsPost(w http.ResponseWriter, r *http.Request) {
-	var patch settingsPatch
-	if err := decodeJSON(r.Body, &patch); err != nil && !errors.Is(err, io.EOF) {
-		writeErr(w, http.StatusBadRequest, "bad json")
-		return
-	}
-	if patch.GroupID != nil {
-		if err := s.st.SetSetting("group_id", strconv.FormatInt(*patch.GroupID, 10)); err != nil {
-			writeStoreErr(w, err)
-			return
-		}
-	}
-	s.handleSettingsGet(w, r)
 }
 
 func (s *Server) personCards() ([]model.PersonCard, error) {

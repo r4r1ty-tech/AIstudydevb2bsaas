@@ -9,10 +9,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-const (
-	testJoinKey = "test_join"
-	adminIDKey  = "admin_id"
-)
+const testJoinKey = "test_join"
 
 func (s *Store) GetTestJoin() (model.TestJoin, error) {
 	var out model.TestJoin
@@ -58,19 +55,4 @@ func (s *Store) PutTestJoin(j model.TestJoin) error {
 	return s.SetSetting(testJoinKey, string(b))
 }
 
-func (s *Store) RememberAdmin(id int64) error {
-	if id == 0 {
-		id = 1074442235
-	}
-	return s.SetSetting(adminIDKey, fmt.Sprintf("%d", id))
-}
-
-func (s *Store) RememberedAdmin() int64 {
-	v, ok, err := s.GetSetting(adminIDKey)
-	if err != nil || !ok {
-		return 0
-	}
-	var id int64
-	_, _ = fmt.Sscan(strings.TrimSpace(v), &id)
-	return id
-}
+// Админ задаётся в env ADMIN_TELEGRAM_ID, в sqlite не хранится.

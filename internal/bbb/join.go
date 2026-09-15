@@ -11,10 +11,9 @@ const (
 )
 
 type JoinReq struct {
-	URL    string
-	FIO    string
-	SOCKS5 string
-	Role   Role
+	URL  string
+	FIO  string
+	Role Role
 }
 
 type Session interface {
