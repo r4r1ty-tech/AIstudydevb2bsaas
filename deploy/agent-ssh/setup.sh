@@ -46,7 +46,7 @@ opencode agent dispatcher. allowed:
   logs <unit> [lines]       journalctl -u <unit> (lines <= 500, default 100)
   restart <unit>            systemctl restart <ssau unit>
   webapp-url                current tunnel url (from file)
-  env-keys                  NAMES of keys in .env only, never values
+  env-keys                  key names + set/empty only, never values
   recordings                file listing with sizes under recordings/
   disk                      df -h / and free -m
 EOF
@@ -93,7 +93,8 @@ case "${verb}" in
     ;;
   env-keys )
     if [[ ! -f "${APP}/.env" ]]; then echo "no ${APP}/.env" >&2; exit 1; fi
-    exec grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "${APP}/.env" | tr -d '=' | sort
+    awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/ {v=substr($0,index($0,"=")+1); gsub(/\r/,"",v); print $1 (length(v)?" set":" empty")}' "${APP}/.env" | sort
+    exit 0
     ;;
   recordings )
     if [[ ! -d "${APP}/recordings" ]]; then echo "no ${APP}/recordings" >&2; exit 1; fi
