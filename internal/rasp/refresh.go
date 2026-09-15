@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
@@ -57,17 +57,20 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	}
 	now := nowFn().In(r.loc())
 	run := model.ParseRun{At: now}
+	logx.Debugf("rasp", "refresh group=%d", r.GroupID)
 
 	body, status, err := Fetch(ctx, r.GroupID, 0)
 	if err != nil {
 		run.OK = false
 		run.Status = err.Error()
+		logx.Warnf("rasp", "fetch: %v", err)
 		r.persistFail(run)
 		return run, err
 	}
 	if status != http.StatusOK {
 		run.OK = false
 		run.Status = strconv.Itoa(status)
+		logx.Warnf("rasp", "fetch status=%d", status)
 		r.persistFail(run)
 		return run, nil
 	}
@@ -76,6 +79,7 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	if err != nil {
 		run.OK = false
 		run.Status = err.Error()
+		logx.Errorf("rasp", "parse: %v", err)
 		r.persistFail(run)
 		return run, err
 	}
@@ -84,6 +88,7 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	if err != nil {
 		run.OK = false
 		run.Status = err.Error()
+		logx.Errorf("rasp", "list lessons: %v", err)
 		r.persistFail(run)
 		return run, err
 	}
@@ -122,10 +127,14 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	run.LessonCount = len(lessons)
 	run.OnlineCount = online
 	run.Diff = diff
+	if diff != "" {
+		logx.Infof("rasp", "diff:\n%s", diff)
+	}
 	if err := r.Store.SaveParseRun(run); err != nil {
+		logx.Errorf("rasp", "save parse run: %v", err)
 		return run, err
 	}
-	log.Printf("lessons=%d online=%d next_week=%v", run.LessonCount, run.OnlineCount, fetchedNext)
+	logx.Infof("rasp", "lessons=%d online=%d next_week=%v", run.LessonCount, run.OnlineCount, fetchedNext)
 	msg := fmt.Sprintf("ok lessons=%d online=%d", run.LessonCount, run.OnlineCount)
 	if diff != "" {
 		msg = msg + "\n" + diff
@@ -139,6 +148,7 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 }
 
 func (r *Refresher) persistFail(run model.ParseRun) {
+	logx.Warnf("rasp", "refresh fail: %s", run.Status)
 	_ = r.Store.SaveParseRun(run)
 	_ = r.Store.AddEvent(model.Event{
 		At:      run.At,
@@ -173,9 +183,13 @@ func (r *Refresher) StartCron(ctx context.Context) {
 			}
 			if lastFired != key {
 				lastFired = key
+				logx.Infof("rasp", "cron %s", hm)
 			}
 		} else if !kicked {
 			return
+		}
+		if kicked {
+			logx.Infof("rasp", "manual refresh kick")
 		}
 		_, _ = r.Refresh(ctx)
 	}

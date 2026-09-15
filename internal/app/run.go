@@ -10,6 +10,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
 
@@ -21,6 +22,7 @@ func Run(name string, needToken bool, fn func(context.Context, *config.Config, *
 	if err != nil {
 		log.Fatal(err)
 	}
+	logx.Setup()
 	if needToken {
 		if err := cfg.RequireBotToken(); err != nil {
 			log.Fatal(err)
@@ -40,15 +42,17 @@ func Run(name string, needToken bool, fn func(context.Context, *config.Config, *
 	}
 	defer st.Close()
 	if err := st.RememberAdmin(config.DefaultAdminID); err != nil {
-		log.Printf("admin id: %v", err)
+		logx.Warnf("app", "admin id: %v", err)
 	}
 	cfg.AdminID = config.DefaultAdminID
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("up db=%s tz=%s", cfg.DBPath, cfg.Timezone)
+	logx.Infof("app", "up db=%s tz=%s level=%s", cfg.DBPath, cfg.Timezone, logx.LevelName(logx.CurrentLevel()))
 	if err := fn(ctx, cfg, st, loc); err != nil && ctx.Err() == nil {
+		logx.Errorf("app", "exit: %v", err)
 		log.Fatal(err)
 	}
+	logx.Infof("app", "stopped")
 }

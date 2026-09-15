@@ -3,7 +3,6 @@ package bbb
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 type ChromeJoiner struct {
@@ -128,11 +128,11 @@ func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 	if record {
 		c.recLauncher = l
 		c.recBrowser = b
-		log.Printf("bbb: chromium-rec %s", bin)
+		logx.Infof("bbb", "chromium-rec %s", bin)
 	} else {
 		c.launcher = l
 		c.browser = b
-		log.Printf("bbb: chromium %s", bin)
+		logx.Infof("bbb", "chromium %s", bin)
 	}
 	return b, nil
 }
@@ -256,7 +256,7 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 		return nil, err
 	}
 	st, _ := sess.seat(ctx)
-	log.Printf("bbb: seat=%s %s", st, pageHint(page))
+	logx.Infof("bbb", "seat=%s %s", st, pageHint(page))
 	return sess, nil
 }
 

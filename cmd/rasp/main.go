@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/app"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/rasp"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
@@ -21,7 +21,7 @@ func main() {
 		} else if !run.OK {
 			notify.Admin(ctx, cfg, "парсер: "+run.Status)
 		} else {
-			log.Printf("lessons=%d online=%d", run.LessonCount, run.OnlineCount)
+			logx.Infof("rasp", "lessons=%d online=%d", run.LessonCount, run.OnlineCount)
 		}
 		r.StartCron(ctx)
 		return nil

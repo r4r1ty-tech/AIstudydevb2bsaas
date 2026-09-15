@@ -2,7 +2,6 @@ package bbb
 
 import (
 	"bytes"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 // Hogs is a refcounted freeze of RAM hogs (Cursor on this VDS) around a live BBB room.
@@ -48,7 +49,7 @@ func (g *procHogs) Hold() {
 	}
 	cleanTmpCache()
 	g.paused = freezeHogs(g.procDir)
-	log.Printf("bbb: lecture pause: froze %d procs", len(g.paused))
+	logx.Infof("bbb", "lecture pause: froze %d procs", len(g.paused))
 }
 
 func (g *procHogs) Release() {
@@ -66,7 +67,7 @@ func (g *procHogs) Release() {
 	}
 	n := thawHogs(g.paused)
 	g.paused = nil
-	log.Printf("bbb: lecture pause: thawed %d procs", n)
+	logx.Infof("bbb", "lecture pause: thawed %d procs", n)
 }
 
 func (g *procHogs) Reset() {
@@ -81,7 +82,7 @@ func (g *procHogs) Reset() {
 	n := thawHogs(g.paused)
 	g.paused = nil
 	g.n = 0
-	log.Printf("bbb: lecture pause: reset, thawed %d procs", n)
+	logx.Infof("bbb", "lecture pause: reset, thawed %d procs", n)
 }
 
 func cleanTmpCache() {

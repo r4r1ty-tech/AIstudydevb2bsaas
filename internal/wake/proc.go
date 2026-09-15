@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 type ProcRecognizer struct {
@@ -63,7 +64,7 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 	ch := make(chan string, 32)
 	go scanLines(stdout, ch)
 	if cmd.Process != nil {
-		log.Printf("wake: vosk pid=%d", cmd.Process.Pid)
+		logx.Infof("wake", "vosk pid=%d", cmd.Process.Pid)
 	}
 	return &ProcRecognizer{cmd: cmd, stdin: stdin, out: ch}, nil
 }
