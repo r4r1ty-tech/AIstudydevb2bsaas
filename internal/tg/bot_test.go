@@ -1,6 +1,7 @@
 package tg
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -28,6 +29,26 @@ func TestWebAppURLAndPanelMarkup(t *testing.T) {
 	}
 	if got := mk.InlineKeyboard[0][0].WebApp.Url; got != "https://x.example/base/" {
 		t.Fatalf("webapp url = %q", got)
+	}
+}
+
+func TestWebAppURLFromFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "webapp_url")
+	if err := os.WriteFile(f, []byte("https://hot.example/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := &Bot{cfg: &config.Config{WebAppURL: "https://env.example", WebAppURLFile: f}}
+	if got := b.webAppURL(); got != "https://hot.example/" {
+		t.Fatalf("file url = %q", got)
+	}
+	if mk := b.panelMarkup(); mk == nil || mk.InlineKeyboard[0][0].WebApp.Url != "https://hot.example/" {
+		t.Fatalf("markup should use file url: %#v", mk)
+	}
+	if err := os.WriteFile(f, []byte("https://rotated.example/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.webAppURL(); got != "https://rotated.example/" {
+		t.Fatalf("hot reload = %q", got)
 	}
 }
 

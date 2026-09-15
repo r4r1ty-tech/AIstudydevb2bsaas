@@ -31,6 +31,7 @@ type Config struct {
 	BotToken         string
 	AdminID          int64
 	WebAppURL        string
+	WebAppURLFile    string
 	DBPath           string
 	GroupID          int64
 	GroupCode        string
@@ -65,6 +66,7 @@ func Load() (*Config, error) {
 		BotToken:         strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		AdminID:          int64Env("ADMIN_TELEGRAM_ID", DefaultAdminID),
 		WebAppURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
+		WebAppURLFile:    strings.TrimSpace(os.Getenv("WEBAPP_URL_FILE")),
 		DBPath:           strEnv("DATABASE_PATH", DefaultDBPath),
 		GroupID:          int64Env("GROUP_ID", DefaultGroupID),
 		GroupCode:        strEnv("GROUP_CODE", DefaultGroupCode),
@@ -125,6 +127,20 @@ func (c *Config) IsAllowed(id int64) bool {
 
 func (c *Config) IsAdmin(id int64) bool {
 	return id == c.AdminID
+}
+
+func (c *Config) ResolveWebAppURL() string {
+	if c == nil {
+		return ""
+	}
+	if f := strings.TrimSpace(c.WebAppURLFile); f != "" {
+		if b, err := os.ReadFile(f); err == nil {
+			if u := strings.TrimRight(strings.TrimSpace(string(b)), "/"); u != "" {
+				return u
+			}
+		}
+	}
+	return strings.TrimRight(strings.TrimSpace(c.WebAppURL), "/")
 }
 
 func strEnv(key, fallback string) string {

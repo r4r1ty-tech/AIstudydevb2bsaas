@@ -77,7 +77,7 @@ func (b *Bot) onPanel(_ *gotgbot.Bot, ctx *ext.Context) error {
 	if ctx.EffectiveChat != nil {
 		chatID = ctx.EffectiveChat.Id
 	}
-	if b.cfg.WebAppURL == "" {
+	if b.webAppURL() == "" {
 		return b.send(chatID, "Поставь WEBAPP_PUBLIC_URL в .env", nil)
 	}
 	mk := b.panelMarkup()

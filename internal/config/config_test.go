@@ -112,6 +112,39 @@ func TestIsAllowedAndAdmin(t *testing.T) {
 	}
 }
 
+func TestResolveWebAppURL(t *testing.T) {
+	var nilCfg *Config
+	if nilCfg.ResolveWebAppURL() != "" {
+		t.Fatal("nil config must resolve empty")
+	}
+
+	c := &Config{WebAppURL: "https://env.example/"}
+	if got := c.ResolveWebAppURL(); got != "https://env.example" {
+		t.Fatalf("env fallback = %q", got)
+	}
+
+	f := filepath.Join(t.TempDir(), "webapp_url")
+	if err := os.WriteFile(f, []byte("  https://tunnel.example/ \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c.WebAppURLFile = f
+	if got := c.ResolveWebAppURL(); got != "https://tunnel.example" {
+		t.Fatalf("file should win = %q", got)
+	}
+
+	if err := os.WriteFile(f, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.ResolveWebAppURL(); got != "https://env.example" {
+		t.Fatalf("empty file should fall back = %q", got)
+	}
+
+	c.WebAppURLFile = filepath.Join(t.TempDir(), "missing")
+	if got := c.ResolveWebAppURL(); got != "https://env.example" {
+		t.Fatalf("missing file should fall back = %q", got)
+	}
+}
+
 func TestRequireBotToken(t *testing.T) {
 	if err := (&Config{}).RequireBotToken(); err == nil {
 		t.Fatal("empty token must fail")
