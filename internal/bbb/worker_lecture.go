@@ -18,6 +18,8 @@ import (
 const (
 	slidesDoneKey = "slides_done:"
 	notesDoneKey  = "notes_done:"
+
+	minRecordedBytes = 20000
 )
 
 func (w *Worker) recRoot() string {
@@ -57,12 +59,14 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 		return sess
 	}
 	abs := filepath.Join(w.recRoot(), pack.Dir)
-	rec, err := capture.Start(ctx, archive.AudioFile(abs))
+	seg := capture.SegmentPath(abs, time.Now().UnixNano())
+	rec, err := capture.Start(ctx, seg)
 	if err != nil {
 		logx.Errorf("bbb", "ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"» не стартовала: "+err.Error())
 		return sess
 	}
+	logx.Infof("bbb", "rec segment %s", filepath.Base(seg))
 	pack.Status = model.PackRecording
 	_ = w.Store.SavePack(pack)
 	_ = w.Store.AddEvent(model.Event{
@@ -74,6 +78,15 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 	st := w.Store
 	return &closeHook{Session: sess, fn: func() {
 		_ = rec.Stop()
+		n, merr := capture.MergeSegments(context.Background(), abs, archive.AudioFile(abs))
+		if merr != nil {
+			logx.Warnf("bbb", "merge %s: %v", pack.Dir, merr)
+		} else {
+			logx.Infof("bbb", "audio merged %s segs=%d", pack.Dir, n)
+		}
+		if merr != nil {
+			return
+		}
 		p, err := st.PackByID(pack.ID)
 		if err != nil || p == nil {
 			return
@@ -173,7 +186,12 @@ func (w *Worker) promoteStuckRecording(p *model.LecturePack) bool {
 	}
 	audio := filepath.Join(w.recRoot(), p.Audio)
 	st, err := os.Stat(audio)
-	if err != nil || st.Size() < 2048 {
+	if err != nil || st.Size() < minRecordedBytes {
+		size := int64(0)
+		if st != nil {
+			size = st.Size()
+		}
+		logx.Warnf("bbb", "pack %s: audio too small (%d b) — не считаю записанной", p.Dir, size)
 		return false
 	}
 	p.Status = model.PackRecorded
