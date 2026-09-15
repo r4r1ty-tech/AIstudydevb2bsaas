@@ -23,6 +23,7 @@
       "ssh ssau logs *": "allow",
       "ssh ssau webapp-url*": "allow",
       "ssh ssau env-keys*": "allow",
+      "ssh ssau recordings*": "allow",
       "ssh ssau disk*": "allow",
       "ssh ssau restart *": "ask",
       "scp *": "ask",
