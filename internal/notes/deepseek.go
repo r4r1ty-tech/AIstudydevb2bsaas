@@ -35,9 +35,9 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	if cfg == nil || strings.TrimSpace(cfg.DeepSeekAPIKey) == "" {
 		return "", fmt.Errorf("нет DEEPSEEK_API_KEY")
 	}
-	base := strings.TrimRight(cfg.DeepSeekAPIURL, "/")
-	if base == "" {
-		base = "https://api.deepseek.com"
+	model := strings.TrimSpace(cfg.DeepSeekModel)
+	if model == "" {
+		model = "deepseek-chat"
 	}
 	sys := "Ты составляешь подробный конспект университетской лекции на русском. " +
 		"Структура: тема, план, основные определения, разбор материала по ходу лекции, формулы и примеры, выводы, вопросы к зачёту. " +
@@ -46,7 +46,7 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 		discipline, n, emptyDash(slides), emptyDash(transcript))
 
 	payload, err := json.Marshal(chatReq{
-		Model: "deepseek-chat",
+		Model: model,
 		Messages: []chatMessage{
 			{Role: "system", Content: sys},
 			{Role: "user", Content: user},
@@ -55,7 +55,7 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	if err != nil {
 		return "", err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/chat/completions", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, chatEndpoint(cfg.DeepSeekAPIURL), bytes.NewReader(payload))
 	if err != nil {
 		return "", err
 	}
@@ -80,6 +80,17 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 		return "", fmt.Errorf("deepseek: пустой ответ")
 	}
 	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+}
+
+func chatEndpoint(base string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		base = "https://api.deepseek.com"
+	}
+	if strings.HasSuffix(base, "/v1") {
+		return base + "/chat/completions"
+	}
+	return base + "/v1/chat/completions"
 }
 
 func emptyDash(s string) string {
