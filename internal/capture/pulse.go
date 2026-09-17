@@ -28,22 +28,37 @@ type Rec struct {
 }
 
 func EnsurePulse() {
+	logx.Debugf("capture", "EnsurePulse: enter")
 	if _, err := exec.LookPath("pulseaudio"); err != nil {
+		logx.Debugf("capture", "EnsurePulse: pulseaudio not found: %v", err)
 		return
 	}
-	if exec.Command("pulseaudio", "--check").Run() == nil {
+	if err := exec.Command("pulseaudio", "--check").Run(); err == nil {
+		logx.Debugf("capture", "EnsurePulse: pulseaudio already running")
 		return
+	} else {
+		logx.Debugf("capture", "EnsurePulse: check failed: %v", err)
 	}
-	_ = exec.Command("pulseaudio", "--start", "--exit-idle-time=-1", "--disallow-exit").Run()
+	if out, err := exec.Command("pulseaudio", "--start", "--exit-idle-time=-1", "--disallow-exit").CombinedOutput(); err != nil {
+		logx.Errorf("capture", "EnsurePulse: start pulseaudio: %v: %s", err, strings.TrimSpace(string(out)))
+	} else {
+		logx.Infof("capture", "pulseaudio started")
+	}
 }
 
 func EnsureSink() error {
+	logx.Debugf("capture", "EnsureSink: enter sink=%s", SinkName)
 	EnsurePulse()
 	if _, err := exec.LookPath("pactl"); err != nil {
+		logx.Errorf("capture", "EnsureSink: pactl not found: %v", err)
 		return fmt.Errorf("pactl не найден")
 	}
-	out, _ := exec.Command("pactl", "list", "short", "sinks").Output()
+	out, err := exec.Command("pactl", "list", "short", "sinks").Output()
+	if err != nil {
+		logx.Warnf("capture", "EnsureSink: list sinks: %v", err)
+	}
 	if strings.Contains(string(out), SinkName) {
+		logx.Debugf("capture", "EnsureSink: sink %s already present", SinkName)
 		return nil
 	}
 	cmd := exec.Command("pactl", "load-module", "module-null-sink",
@@ -51,33 +66,41 @@ func EnsureSink() error {
 		"sink_properties=device.description=SSAU")
 	b, err := cmd.CombinedOutput()
 	if err != nil {
+		logx.Errorf("capture", "EnsureSink: null sink: %s: %v", strings.TrimSpace(string(b)), err)
 		return fmt.Errorf("null sink: %s: %w", strings.TrimSpace(string(b)), err)
 	}
+	logx.Infof("capture", "null sink %s loaded", SinkName)
 	return nil
 }
 
 func FFmpegArgs(outPath string) []string {
-	return []string{
+	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "error",
 		"-f", "pulse", "-i", SinkName + ".monitor",
 		"-filter_complex", "[0:a]asplit=2[rec][wake]",
 		"-map", "[rec]", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k", "-y", outPath,
 		"-map", "[wake]", "-ac", "1", "-ar", fmt.Sprintf("%d", WakeRate), "-c:a", "pcm_s16le", "-f", "s16le", "pipe:1",
 	}
+	logx.Debugf("capture", "FFmpegArgs: out=%s args=%d", outPath, len(args))
+	return args
 }
 
 func Start(ctx context.Context, outPath string) (*Rec, error) {
+	logx.Debugf("capture", "Start: enter out=%s ctx=%v", outPath, ctx != nil)
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := EnsureSink(); err != nil {
+		logx.Errorf("capture", "Start: ensure sink: %v", err)
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
-		return nil, err
+		logx.Errorf("capture", "Start: mkdir %s: %v", filepath.Dir(outPath), err)
+		return nil, fmt.Errorf("Start: mkdir: %w", err)
 	}
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
+		logx.Errorf("capture", "Start: ffmpeg not found: %v", err)
 		return nil, fmt.Errorf("ffmpeg не найден")
 	}
 	cctx, cancel := context.WithCancel(ctx)
@@ -86,10 +109,12 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 	cmd.Stderr = os.Stderr
 	pcm, err := cmd.StdoutPipe()
 	if err != nil {
+		logx.Errorf("capture", "Start: stdout pipe: %v", err)
 		cancel()
 		return nil, fmt.Errorf("ffmpeg stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
+		logx.Errorf("capture", "Start: ffmpeg start: %v", err)
 		cancel()
 		return nil, fmt.Errorf("ffmpeg start: %w", err)
 	}
@@ -99,32 +124,48 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 
 func (r *Rec) Read(p []byte) (int, error) {
 	if r == nil || r.pcm == nil {
+		logx.Debugf("capture", "Rec.Read: closed r=%v pcm=%v", r == nil, r != nil && r.pcm == nil)
 		return 0, io.EOF
 	}
-	return r.pcm.Read(p)
+	n, err := r.pcm.Read(p)
+	logx.Debugf("capture", "Rec.Read: n=%d err=%v", n, err)
+	return n, err
 }
 
 func (r *Rec) Stop() error {
+	logx.Debugf("capture", "Rec.Stop: enter")
 	if r == nil {
+		logx.Debugf("capture", "Rec.Stop: nil rec")
 		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.cmd == nil || r.cmd.Process == nil {
+		logx.Debugf("capture", "Rec.Stop: no process")
 		return nil
 	}
-	_ = r.cmd.Process.Signal(syscall.SIGINT)
+	if err := r.cmd.Process.Signal(syscall.SIGINT); err != nil {
+		logx.Warnf("capture", "Rec.Stop: signal pid=%d: %v", r.cmd.Process.Pid, err)
+	} else {
+		logx.Infof("capture", "ffmpeg stop signal pid=%d", r.cmd.Process.Pid)
+	}
 	err := r.cmd.Wait()
+	if err != nil {
+		logx.Warnf("capture", "Rec.Stop: wait: %v", err)
+	}
 	if r.cancel != nil {
 		r.cancel()
 	}
 	r.cmd = nil
+	logx.Debugf("capture", "Rec.Stop: exit err=%v", err)
 	return err
 }
 
 func PulseEnv() []string {
-	return append(os.Environ(),
+	env := append(os.Environ(),
 		"PULSE_SINK="+SinkName,
 		"PULSE_SOURCE="+SinkName+".monitor",
 	)
+	logx.Debugf("capture", "PulseEnv: vars=%d sink=%s", len(env), SinkName)
+	return env
 }
