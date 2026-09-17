@@ -128,14 +128,8 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: tj.GuestName(), Role: role})
 	if err != nil {
-		tj.Status = model.TestError
-		tj.Mode = ""
-		tj.Message = err.Error()
-		if perr := w.Store.PutTestJoin(tj); perr != nil {
-			logx.Errorf("bbb", "ensureTestN: put error: %v", perr)
-		}
 		logx.Warnf("bbb", "test join fail: %v", err)
-		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+err.Error())
+		w.testFailed(ctx, tj, err.Error())
 		return
 	}
 	if latest, e := w.Store.GetTestJoin(); e != nil {
@@ -172,13 +166,7 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 			logx.Debugf("bbb", "ensureTestN: close after lobby err: %v", cerr)
 		}
 		logx.Errorf("bbb", "ensureTestN: InLobby: %v", err)
-		tj.Status = model.TestError
-		tj.Mode = ""
-		tj.Message = err.Error()
-		if perr := w.Store.PutTestJoin(tj); perr != nil {
-			logx.Errorf("bbb", "ensureTestN: put error: %v", perr)
-		}
-		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+err.Error())
+		w.testFailed(ctx, tj, err.Error())
 		return
 	}
 	room, err := sess.InRoom(ctx)
@@ -187,13 +175,7 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 			logx.Debugf("bbb", "ensureTestN: close after room err: %v", cerr)
 		}
 		logx.Errorf("bbb", "ensureTestN: InRoom: %v", err)
-		tj.Status = model.TestError
-		tj.Mode = ""
-		tj.Message = err.Error()
-		if perr := w.Store.PutTestJoin(tj); perr != nil {
-			logx.Errorf("bbb", "ensureTestN: put error: %v", perr)
-		}
-		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+err.Error())
+		w.testFailed(ctx, tj, err.Error())
 		return
 	}
 	if !lobby && !room {
@@ -201,16 +183,17 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 			logx.Debugf("bbb", "ensureTestN: close after unknown seat: %v", cerr)
 		}
 		logx.Warnf("bbb", "ensureTestN: not room and not lobby")
-		tj.Status = model.TestError
-		tj.Mode = ""
-		tj.Message = "страница не комната и не лобби"
-		if perr := w.Store.PutTestJoin(tj); perr != nil {
-			logx.Errorf("bbb", "ensureTestN: put error: %v", perr)
-		}
-		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — страница не комната и не лобби")
+		w.testFailed(ctx, tj, "страница не комната и не лобби")
 		return
 	}
 
+	if latest, e := w.Store.GetTestJoin(); e == nil && (latest.Want == model.TestWantOff || latest.Want != tj.Want) {
+		if cerr := sess.Close(); cerr != nil {
+			logx.Debugf("bbb", "ensureTestN: close after stale seated: %v", cerr)
+		}
+		logx.Infof("bbb", "ensureTestN: want changed before seating latest=%q stale=%q — abort", latest.Want, tj.Want)
+		return
+	}
 	state := model.TestRoom
 	msg := "в комнате"
 	if lobby {
@@ -242,6 +225,32 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		return
 	}
 	notify.Admin(ctx, w.Cfg, testInRoomText(tj))
+}
+
+// testFailed records a failed test join without resurrecting a stale want.
+// If the user pressed leave (or switched mode) while the join was in flight,
+// the fresh DB state wins and nothing is written or notified.
+func (w *Worker) testFailed(ctx context.Context, tj model.TestJoin, msg string) {
+	latest, err := w.Store.GetTestJoin()
+	if err != nil {
+		logx.Errorf("bbb", "testFailed: reload: %v", err)
+		latest = tj
+	}
+	if latest.Want == model.TestWantOff || latest.Want != tj.Want {
+		logx.Infof("bbb", "testFailed: want changed latest=%q stale=%q — error not recorded", latest.Want, tj.Want)
+		return
+	}
+	if latest.Status == model.TestError && latest.Message == msg {
+		logx.Debugf("bbb", "testFailed: same error already reported, skip notify")
+		return
+	}
+	latest.Status = model.TestError
+	latest.Mode = ""
+	latest.Message = msg
+	if perr := w.Store.PutTestJoin(latest); perr != nil {
+		logx.Errorf("bbb", "testFailed: put: %v", perr)
+	}
+	notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+msg)
 }
 
 func testInRoomText(tj model.TestJoin) string {
