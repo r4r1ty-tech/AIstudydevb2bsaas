@@ -15,29 +15,37 @@ import (
 )
 
 func Run(name string, needToken bool, fn func(context.Context, *config.Config, *store.Store, *time.Location) error) {
+	logx.Debugf("app", "Run: enter name=%s need_token=%v", name, needToken)
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("ssau-" + name + " ")
 
+	logx.Infof("app", "Run: starting %s", name)
 	cfg, err := config.Load()
 	if err != nil {
+		logx.Errorf("app", "Run: config.Load: %v", err)
 		log.Fatal(err)
 	}
 	logx.Setup()
 	if needToken {
 		if err := cfg.RequireBotToken(); err != nil {
+			logx.Errorf("app", "Run: require bot token: %v", err)
 			log.Fatal(err)
 		}
 	}
+	logx.Debugf("app", "Run: config loaded db=%s tz=%s recordings=%s group_id=%d", cfg.DBPath, cfg.Timezone, cfg.RecordingsDir, cfg.GroupID)
 	loc, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
+		logx.Errorf("app", "Run: timezone %s: %v", cfg.Timezone, err)
 		log.Fatalf("timezone %s: %v", cfg.Timezone, err)
 	}
 	if err := os.MkdirAll(cfg.RecordingsDir, 0755); err != nil {
+		logx.Errorf("app", "Run: mkdir recordings %s: %v", cfg.RecordingsDir, err)
 		log.Fatal(err)
 	}
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
+		logx.Errorf("app", "Run: store.Open %s: %v", cfg.DBPath, err)
 		log.Fatal(err)
 	}
 	defer st.Close()
