@@ -8,6 +8,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/ssau-bot
 EnvironmentFile=-/opt/ssau-bot/.env
+Environment=XDG_RUNTIME_DIR=/run/user/0
 ExecStartPre=/opt/ssau-bot/audio.sh
 ExecStart=/opt/ssau-bot/bbb
 Restart=on-failure

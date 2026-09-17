@@ -73,6 +73,23 @@ func EnsureSink() error {
 	return nil
 }
 
+// EnsureDefaultSink makes ssau_rec the sink new streams land on, so Chromium
+// audio reaches its monitor even if it ignores PULSE_SINK.
+func EnsureDefaultSink() error {
+	logx.Debugf("capture", "EnsureDefaultSink: enter sink=%s", SinkName)
+	if _, err := exec.LookPath("pactl"); err != nil {
+		logx.Errorf("capture", "EnsureDefaultSink: pactl not found: %v", err)
+		return fmt.Errorf("pactl не найден")
+	}
+	out, err := exec.Command("pactl", "set-default-sink", SinkName).CombinedOutput()
+	if err != nil {
+		logx.Errorf("capture", "EnsureDefaultSink: set-default-sink %s: %s: %v", SinkName, strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("set-default-sink: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	logx.Infof("capture", "default sink -> %s", SinkName)
+	return nil
+}
+
 func FFmpegArgs(outPath string) []string {
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "error",
@@ -94,6 +111,7 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 		logx.Errorf("capture", "Start: ensure sink: %v", err)
 		return nil, err
 	}
+	LogRoute("capture", "sink-ready")
 	if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
 		logx.Errorf("capture", "Start: mkdir %s: %v", filepath.Dir(outPath), err)
 		return nil, fmt.Errorf("Start: mkdir: %w", err)
@@ -119,6 +137,7 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 		return nil, fmt.Errorf("ffmpeg start: %w", err)
 	}
 	logx.Infof("capture", "ffmpeg pid=%d -> %s + pcm %dHz", cmd.Process.Pid, outPath, WakeRate)
+	LogRoute("capture", "ffmpeg-started")
 	return &Rec{cmd: cmd, cancel: cancel, pcm: pcm, path: outPath}, nil
 }
 
