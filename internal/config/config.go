@@ -42,6 +42,7 @@ type Config struct {
 	RecordingsDir    string
 	ChromeBin        string
 	ChromeUserDir    string
+	ProxyFile        string
 	BBBDryRun        bool
 	LecturePause     bool
 	PanelPassword    string
@@ -83,6 +84,7 @@ func Load() (*Config, error) {
 		RecordingsDir:    strEnv("RECORDINGS_DIR", DefaultRecordings),
 		ChromeBin:        strEnv("CHROME_BIN", ""),
 		ChromeUserDir:    strEnv("CHROME_USER_DATA_DIR", ""),
+		ProxyFile:        strEnv("PROXY_FILE", "/opt/ssau-bot/proxies.txt"),
 		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
 		LecturePause:     boolEnv("LECTURE_PAUSE", true),
 		PanelPassword:    strEnv("PANEL_PASSWORD", ""),
