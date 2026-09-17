@@ -144,6 +144,14 @@ func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 		Set(flags.Flag("disable-features"), "AudioServiceOutOfProcess")
 
 	if quality {
+		// Sink должен существовать до старта браузера, иначе Chromium создаст
+		// поток на дефолтном устройстве, а не на ssau_rec.monitor.
+		if err := capture.EnsureSink(); err != nil {
+			logx.Warnf("bbb", "ensure: ensure sink: %v", err)
+		}
+		if err := capture.EnsureDefaultSink(); err != nil {
+			logx.Warnf("bbb", "ensure: default sink: %v", err)
+		}
 		// Одна вкладка, чей звук идёт в null-sink на запись и вейкворды.
 		l = l.Env(capture.PulseEnv()...).
 			Set(flags.Flag("window-size"), "1280,800")
@@ -170,6 +178,7 @@ func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 		c.recLauncher = l
 		c.recBrowser = b
 		logx.Infof("bbb", "chromium-rec %s", bin)
+		capture.LogRoute("bbb", "chrome-rec-launched")
 	} else {
 		c.launcher = l
 		c.browser = b
