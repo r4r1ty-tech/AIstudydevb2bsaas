@@ -3,6 +3,7 @@ package bbb
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -266,6 +267,24 @@ func (s *chromeSession) Close() error {
 // maxJoinAttempts is how many different proxies one join may try before giving up.
 const maxJoinAttempts = 3
 
+// withListenOnlyAudio asks the BBB client to auto-join audio in listen-only
+// mode, so the recording tab does not depend on clicking the audio modal.
+func withListenOnlyAudio(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" {
+		logx.Debugf("bbb", "withListenOnlyAudio: keep raw url err=%v", err)
+		return raw
+	}
+	q := u.Query()
+	q.Set("userdata-bbb_auto_join_audio", "true")
+	q.Set("userdata-bbb_force_listen_only", "true")
+	q.Set("userdata-bbb_listen_only_mode", "true")
+	q.Set("userdata-bbb_skip_check_audio", "true")
+	u.RawQuery = q.Encode()
+	logx.Infof("bbb", "withListenOnlyAudio: url=%s", redactURL(u.String()))
+	return u.String()
+}
+
 func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	logx.Debugf("bbb", "ChromeJoiner.Join: role=%s fio=%q url=%s", req.Role, req.FIO, redactURL(req.URL))
 	if ctx == nil {
@@ -347,11 +366,15 @@ func (c *ChromeJoiner) attemptJoin(ctx context.Context, root *rod.Browser, req J
 
 	sess := &chromeSession{page: page, ctxBrowser: ctxBrowser}
 
-	if err := page.Timeout(30 * time.Second).Navigate(req.URL); err != nil {
+	target := req.URL
+	if req.Role == RoleRecord {
+		target = withListenOnlyAudio(req.URL)
+	}
+	if err := page.Timeout(30 * time.Second).Navigate(target); err != nil {
 		if cerr := sess.Close(); cerr != nil {
 			logx.Debugf("bbb", "attemptJoin: cleanup close: %v", cerr)
 		}
-		logx.Errorf("bbb", "attemptJoin: navigate %s: %v", redactURL(req.URL), err)
+		logx.Errorf("bbb", "attemptJoin: navigate %s: %v", redactURL(target), err)
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
 	if err := page.Timeout(15 * time.Second).WaitLoad(); err != nil {

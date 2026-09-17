@@ -123,6 +123,45 @@ var afterJoinWait = 45 * time.Second
 // audioJoinWait is how long the recording tab waits for the audio chooser.
 var audioJoinWait = 20 * time.Second
 
+// joinAudioSels opens the audio chooser from the navbar (HTML5 client).
+var joinAudioSels = []string{
+	"[data-test='joinAudio']",
+	"[data-test='join-audio']",
+	"[data-test='audioButton']",
+	"[data-test='audioControl']",
+	`button[aria-label='Join audio']`,
+	`button[aria-label='Присоединиться к аудио']`,
+	`button[aria-label='Подключить звук']`,
+}
+
+// audioProbeSels are logged on failure so it is clear which audio controls exist.
+var audioProbeSels = []string{
+	"[data-test='joinAudio']",
+	"[data-test='listenOnlyBtn']",
+	"[data-test='microphoneBtn']",
+	"[data-test='audioControl']",
+	"[data-test='leaveAudio']",
+	"[data-test='unmuteButton']",
+	"[data-test='muteButton']",
+	"[data-test='audioModal']",
+}
+
+func audioProbeHint(page *rod.Page) string {
+	if page == nil {
+		return ""
+	}
+	res, err := page.Timeout(3*time.Second).Eval(`(sels) => {
+		const found = []
+		for (const s of sels) { if (document.querySelector(s)) found.push(s) }
+		return found.join(',')
+	}`, audioProbeSels)
+	if err != nil || res == nil {
+		logx.Debugf("bbb", "audioProbeHint: eval: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(res.Value.Str())
+}
+
 func classifySeat(sig seatSignals) seat {
 	if sig.hasRoom {
 		logx.Debugf("bbb", "classifySeat: room selector -> room")
@@ -368,10 +407,17 @@ func audioOnce(page *rod.Page, role Role) {
 			logx.Debugf("bbb", "audioOnce: listen-only clicked")
 			return
 		}
+		// Аудио-модалки может не быть: открываем выбор аудио из навбара.
+		if clickFirst(p, joinAudioSels) || clickByText(p, `(?i)join audio|подключить звук|присоединиться к аудио|audio`) {
+			logx.Debugf("bbb", "audioOnce: opened audio chooser")
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	if role == RoleRecord {
-		logx.Warnf("bbb", "listen-only не нажалась — звук может быть пустым :: %s", clickablesHint(page))
+		logx.Warnf("bbb", "listen-only не нажалась — звук может быть пустым :: audio=[%s] :: %s",
+			audioProbeHint(page), clickablesHint(page))
 	} else {
 		logx.Debugf("bbb", "audioOnce: no audio control found")
 	}
