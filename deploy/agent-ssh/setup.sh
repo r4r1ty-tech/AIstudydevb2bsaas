@@ -39,6 +39,7 @@ set -euo pipefail
 APP=/opt/ssau-bot
 URL_FILE="${APP}/webapp_url"
 ENV_FILE="${APP}/.env"
+PROXY_FILE="${APP}/proxies.txt"
 UNIT_LIST="ssau-tg ssau-rasp ssau-panel ssau-bbb ssau-tunnel ssau.target"
 BASE_URL="http://127.0.0.1:8080"
 
@@ -66,6 +67,10 @@ opencode agent dispatcher. allowed:
   sinks                     pulseaudio sinks
   sink-inputs               pulseaudio playback streams + their sink
   procs                     counts of ffmpeg/chromium/pulse/vosk processes
+
+  proxies-status            proxy count + host:port list (no credentials)
+  proxies-set <base64>      install login:pass@host:port list into proxies.txt (0600)
+  proxies-clear             remove proxies.txt (fall back to direct)
 EOF
 }
 
@@ -209,6 +214,43 @@ case "${verb}" in
     ;;
   procs )
     exec bash -c "for p in ffmpeg chromium pulseaudio wake.py; do printf '%-12s %s\n' \"\$p\" \"\$(pgrep -fc \"\$p\" 2>/dev/null || echo 0)\"; done"
+    ;;
+  proxies-status )
+    if [[ ! -f "${PROXY_FILE}" ]]; then echo "no ${PROXY_FILE}" >&2; exit 1; fi
+    count=0
+    while IFS= read -r line; do
+      [[ -z "${line}" || "${line}" == \#* ]] && continue
+      count=$((count+1))
+      printf '%s\n' "${line#*@}"
+    done < "${PROXY_FILE}"
+    echo "count=${count}"
+    ;;
+  proxies-set )
+    if [[ -z "${arg}" ]]; then echo "proxies-set <base64>" >&2; exit 2; fi
+    if ! content=$(printf '%s' "${arg}" | base64 -d 2>/dev/null); then
+      echo "bad base64" >&2; exit 2
+    fi
+    valid=0; bad=0
+    while IFS= read -r line; do
+      [[ -z "${line}" || "${line}" == \#* ]] && continue
+      if [[ "${line}" =~ ^[^@[:space:]]+@[^@[:space:]]+:[0-9]+$ ]]; then
+        valid=$((valid+1))
+      else
+        bad=$((bad+1))
+      fi
+    done <<< "${content}"
+    if (( bad > 0 )); then
+      echo "rejected: ${bad} bad lines, ${valid} ok" >&2
+      exit 2
+    fi
+    umask 077
+    printf '%s\n' "${content}" > "${PROXY_FILE}"
+    chmod 0600 "${PROXY_FILE}"
+    echo "written: ${valid} proxies"
+    ;;
+  proxies-clear )
+    rm -f "${PROXY_FILE}"
+    echo "cleared"
     ;;
   * )
     echo "unknown command: ${verb}" >&2

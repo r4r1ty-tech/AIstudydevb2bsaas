@@ -13,6 +13,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/proxyrelay"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
 
@@ -53,6 +54,9 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		if cfg != nil && cfg.ChromeUserDir != "" {
 			cj.UserDataDir = cfg.ChromeUserDir
 		}
+		if cfg != nil {
+			cj.Proxies = loadProxies(cfg.ProxyFile)
+		}
 		j = cj
 	}
 	hogs := Hogs(nopHogs{})
@@ -76,6 +80,20 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 	}
 	logx.Debugf("bbb", "NewWorker: joiner=%T hogs=%T", j, hogs)
 	return w
+}
+
+// loadProxies reads the SOCKS5 list; every browser tab then gets its own exit.
+func loadProxies(path string) *proxyrelay.Pool {
+	list, err := proxyrelay.ParseFile(path)
+	if err != nil {
+		logx.Warnf("bbb", "loadProxies: %v — работаю напрямую", err)
+		return nil
+	}
+	if len(list) == 0 {
+		logx.Infof("bbb", "loadProxies: пусто (%s) — работаю напрямую", path)
+		return nil
+	}
+	return proxyrelay.NewPool(list)
 }
 
 func (w *Worker) Run(ctx context.Context) error {

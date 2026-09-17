@@ -15,3 +15,5 @@ chrome-profile/
 .idea/
 .vscode/
 *.log
+proxies.txt
+proxies*.txt

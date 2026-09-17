@@ -21,6 +21,7 @@
 | `BBB_DRY_RUN` | `0` | `1` — не трогать Chromium (заглушка) |
 | `LECTURE_PAUSE` | `1` | Замораживать сторонние «тяжёлые» процессы на время пары |
 | `CHROME_BIN` / `CHROME_USER_DATA_DIR` | — | Путь к Chromium и его профилю |
+| `PROXY_FILE` | `/opt/ssau-bot/proxies.txt` | SOCKS5-список `login:password@ip:port`, по строке. Есть файл — каждая вкладка `bbb` идёт через свой прокси |
 | `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | LLM для конспекта. Любой OpenAI-совместимый endpoint `chat/completions` (DeepSeek, Groq, OpenRouter, локальный и т.п.). URL можно и с `/v1`, и без; `LLM_MODEL` обязателен |
 | `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Ключи STT/vision/конспектов |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH` | `r4r1ty-tech` / `LectionsSSAU` / `main` | Выгрузка конспектов в GitHub. Токен `remote.sh` берёт из `LECTURES_TOKEN` или `gh auth token` на сервере |

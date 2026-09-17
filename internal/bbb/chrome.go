@@ -17,11 +17,15 @@ import (
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/proxyrelay"
 )
 
 type ChromeJoiner struct {
 	Bin         string
 	UserDataDir string
+
+	// Proxies, if set, gives every tab its own upstream via a browser context.
+	Proxies *proxyrelay.Pool
 
 	mu          sync.Mutex
 	browser     *rod.Browser
@@ -73,6 +77,12 @@ func (c *ChromeJoiner) Close() error {
 	if c.recLauncher != nil {
 		c.recLauncher.Kill()
 		c.recLauncher = nil
+	}
+	if c.Proxies != nil {
+		if err := c.Proxies.Close(); err != nil {
+			logx.Debugf("bbb", "ChromeJoiner.Close: proxies close: %v", err)
+		}
+		c.Proxies = nil
 	}
 	logx.Debugf("bbb", "ChromeJoiner.Close: done")
 	return nil
@@ -191,6 +201,8 @@ func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 type chromeSession struct {
 	page *rod.Page
 
+	ctxBrowser *rod.Browser
+
 	greetMu sync.Mutex
 	greeted bool
 }
@@ -235,10 +247,17 @@ func (s *chromeSession) Close() error {
 	if s == nil {
 		return nil
 	}
-	logx.Debugf("bbb", "chromeSession.Close: page=%v", s.page != nil)
+	logx.Debugf("bbb", "chromeSession.Close: page=%v ctx=%v", s.page != nil, s.ctxBrowser != nil)
 	if s.page != nil {
 		if err := s.page.Close(); err != nil {
 			logx.Debugf("bbb", "chromeSession.Close: page close: %v", err)
+		}
+	}
+	if s.ctxBrowser != nil {
+		if err := s.ctxBrowser.Close(); err != nil {
+			logx.Debugf("bbb", "chromeSession.Close: context dispose: %v", err)
+		} else {
+			logx.Debugf("bbb", "chromeSession.Close: context disposed")
 		}
 	}
 	return nil
@@ -255,14 +274,38 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 		return nil, fmt.Errorf("ChromeJoiner.Join: ensure: %w", err)
 	}
 
-	page, err := root.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	browser := root
+	var ctxBrowser *rod.Browser
+	proxyLabel := "direct"
+	if slot, perr := c.Proxies.Next(); perr != nil {
+		logx.Warnf("bbb", "ChromeJoiner.Join: proxy: %v — иду напрямую", perr)
+	} else if slot != nil {
+		res, cerr := proto.TargetCreateBrowserContext{ProxyServer: slot.LocalURL()}.Call(root)
+		if cerr != nil {
+			logx.Warnf("bbb", "ChromeJoiner.Join: proxy context %s: %v — иду напрямую", slot.Redacted(), cerr)
+		} else {
+			sub := *root
+			sub.BrowserContextID = res.BrowserContextID
+			browser = &sub
+			ctxBrowser = &sub
+			proxyLabel = slot.Redacted()
+		}
+	}
+	logx.Infof("bbb", "ChromeJoiner.Join: proxy=%s url=%s", proxyLabel, redactURL(req.URL))
+
+	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
 		logx.Errorf("bbb", "ChromeJoiner.Join: tab: %v", err)
+		if ctxBrowser != nil {
+			if derr := ctxBrowser.Close(); derr != nil {
+				logx.Debugf("bbb", "ChromeJoiner.Join: dispose after tab fail: %v", derr)
+			}
+		}
 		return nil, fmt.Errorf("tab: %w", err)
 	}
 	page = page.Context(ctx)
 
-	sess := &chromeSession{page: page}
+	sess := &chromeSession{page: page, ctxBrowser: ctxBrowser}
 
 	if err := page.Timeout(30 * time.Second).Navigate(req.URL); err != nil {
 		if cerr := sess.Close(); cerr != nil {
