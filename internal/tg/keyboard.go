@@ -7,10 +7,12 @@ import (
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
 func mainKeyboard() gotgbot.ReplyKeyboardMarkup {
+	logx.Debugf("tg", "mainKeyboard: build")
 	return gotgbot.ReplyKeyboardMarkup{
 		Keyboard: [][]gotgbot.KeyboardButton{
 			{{Text: btnToday}, {Text: btnNotes}},
@@ -23,6 +25,7 @@ func mainKeyboard() gotgbot.ReplyKeyboardMarkup {
 }
 
 func subgroupKeyboard() gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "subgroupKeyboard: build")
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
 			{Text: "1", CallbackData: "ob:sub:1"},
@@ -32,6 +35,7 @@ func subgroupKeyboard() gotgbot.InlineKeyboardMarkup {
 }
 
 func skipWordsKeyboard() gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "skipWordsKeyboard: build")
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
 			{Text: "Пропустить", CallbackData: "ob:skipw"},
@@ -40,12 +44,14 @@ func skipWordsKeyboard() gotgbot.InlineKeyboardMarkup {
 }
 
 func (b *Bot) testMarkup(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "testMarkup: status=%s want=%s", j.Status, j.Want)
 	kb := testKeyboard(j)
 	if b == nil {
 		return kb
 	}
 	url := b.webAppURL()
 	if url == "" {
+		logx.Debugf("tg", "testMarkup: no webapp url")
 		return kb
 	}
 	kb.InlineKeyboard = append(kb.InlineKeyboard, []gotgbot.InlineKeyboardButton{{
@@ -56,18 +62,23 @@ func (b *Bot) testMarkup(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
 }
 
 func testAlready(j model.TestJoin, want string) bool {
+	ok := false
 	if j.Want != want {
-		return false
+		ok = false
+	} else {
+		switch j.Status {
+		case model.TestJoining, model.TestLobby, model.TestRoom:
+			ok = true
+		default:
+			ok = false
+		}
 	}
-	switch j.Status {
-	case model.TestJoining, model.TestLobby, model.TestRoom:
-		return true
-	default:
-		return false
-	}
+	logx.Debugf("tg", "testAlready: want=%s current_want=%s status=%s -> %v", want, j.Want, j.Status, ok)
+	return ok
 }
 
 func testKeyboard(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "testKeyboard: status=%s want=%s", j.Status, j.Want)
 	in := j.Want != model.TestWantOff && (j.Status == model.TestJoining || j.Status == model.TestLobby || j.Status == model.TestRoom)
 	nameBtn := gotgbot.InlineKeyboardButton{Text: "Имя", CallbackData: "tx:name"}
 	urlBtn := gotgbot.InlineKeyboardButton{Text: "Ссылка", CallbackData: "tx:url"}
@@ -92,6 +103,7 @@ func testKeyboard(j model.TestJoin) gotgbot.InlineKeyboardMarkup {
 }
 
 func t15Keyboard(lessonID int64) gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "t15Keyboard: lesson=%d", lessonID)
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
 			{Text: "Зайти за меня", CallbackData: joinCallbackData(true, lessonID)},
@@ -101,6 +113,7 @@ func t15Keyboard(lessonID int64) gotgbot.InlineKeyboardMarkup {
 }
 
 func settingsKeyboard(sub int) gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "settingsKeyboard: sub=%d", sub)
 	t1, t2 := "Подгруппа 1", "Подгруппа 2"
 	if sub == 1 {
 		t1 = "Подгруппа 1 ✓"
@@ -122,6 +135,7 @@ func settingsKeyboard(sub int) gotgbot.InlineKeyboardMarkup {
 }
 
 func cancelKeyboard() gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "cancelKeyboard: build")
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
 			{Text: "Отмена", CallbackData: "st:cancel"},
@@ -130,6 +144,7 @@ func cancelKeyboard() gotgbot.InlineKeyboardMarkup {
 }
 
 func backToProfileKeyboard() gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "backToProfileKeyboard: build")
 	return gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{
 			{Text: "← К профилю", CallbackData: "st:back"},
@@ -138,6 +153,7 @@ func backToProfileKeyboard() gotgbot.InlineKeyboardMarkup {
 }
 
 func notesKeyboard(ids []int64, labels []string) gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "notesKeyboard: ids=%d labels=%d", len(ids), len(labels))
 	rows := make([][]gotgbot.InlineKeyboardButton, 0, len(ids))
 	for i := range ids {
 		if ids[i] <= 0 {
@@ -163,21 +179,25 @@ func notesKeyboard(ids []int64, labels []string) gotgbot.InlineKeyboardMarkup {
 }
 
 func emptyInline() gotgbot.InlineKeyboardMarkup {
+	logx.Debugf("tg", "emptyInline: build")
 	return gotgbot.InlineKeyboardMarkup{InlineKeyboard: [][]gotgbot.InlineKeyboardButton{}}
 }
 
 func parseNotesCallback(data string) (int64, bool) {
+	logx.Debugf("tg", "parseNotesCallback: data=%q", data)
 	if !strings.HasPrefix(data, "nt:") {
 		return 0, false
 	}
 	n, err := strconv.ParseInt(strings.TrimPrefix(data, "nt:"), 10, 64)
 	if err != nil || n <= 0 {
+		logx.Debugf("tg", "parseNotesCallback: bad id err=%v", err)
 		return 0, false
 	}
 	return n, true
 }
 
 func parseOnboardCallback(data string) (kind string, n int, ok bool) {
+	logx.Debugf("tg", "parseOnboardCallback: data=%q", data)
 	switch data {
 	case "ob:sub:1":
 		return "sub", 1, true
@@ -191,6 +211,7 @@ func parseOnboardCallback(data string) (kind string, n int, ok bool) {
 }
 
 func parseSettingsCallback(data string) (kind string, n int, ok bool) {
+	logx.Debugf("tg", "parseSettingsCallback: data=%q", data)
 	switch {
 	case data == "st:fio":
 		return "fio", 0, true
@@ -205,6 +226,7 @@ func parseSettingsCallback(data string) (kind string, n int, ok bool) {
 	case strings.HasPrefix(data, "st:sub:"):
 		n, err := strconv.Atoi(strings.TrimPrefix(data, "st:sub:"))
 		if err != nil || (n != 1 && n != 2) {
+			logx.Debugf("tg", "parseSettingsCallback: bad sub err=%v", err)
 			return "", 0, false
 		}
 		return "sub", n, true

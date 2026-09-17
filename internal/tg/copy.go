@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
@@ -42,6 +43,7 @@ const (
 )
 
 func isMenuLabel(text string) bool {
+	logx.Debugf("tg", "isMenuLabel: %q", strings.TrimSpace(text))
 	switch strings.TrimSpace(text) {
 	case btnToday, btnTodayOld, btnNotes, btnSettings, btnSettingsOld, btnLinks, btnWords, btnHelp:
 		return true
@@ -51,6 +53,7 @@ func isMenuLabel(text string) bool {
 }
 
 func formatWakeReply(u model.User) string {
+	logx.Debugf("tg", "formatWakeReply: tg=%d", u.TelegramID)
 	base := strings.Join(u.WakeList(), ", ")
 	extra := model.FormatWakeWords(u.ExtraWords)
 	if extra == "" {
@@ -60,11 +63,13 @@ func formatWakeReply(u model.User) string {
 }
 
 func formatOnboardDone(u model.User) string {
+	logx.Debugf("tg", "formatOnboardDone: tg=%d subgroup=%d", u.TelegramID, u.Subgroup)
 	return fmt.Sprintf("<b>Готово.</b>\nВ журнале — %s, подгруппа %d.\n\nВнизу: Пары, Конспекты, Профиль.\nЗа 15 мин спрошу. Молчишь — зайду за 5 мин до начала.",
 		esc(u.FIO), u.Subgroup)
 }
 
 func formatSettings(u model.User) string {
+	logx.Debugf("tg", "formatSettings: tg=%d subgroup=%d", u.TelegramID, u.Subgroup)
 	fio := strings.TrimSpace(u.FIO)
 	if fio == "" {
 		fio = "не задано"
@@ -80,6 +85,7 @@ func formatSettings(u model.User) string {
 }
 
 func lessonStamp(l model.Lesson, loc *time.Location) string {
+	logx.Debugf("tg", "lessonStamp: lesson=%d loc=%v", l.ID, loc)
 	if !l.Begin.IsZero() {
 		t := l.Begin
 		if loc != nil {
@@ -94,6 +100,7 @@ func lessonStamp(l model.Lesson, loc *time.Location) string {
 }
 
 func formatLessonHead(l model.Lesson, loc *time.Location) string {
+	logx.Debugf("tg", "formatLessonHead: lesson=%d", l.ID)
 	var b strings.Builder
 	b.WriteString(bold(dashOr(l.Discipline)))
 	if strings.TrimSpace(l.Teacher) != "" {
@@ -106,6 +113,7 @@ func formatLessonHead(l model.Lesson, loc *time.Location) string {
 }
 
 func untilPhrase(now, begin time.Time) string {
+	logx.Debugf("tg", "untilPhrase: now=%s begin=%s", now.Format(time.RFC3339), begin.Format(time.RFC3339))
 	if begin.IsZero() || !begin.After(now) {
 		return "Сейчас пара"
 	}
@@ -126,6 +134,7 @@ func untilPhrase(now, begin time.Time) string {
 }
 
 func formatT15Card(l model.Lesson, now time.Time, loc *time.Location, hasLink bool) string {
+	logx.Debugf("tg", "formatT15Card: lesson=%d hasLink=%v", l.ID, hasLink)
 	var b strings.Builder
 	b.WriteString("<b>")
 	b.WriteString(untilPhrase(now, l.Begin))
@@ -142,6 +151,7 @@ func formatT15Card(l model.Lesson, now time.Time, loc *time.Location, hasLink bo
 }
 
 func formatJoinAck(l *model.Lesson, loc *time.Location, fio string, hasLink bool) string {
+	logx.Debugf("tg", "formatJoinAck: hasLink=%v fio=%q", hasLink, fio)
 	var b strings.Builder
 	if l != nil {
 		b.WriteString(formatLessonHead(*l, loc))
@@ -162,6 +172,7 @@ func formatJoinAck(l *model.Lesson, loc *time.Location, fio string, hasLink bool
 }
 
 func formatSkipAck(l *model.Lesson, loc *time.Location) string {
+	logx.Debugf("tg", "formatSkipAck: lesson=%v", l)
 	var b strings.Builder
 	if l != nil {
 		b.WriteString(formatLessonHead(*l, loc))
@@ -173,6 +184,7 @@ func formatSkipAck(l *model.Lesson, loc *time.Location) string {
 }
 
 func formatSavedLink(l model.Lesson) string {
+	logx.Debugf("tg", "formatSavedLink: lesson=%d discipline=%q", l.ID, l.Discipline)
 	title := strings.TrimSpace(l.Discipline)
 	if title == "" {
 		title = "паре"
@@ -195,6 +207,7 @@ type todayRow struct {
 }
 
 func formatToday(now time.Time, loc *time.Location, fio string, rows []todayRow) string {
+	logx.Debugf("tg", "formatToday: rows=%d fio=%q", len(rows), fio)
 	var b strings.Builder
 	day := now.Format("02.01")
 	if loc != nil {
@@ -233,6 +246,7 @@ func formatToday(now time.Time, loc *time.Location, fio string, rows []todayRow)
 }
 
 func writeTodayRow(b *strings.Builder, r todayRow, loc *time.Location) {
+	logx.Debugf("tg", "writeTodayRow: lesson=%d hasLink=%v decision=%s presence=%s", r.Lesson.ID, r.HasLink, r.Decision, r.Presence)
 	l := r.Lesson
 	fmt.Fprintf(b, "\n• %s · %s", bold(dashOr(l.Discipline)), code(lessonStamp(l, loc)))
 	if note := todayNote(r); note != "" {
@@ -241,6 +255,7 @@ func writeTodayRow(b *strings.Builder, r todayRow, loc *time.Location) {
 }
 
 func todayNote(r todayRow) string {
+	logx.Debugf("tg", "todayNote: lesson=%d decision=%s presence=%s", r.Lesson.ID, r.Decision, r.Presence)
 	switch r.Presence {
 	case model.PresenceRoom:
 		return "в комнате"
@@ -273,10 +288,12 @@ func todayNote(r todayRow) string {
 }
 
 func formatWordsHint() string {
+	logx.Debugf("tg", "formatWordsHint: build")
 	return askWordsNext
 }
 
 func formatLinkList(upcoming []string, saved []string) string {
+	logx.Debugf("tg", "formatLinkList: upcoming=%d saved=%d", len(upcoming), len(saved))
 	var b strings.Builder
 	b.WriteString("<b>Комнаты BBB</b>\n\nПришли сюда ссылку bbb.ssau.ru/b/… — запомню на пару. Один раз хватит.")
 	b.WriteString("\n\n<b>Ждут ссылку</b>\n")
@@ -293,6 +310,7 @@ func formatLinkList(upcoming []string, saved []string) string {
 }
 
 func formatTestCard(j model.TestJoin) string {
+	logx.Debugf("tg", "formatTestCard: status=%s want=%s mode=%s", j.Status, j.Want, j.Mode)
 	var b strings.Builder
 	active := j.Want != model.TestWantOff &&
 		(j.Status == model.TestJoining || j.Status == model.TestLobby || j.Status == model.TestRoom)
@@ -339,6 +357,7 @@ func formatTestCard(j model.TestJoin) string {
 }
 
 func testStatusLine(j model.TestJoin) string {
+	logx.Debugf("tg", "testStatusLine: status=%s want=%s", j.Status, j.Want)
 	switch j.Status {
 	case model.TestJoining:
 		return "захожу…"
@@ -360,14 +379,17 @@ func testStatusLine(j model.TestJoin) string {
 }
 
 func packDay(date string) string {
+	logx.Debugf("tg", "packDay: %q", date)
 	t, err := time.Parse("2006-01-02", date)
 	if err != nil {
+		logx.Debugf("tg", "packDay: parse %q: %v", date, err)
 		return date
 	}
 	return t.Format("02.01")
 }
 
 func notesButtonLabel(p model.LecturePack) string {
+	logx.Debugf("tg", "notesButtonLabel: pack=%d discipline=%q", p.ID, p.Discipline)
 	d := strings.TrimSpace(p.Discipline)
 	if d == "" {
 		d = "лекция"
@@ -379,6 +401,7 @@ func notesButtonLabel(p model.LecturePack) string {
 }
 
 func formatNotesList(ready, pending []model.LecturePack) string {
+	logx.Debugf("tg", "formatNotesList: ready=%d pending=%d", len(ready), len(pending))
 	if len(ready) == 0 && len(pending) == 0 {
 		return notesEmpty
 	}
@@ -402,6 +425,7 @@ func formatNotesList(ready, pending []model.LecturePack) string {
 }
 
 func archiveLabel(p model.LecturePack) string {
+	logx.Debugf("tg", "archiveLabel: pack=%d", p.ID)
 	d := strings.TrimSpace(p.Discipline)
 	if d == "" {
 		d = "лекция"
@@ -414,6 +438,7 @@ func archiveLabel(p model.LecturePack) string {
 }
 
 func notesStatus(st string) string {
+	logx.Debugf("tg", "notesStatus: %q", st)
 	switch st {
 	case model.PackRecording:
 		return "пишу звук"
