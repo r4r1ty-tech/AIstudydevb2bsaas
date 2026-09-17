@@ -9,7 +9,7 @@
 | `panel` | `ssau-panel.service` | HTTPS Mini App + JSON API. Единственный, кто слушает порт |
 | `bbb` | `ssau-bbb.service` | Гостевой join в BBB через Chromium, listen-only, запись, вейкворды |
 
-Полный замысел, решения и этапы — [PLAN.md](PLAN.md). Устройство и потоки данных — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Эксплуатация, конфиг, логи и деплой — [docs/OPERATIONS.md](docs/OPERATIONS.md).
+Полный замысел, решения и этапы — [PLAN.md](PLAN.md). Устройство и потоки данных — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Эксплуатация, конфиг, логи и деплой — [docs/OPERATIONS.md](docs/OPERATIONS.md). Проверка функций в тестовой комнате BBB — [docs/TESTING.md](docs/TESTING.md).
 
 ## Как это живёт
 
