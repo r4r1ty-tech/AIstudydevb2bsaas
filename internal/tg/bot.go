@@ -44,24 +44,30 @@ type Bot struct {
 }
 
 func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) {
+	logx.Debugf("tg", "New: enter")
 	if cfg == nil {
+		logx.Errorf("tg", "New: nil config")
 		return nil, fmt.Errorf("tg: nil config")
 	}
 	if st == nil {
+		logx.Errorf("tg", "New: nil store")
 		return nil, fmt.Errorf("tg: nil store")
 	}
 	if loc == nil {
 		var err error
 		loc, err = time.LoadLocation(config.DefaultTimezone)
 		if err != nil || loc == nil {
+			logx.Warnf("tg", "New: load timezone %q: %v", config.DefaultTimezone, err)
 			loc = time.FixedZone("Samara", 4*3600)
 		}
 	}
 
 	api, err := gotgbot.NewBot(cfg.BotToken, nil)
 	if err != nil {
+		logx.Errorf("tg", "New: new bot: %v", err)
 		return nil, fmt.Errorf("tg: new bot: %w", err)
 	}
+	logx.Debugf("tg", "New: bot user=@%s id=%d", api.Username, api.Id)
 
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		Error: func(_ *gotgbot.Bot, _ *ext.Context, err error) ext.DispatcherAction {
@@ -101,14 +107,17 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("nt:"), b.onNotesCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
+	logx.Debugf("tg", "New: handlers registered")
 	return b, nil
 }
 
 func (b *Bot) Start(ctx context.Context) error {
+	logx.Debugf("tg", "Start: enter")
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
+		logx.Errorf("tg", "Start: ctx: %v", err)
 		return err
 	}
 
@@ -120,6 +129,7 @@ func (b *Bot) Start(ctx context.Context) error {
 		},
 	})
 	if err != nil {
+		logx.Errorf("tg", "Start: polling: %v", err)
 		return fmt.Errorf("tg: polling: %w", err)
 	}
 
@@ -133,36 +143,52 @@ func (b *Bot) Start(ctx context.Context) error {
 	go b.webappLoop(t15Ctx)
 
 	<-ctx.Done()
+	logx.Debugf("tg", "Start: ctx done, stopping")
 	cancelT15()
 	if err := b.updater.Stop(); err != nil {
+		logx.Errorf("tg", "Start: stop: %v", err)
 		return err
 	}
+	logx.Debugf("tg", "Start: exit")
 	return nil
 }
 
 func (b *Bot) NotifyAdmin(ctx context.Context, text string) error {
+	logx.Debugf("tg", "NotifyAdmin: admin=%d len=%d", b.cfg.AdminID, len(text))
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	_, err := b.api.SendMessageWithContext(ctx, b.cfg.AdminID, text, nil)
-	return err
+	if err != nil {
+		logx.Errorf("tg", "NotifyAdmin: admin=%d: %v", b.cfg.AdminID, err)
+		return fmt.Errorf("tg: notify admin: %w", err)
+	}
+	logx.Debugf("tg", "NotifyAdmin: sent admin=%d", b.cfg.AdminID)
+	return nil
 }
 
 func (b *Bot) now() time.Time {
-	return time.Now().In(b.loc)
+	t := time.Now().In(b.loc)
+	logx.Debugf("tg", "now: %s", t.Format(time.RFC3339))
+	return t
 }
 
 func (b *Bot) allowed(ctx *ext.Context) *gotgbot.User {
 	if ctx == nil || ctx.EffectiveUser == nil {
+		logx.Debugf("tg", "allowed: no effective user")
 		return nil
 	}
-	if !b.cfg.IsAllowed(ctx.EffectiveUser.Id) && !b.cfg.IsAdmin(ctx.EffectiveUser.Id) {
+	u := ctx.EffectiveUser
+	if !b.cfg.IsAllowed(u.Id) && !b.cfg.IsAdmin(u.Id) {
+		logx.Warnf("tg", "allowed: rejected tg=%d username=%q", u.Id, u.Username)
 		return nil
 	}
-	return ctx.EffectiveUser
+	logx.Debugf("tg", "allowed: ok tg=%d username=%q", u.Id, u.Username)
+	return u
 }
 
 func (b *Bot) send(chatID int64, text string, opts *gotgbot.SendMessageOpts) error {
+	logx.Debugf("tg", "send: chat=%d len=%d", chatID, len(text))
 	if opts == nil {
 		opts = &gotgbot.SendMessageOpts{}
 	}
@@ -170,35 +196,55 @@ func (b *Bot) send(chatID int64, text string, opts *gotgbot.SendMessageOpts) err
 		opts.ParseMode = htmlMode
 	}
 	_, err := b.api.SendMessage(chatID, text, opts)
-	return err
+	if err != nil {
+		logx.Errorf("tg", "send: chat=%d: %v", chatID, err)
+		return err
+	}
+	logx.Debugf("tg", "send: ok chat=%d", chatID)
+	return nil
 }
 
 func (b *Bot) sendMain(chatID int64, text string) error {
-	return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mainKeyboard()})
+	logx.Debugf("tg", "sendMain: chat=%d", chatID)
+	if err := b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mainKeyboard()}); err != nil {
+		logx.Errorf("tg", "sendMain: chat=%d: %v", chatID, err)
+		return err
+	}
+	return nil
 }
 
 func (b *Bot) sendInline(chatID int64, text string, mk gotgbot.InlineKeyboardMarkup) error {
-	return b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mk})
+	logx.Debugf("tg", "sendInline: chat=%d buttons=%d", chatID, len(mk.InlineKeyboard))
+	if err := b.send(chatID, text, &gotgbot.SendMessageOpts{ReplyMarkup: mk}); err != nil {
+		logx.Errorf("tg", "sendInline: chat=%d: %v", chatID, err)
+		return err
+	}
+	return nil
 }
 
 func (b *Bot) webAppURL() string {
 	if b == nil || b.cfg == nil {
+		logx.Debugf("tg", "webAppURL: nil bot/cfg")
 		return ""
 	}
 	u := b.cfg.ResolveWebAppURL()
 	if u == "" {
+		logx.Debugf("tg", "webAppURL: empty")
 		return ""
 	}
+	logx.Debugf("tg", "webAppURL: %s/", u)
 	return u + "/"
 }
 
 func (b *Bot) webappLoop(ctx context.Context) {
+	logx.Debugf("tg", "webappLoop: start")
 	b.syncWebAppURL()
 	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			logx.Debugf("tg", "webappLoop: ctx done")
 			return
 		case <-t.C:
 			b.syncWebAppURL()
@@ -213,13 +259,16 @@ func (b *Bot) syncWebAppURL() {
 	b.webURL = u
 	b.mu.Unlock()
 	if u == "" || u == prev {
+		logx.Debugf("tg", "syncWebAppURL: unchanged url=%q", u)
 		return
 	}
+	logx.Infof("tg", "syncWebAppURL: changed prev=%q url=%q", prev, u)
 	b.setAdminMenuButton()
 	logx.Infof("tg", "webapp url=%s", u)
 }
 
 func (b *Bot) publishProfile() {
+	logx.Debugf("tg", "publishProfile: enter")
 	cmds := []gotgbot.BotCommand{
 		{Command: "start", Description: "Пары и статус"},
 		{Command: "today", Description: "Пары на сегодня"},
@@ -258,11 +307,13 @@ func (b *Bot) publishProfile() {
 		logx.Warnf("tg", "setMyDescription: %v", err)
 	}
 	b.setAdminMenuButton()
+	logx.Debugf("tg", "publishProfile: done")
 }
 
 func (b *Bot) setAdminMenuButton() {
 	url := b.webAppURL()
 	if url == "" {
+		logx.Debugf("tg", "setAdminMenuButton: no url")
 		return
 	}
 	b.mu.Lock()
@@ -278,10 +329,13 @@ func (b *Bot) setAdminMenuButton() {
 	})
 	if err != nil {
 		logx.Warnf("tg", "setChatMenuButton: %v", err)
+		return
 	}
+	logx.Debugf("tg", "setAdminMenuButton: admin=%d url=%s", admin, url)
 }
 
 func (b *Bot) setAwait(id int64, kind awaitKind) {
+	logx.Debugf("tg", "setAwait: tg=%d kind=%d", id, kind)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if kind == awaitNone {
@@ -294,18 +348,23 @@ func (b *Bot) setAwait(id int64, kind awaitKind) {
 func (b *Bot) peekAwait(id int64) awaitKind {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.awaiting[id]
+	k := b.awaiting[id]
+	logx.Debugf("tg", "peekAwait: tg=%d kind=%d", id, k)
+	return k
 }
 
 func (b *Bot) clearAwait(id int64) {
+	logx.Debugf("tg", "clearAwait: tg=%d", id)
 	b.setAwait(id, awaitNone)
 }
 
 func (b *Bot) panelMarkup() *gotgbot.InlineKeyboardMarkup {
 	url := b.webAppURL()
 	if url == "" {
+		logx.Debugf("tg", "panelMarkup: no url")
 		return nil
 	}
+	logx.Debugf("tg", "panelMarkup: url=%s", url)
 	return &gotgbot.InlineKeyboardMarkup{
 		InlineKeyboard: [][]gotgbot.InlineKeyboardButton{{{
 			Text:   "Панель",
@@ -315,6 +374,7 @@ func (b *Bot) panelMarkup() *gotgbot.InlineKeyboardMarkup {
 }
 
 func (b *Bot) rememberT15(telegramID, lessonID int64) {
+	logx.Debugf("tg", "rememberT15: tg=%d lesson=%d", telegramID, lessonID)
 	b.mu.Lock()
 	b.lastT15[telegramID] = lessonID
 	b.mu.Unlock()
@@ -323,5 +383,7 @@ func (b *Bot) rememberT15(telegramID, lessonID int64) {
 func (b *Bot) lastT15Lesson(telegramID int64) int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.lastT15[telegramID]
+	id := b.lastT15[telegramID]
+	logx.Debugf("tg", "lastT15Lesson: tg=%d lesson=%d", telegramID, id)
+	return id
 }
