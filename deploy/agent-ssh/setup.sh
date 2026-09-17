@@ -61,6 +61,11 @@ opencode agent dispatcher. allowed:
   test-listen               join test room listening (records)
   test-leave                leave test room
   test-log-level <level>    debug|info|warn|error then restart tg,bbb,panel
+
+  logs-grep <unit> <regex> [lines]   journal lines matching regex (<=500)
+  sinks                     pulseaudio sinks
+  sink-inputs               pulseaudio playback streams + their sink
+  procs                     counts of ffmpeg/chromium/pulse/vosk processes
 EOF
 }
 
@@ -182,6 +187,28 @@ case "${verb}" in
     esac
     set_env_var LOG_LEVEL "${arg}"
     exec systemctl restart ssau-tg.service ssau-bbb.service ssau-panel.service
+    ;;
+  logs-grep )
+    unit="${arg%% *}"
+    rest=""
+    if [[ "${arg}" == *" "* ]]; then rest="${arg#* }"; fi
+    pattern="${rest%% *}"
+    lines=""
+    if [[ "${rest}" == *" "* ]]; then lines="${rest#* }"; fi
+    if [[ -z "${unit}" || -z "${pattern}" ]]; then echo "logs-grep <unit> <regex> [lines]" >&2; exit 2; fi
+    if ! is_unit "${unit}"; then echo "unknown unit: ${unit}" >&2; exit 2; fi
+    if [[ ! "${lines}" =~ ^[0-9]+$ ]]; then lines=500; fi
+    if (( lines > 2000 )); then lines=2000; fi
+    exec journalctl -u "${unit}" -n "${lines}" --no-pager | grep -Ei -- "${pattern}"
+    ;;
+  sinks )
+    exec env XDG_RUNTIME_DIR=/run/user/0 pactl list short sinks
+    ;;
+  sink-inputs )
+    exec env XDG_RUNTIME_DIR=/run/user/0 pactl list sink-inputs
+    ;;
+  procs )
+    exec bash -c "for p in ffmpeg chromium pulseaudio wake.py; do printf '%-12s %s\n' \"\$p\" \"\$(pgrep -fc \"\$p\" 2>/dev/null || echo 0)\"; done"
     ;;
   * )
     echo "unknown command: ${verb}" >&2
