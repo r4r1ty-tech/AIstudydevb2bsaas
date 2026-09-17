@@ -127,9 +127,7 @@ func (r *Rec) Read(p []byte) (int, error) {
 		logx.Debugf("capture", "Rec.Read: closed r=%v pcm=%v", r == nil, r != nil && r.pcm == nil)
 		return 0, io.EOF
 	}
-	n, err := r.pcm.Read(p)
-	logx.Debugf("capture", "Rec.Read: n=%d err=%v", n, err)
-	return n, err
+	return r.pcm.Read(p)
 }
 
 func (r *Rec) Stop() error {

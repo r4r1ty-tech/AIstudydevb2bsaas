@@ -38,7 +38,6 @@ func NewEngine() *Engine {
 }
 
 func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
-	logx.Debugf("wake", "Feed: enter pcm=%d bytes rate=%d vocab=%d", len(pcm), sampleRate, len(vocab))
 	if e == nil {
 		logx.Debugf("wake", "Feed: nil engine")
 		return nil
@@ -82,14 +81,11 @@ func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 	}
 	rec := e.Rec
 	e.mu.Unlock()
-	logx.Debugf("wake", "Feed: need=%d overlap=%d chunks=%d bufLeft=%d", need, overlap, len(chunks), len(e.buf))
 
 	if rec == nil || len(chunks) == 0 || len(vocab) == 0 {
-		logx.Debugf("wake", "Feed: no work rec=%v chunks=%d vocab=%d", rec != nil, len(chunks), len(vocab))
 		return nil
 	}
 	if gs, ok := rec.(interface{ SetVocab([]string) }); ok {
-		logx.Debugf("wake", "Feed: SetVocab %d words", len(vocab))
 		gs.SetVocab(vocab)
 	}
 
@@ -97,7 +93,9 @@ func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 	for _, c := range chunks {
 		frags = append(frags, rec.Push(c, sampleRate)...)
 	}
-	logx.Debugf("wake", "Feed: frags=%d %v", len(frags), frags)
+	if len(frags) > 0 {
+		logx.Debugf("wake", "Feed: chunks=%d frags=%d %v", len(chunks), len(frags), frags)
+	}
 
 	now := e.now()
 	cool := e.cool()
@@ -115,27 +113,20 @@ func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 			logx.Infof("wake", "wake word hit: %q", w)
 		}
 	}
-	logx.Debugf("wake", "Feed: exit hits=%d", len(hits))
 	return hits
 }
 
 func (e *Engine) now() time.Time {
 	if e != nil && e.Now != nil {
-		t := e.Now()
-		logx.Debugf("wake", "now: injected=%s", t)
-		return t
+		return e.Now()
 	}
-	t := time.Now()
-	logx.Debugf("wake", "now: %s", t)
-	return t
+	return time.Now()
 }
 
 func (e *Engine) cool() time.Duration {
 	if e != nil && e.Cooldown > 0 {
-		logx.Debugf("wake", "cool: %s", e.Cooldown)
 		return e.Cooldown
 	}
-	logx.Debugf("wake", "cool: default %s", 45*time.Second)
 	return 45 * time.Second
 }
 
@@ -151,7 +142,6 @@ func (e *Engine) needBytes(sampleRate int) int {
 	if n%2 != 0 {
 		n++
 	}
-	logx.Debugf("wake", "needBytes: rate=%d window=%s bytes=%d", sampleRate, w, n)
 	return n
 }
 
@@ -162,22 +152,16 @@ type FakeRecognizer struct {
 
 func (f *FakeRecognizer) Push(pcm []byte, sampleRate int) []string {
 	if f == nil || len(pcm) == 0 {
-		logx.Debugf("wake", "FakeRecognizer.Push: empty pcm=%d nil=%v", len(pcm), f == nil)
 		return nil
 	}
 	f.Calls++
-	logx.Debugf("wake", "FakeRecognizer.Push: call=%d bytes=%d rate=%d frags=%d", f.Calls, len(pcm), sampleRate, len(f.Frags))
 	return append([]string(nil), f.Frags...)
 }
 
 type noopRecognizer struct{}
 
-func (noopRecognizer) Push(pcm []byte, sampleRate int) []string {
-	logx.Debugf("wake", "noopRecognizer.Push: bytes=%d rate=%d", len(pcm), sampleRate)
-	return nil
-}
+func (noopRecognizer) Push([]byte, int) []string { return nil }
 
 func newDefaultRecognizer() Recognizer {
-	logx.Debugf("wake", "newDefaultRecognizer: noop")
 	return noopRecognizer{}
 }
