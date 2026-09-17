@@ -55,6 +55,40 @@ func User(ctx context.Context, cfg *config.Config, telegramID int64, text string
 	UserMarkup(ctx, cfg, telegramID, text, nil)
 }
 
+// Broadcast sends text to every id and reports how many were delivered.
+func Broadcast(ctx context.Context, cfg *config.Config, ids []int64, text string) (sent, failed int) {
+	logx.Debugf("notify", "Broadcast: enter ids=%d text_len=%d", len(ids), len(text))
+	if cfg == nil || cfg.BotToken == "" {
+		logx.Warnf("notify", "Broadcast: guard cfg_nil=%v token_present=%v", cfg == nil, cfg != nil && cfg.BotToken != "")
+		return 0, 0
+	}
+	if strings.TrimSpace(text) == "" {
+		logx.Warnf("notify", "Broadcast: empty text")
+		return 0, 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	bot, err := botFor(cfg.BotToken)
+	if err != nil {
+		logx.Errorf("notify", "Broadcast: botFor: %v", err)
+		return 0, len(ids)
+	}
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, err := bot.SendMessageWithContext(ctx, id, text, nil); err != nil {
+			logx.Warnf("notify", "Broadcast: send id=%d: %v", id, err)
+			failed++
+			continue
+		}
+		sent++
+	}
+	logx.Infof("notify", "Broadcast: done sent=%d failed=%d", sent, failed)
+	return sent, failed
+}
+
 func NotesButton(packID int64) *gotgbot.InlineKeyboardMarkup {
 	logx.Debugf("notify", "NotesButton: pack=%d", packID)
 	if packID <= 0 {
