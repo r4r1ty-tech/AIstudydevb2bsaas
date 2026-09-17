@@ -34,6 +34,7 @@ type procHogs struct {
 }
 
 func newProcHogs() *procHogs {
+	logx.Debugf("bbb", "newProcHogs: procDir=/proc")
 	return &procHogs{procDir: "/proc"}
 }
 
@@ -44,6 +45,7 @@ func (g *procHogs) Hold() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.n++
+	logx.Debugf("bbb", "Hogs.Hold: n=%d paused=%d", g.n, len(g.paused))
 	if g.n != 1 {
 		return
 	}
@@ -59,9 +61,11 @@ func (g *procHogs) Release() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.n == 0 {
+		logx.Debugf("bbb", "Hogs.Release: n=0, nothing to release")
 		return
 	}
 	g.n--
+	logx.Debugf("bbb", "Hogs.Release: n=%d paused=%d", g.n, len(g.paused))
 	if g.n != 0 {
 		return
 	}
@@ -77,6 +81,7 @@ func (g *procHogs) Reset() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.n == 0 && len(g.paused) == 0 {
+		logx.Debugf("bbb", "Hogs.Reset: already clean")
 		return
 	}
 	n := thawHogs(g.paused)
@@ -86,19 +91,26 @@ func (g *procHogs) Reset() {
 }
 
 func cleanTmpCache() {
-	_ = os.RemoveAll(filepath.Join(os.TempDir(), "cursor-sandbox-cache"))
+	dir := filepath.Join(os.TempDir(), "cursor-sandbox-cache")
+	if err := os.RemoveAll(dir); err != nil {
+		logx.Debugf("bbb", "cleanTmpCache: %s: %v", dir, err)
+	}
 }
 
 func freezeHogs(procDir string) []int {
 	self := os.Getpid()
 	ppid := os.Getppid()
 	var out []int
-	for _, pid := range listHogPIDs(procDir, self, ppid) {
+	pids := listHogPIDs(procDir, self, ppid)
+	logx.Debugf("bbb", "freezeHogs: candidates=%d self=%d ppid=%d", len(pids), self, ppid)
+	for _, pid := range pids {
 		if err := syscall.Kill(pid, syscall.SIGSTOP); err != nil {
+			logx.Debugf("bbb", "freezeHogs: stop pid=%d: %v", pid, err)
 			continue
 		}
 		out = append(out, pid)
 	}
+	logx.Debugf("bbb", "freezeHogs: frozen=%d", len(out))
 	return out
 }
 
@@ -106,6 +118,7 @@ func thawHogs(pids []int) int {
 	n := 0
 	for _, pid := range pids {
 		if err := syscall.Kill(pid, syscall.SIGCONT); err != nil {
+			logx.Debugf("bbb", "thawHogs: cont pid=%d: %v", pid, err)
 			continue
 		}
 		n++
@@ -116,6 +129,7 @@ func thawHogs(pids []int) int {
 func listHogPIDs(procDir string, self, ppid int) []int {
 	ents, err := os.ReadDir(procDir)
 	if err != nil {
+		logx.Warnf("bbb", "listHogPIDs: read %s: %v", procDir, err)
 		return nil
 	}
 	var out []int
@@ -137,6 +151,7 @@ func listHogPIDs(procDir string, self, ppid int) []int {
 		out = append(out, pid)
 	}
 	sort.Ints(out)
+	logx.Debugf("bbb", "listHogPIDs: %s -> %v", procDir, out)
 	return out
 }
 
