@@ -263,6 +263,9 @@ func (s *chromeSession) Close() error {
 	return nil
 }
 
+// maxJoinAttempts is how many different proxies one join may try before giving up.
+const maxJoinAttempts = 3
+
 func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	logx.Debugf("bbb", "ChromeJoiner.Join: role=%s fio=%q url=%s", req.Role, req.FIO, redactURL(req.URL))
 	if ctx == nil {
@@ -274,15 +277,52 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 		return nil, fmt.Errorf("ChromeJoiner.Join: ensure: %w", err)
 	}
 
+	attempts := 1
+	if c.Proxies.Len() > 0 {
+		attempts = maxJoinAttempts
+		if c.Proxies.Len() < attempts {
+			attempts = c.Proxies.Len()
+		}
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var slot *proxyrelay.Slot
+		if c.Proxies.Len() > 0 {
+			s, perr := c.Proxies.Next()
+			if perr != nil {
+				logx.Warnf("bbb", "ChromeJoiner.Join: proxy: %v — иду напрямую", perr)
+			}
+			slot = s
+		}
+		sess, err := c.attemptJoin(ctx, root, req, slot)
+		if err == nil {
+			slot.OK()
+			return sess, nil
+		}
+		lastErr = err
+		if slot == nil {
+			// direct attempt failed, or every proxy is dead — не повторяем
+			logx.Errorf("bbb", "ChromeJoiner.Join: attempt=%d direct failed: %v", attempt, err)
+			return nil, err
+		}
+		slot.Fail()
+		logx.Warnf("bbb", "ChromeJoiner.Join: attempt=%d proxy=%s failed: %v — меняю прокси", attempt, slot.Redacted(), err)
+	}
+	logx.Errorf("bbb", "ChromeJoiner.Join: все %d попытки провалились: %v", attempts, lastErr)
+	return nil, lastErr
+}
+
+// attemptJoin performs one join through an optional proxy slot, in its own
+// browser context so the proxy applies to this tab only.
+func (c *ChromeJoiner) attemptJoin(ctx context.Context, root *rod.Browser, req JoinReq, slot *proxyrelay.Slot) (Session, error) {
 	browser := root
 	var ctxBrowser *rod.Browser
 	proxyLabel := "direct"
-	if slot, perr := c.Proxies.Next(); perr != nil {
-		logx.Warnf("bbb", "ChromeJoiner.Join: proxy: %v — иду напрямую", perr)
-	} else if slot != nil {
+	if slot != nil {
 		res, cerr := proto.TargetCreateBrowserContext{ProxyServer: slot.LocalURL()}.Call(root)
 		if cerr != nil {
-			logx.Warnf("bbb", "ChromeJoiner.Join: proxy context %s: %v — иду напрямую", slot.Redacted(), cerr)
+			logx.Warnf("bbb", "attemptJoin: proxy context %s: %v — иду напрямую", slot.Redacted(), cerr)
 		} else {
 			sub := *root
 			sub.BrowserContextID = res.BrowserContextID
@@ -291,14 +331,14 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 			proxyLabel = slot.Redacted()
 		}
 	}
-	logx.Infof("bbb", "ChromeJoiner.Join: proxy=%s url=%s", proxyLabel, redactURL(req.URL))
+	logx.Infof("bbb", "attemptJoin: proxy=%s url=%s role=%s", proxyLabel, redactURL(req.URL), req.Role)
 
 	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
-		logx.Errorf("bbb", "ChromeJoiner.Join: tab: %v", err)
+		logx.Errorf("bbb", "attemptJoin: tab: %v", err)
 		if ctxBrowser != nil {
 			if derr := ctxBrowser.Close(); derr != nil {
-				logx.Debugf("bbb", "ChromeJoiner.Join: dispose after tab fail: %v", derr)
+				logx.Debugf("bbb", "attemptJoin: dispose after tab fail: %v", derr)
 			}
 		}
 		return nil, fmt.Errorf("tab: %w", err)
@@ -309,27 +349,27 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 
 	if err := page.Timeout(30 * time.Second).Navigate(req.URL); err != nil {
 		if cerr := sess.Close(); cerr != nil {
-			logx.Debugf("bbb", "ChromeJoiner.Join: cleanup close: %v", cerr)
+			logx.Debugf("bbb", "attemptJoin: cleanup close: %v", cerr)
 		}
-		logx.Errorf("bbb", "ChromeJoiner.Join: navigate %s: %v", redactURL(req.URL), err)
+		logx.Errorf("bbb", "attemptJoin: navigate %s: %v", redactURL(req.URL), err)
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
 	if err := page.Timeout(15 * time.Second).WaitLoad(); err != nil {
-		logx.Debugf("bbb", "ChromeJoiner.Join: waitload: %v", err)
+		logx.Debugf("bbb", "attemptJoin: waitload: %v", err)
 	}
 
 	if err := sess.waitSeated(ctx, req); err != nil {
 		if cerr := sess.Close(); cerr != nil {
-			logx.Debugf("bbb", "ChromeJoiner.Join: cleanup close: %v", cerr)
+			logx.Debugf("bbb", "attemptJoin: cleanup close: %v", cerr)
 		}
-		logx.Errorf("bbb", "ChromeJoiner.Join: waitSeated: %v", err)
+		logx.Errorf("bbb", "attemptJoin: waitSeated: %v", err)
 		return nil, fmt.Errorf("ChromeJoiner.Join: waitSeated: %w", err)
 	}
 	st, err := sess.seat(ctx)
 	if err != nil {
-		logx.Debugf("bbb", "ChromeJoiner.Join: seat probe: %v", err)
+		logx.Debugf("bbb", "attemptJoin: seat probe: %v", err)
 	}
-	logx.Infof("bbb", "seat=%s %s", st, pageHint(page))
+	logx.Infof("bbb", "seat=%s proxy=%s %s", st, proxyLabel, pageHint(page))
 	return sess, nil
 }
 

@@ -15,6 +15,9 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
+// maxSlotFails is how many consecutive join failures mark a proxy as dead.
+const maxSlotFails = 3
+
 // Pool hands out proxies round-robin, one per browser tab/session.
 type Pool struct {
 	slots []*Slot
@@ -37,18 +40,29 @@ func (pool *Pool) Len() int {
 	return len(pool.slots)
 }
 
-// Next returns the next proxy in rotation and starts its local relay on demand.
+// Next returns the next live proxy in rotation, starting its relay on demand.
+// Dead slots are skipped; if every slot is dead it returns nil (go direct).
 func (pool *Pool) Next() (*Slot, error) {
 	if pool == nil || len(pool.slots) == 0 {
 		logx.Debugf("proxyrelay", "Next: no proxies")
 		return nil, nil
 	}
+	total := len(pool.slots)
 	n := pool.next.Add(1)
-	s := pool.slots[int(n-1)%len(pool.slots)]
-	if err := s.start(); err != nil {
-		return nil, err
+	for i := 0; i < total; i++ {
+		s := pool.slots[int(n-1+uint64(i))%total]
+		if s.Dead() {
+			logx.Debugf("proxyrelay", "Next: skip dead %s fails=%d", s.Redacted(), s.Fails())
+			continue
+		}
+		if err := s.start(); err != nil {
+			s.Fail()
+			continue
+		}
+		return s, nil
 	}
-	return s, nil
+	logx.Warnf("proxyrelay", "Next: все прокси мертвы (%d) — иду напрямую", total)
+	return nil, nil
 }
 
 func (pool *Pool) Close() error {
@@ -67,13 +81,50 @@ func (pool *Pool) Close() error {
 
 // Slot is one upstream proxy plus its local no-auth SOCKS5 relay.
 type Slot struct {
-	p Proxy
+	p     Proxy
+	fails atomic.Int32
 
 	mu   sync.Mutex
 	ln   net.Listener
 	dial xproxy.Dialer
 	addr string
 	err  error
+}
+
+// Fail records a failed join through this proxy; Dead becomes true after
+// maxSlotFails consecutive failures.
+func (s *Slot) Fail() {
+	if s == nil {
+		return
+	}
+	n := s.fails.Add(1)
+	logx.Warnf("proxyrelay", "proxy %s fail #%d", s.p.Redacted(), n)
+}
+
+// OK clears the failure streak after a successful join.
+func (s *Slot) OK() {
+	if s == nil {
+		return
+	}
+	s.fails.Store(0)
+}
+
+func (s *Slot) Fails() int {
+	if s == nil {
+		return 0
+	}
+	return int(s.fails.Load())
+}
+
+func (s *Slot) Dead() bool {
+	return s != nil && s.fails.Load() >= maxSlotFails
+}
+
+// Reset revives a dead slot (used when the operator refreshes the list).
+func (s *Slot) Reset() {
+	if s != nil {
+		s.fails.Store(0)
+	}
 }
 
 func (s *Slot) Proxy() Proxy      { return s.p }

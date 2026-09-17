@@ -63,6 +63,49 @@ func TestPoolRotation(t *testing.T) {
 	}
 }
 
+func TestPoolSkipsDead(t *testing.T) {
+	pool := NewPool([]Proxy{{Host: "127.0.0.1", Port: "1"}, {Host: "127.0.0.1", Port: "2"}})
+	defer func() { _ = pool.Close() }()
+	s1, err := pool.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	for i := 0; i < maxSlotFails; i++ {
+		s1.Fail()
+	}
+	if !s1.Dead() {
+		t.Fatalf("slot should be dead after %d fails", maxSlotFails)
+	}
+	for i := 0; i < 4; i++ {
+		s, err := pool.Next()
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if s == s1 {
+			t.Fatalf("dead slot handed out again")
+		}
+		if s.Redacted() != "127.0.0.1:2" {
+			t.Fatalf("unexpected live slot %s", s.Redacted())
+		}
+	}
+}
+
+func TestPoolAllDeadGoesDirect(t *testing.T) {
+	pool := NewPool([]Proxy{{Host: "127.0.0.1", Port: "1"}})
+	defer func() { _ = pool.Close() }()
+	s, _ := pool.Next()
+	for i := 0; i < maxSlotFails; i++ {
+		s.Fail()
+	}
+	got, err := pool.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil (direct) when all dead, got %s", got.Redacted())
+	}
+}
+
 func TestNilPoolNext(t *testing.T) {
 	var pool *Pool
 	s, err := pool.Next()
