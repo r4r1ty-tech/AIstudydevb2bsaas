@@ -120,6 +120,9 @@ var lobbyTextMarks = []string{
 
 var afterJoinWait = 45 * time.Second
 
+// audioJoinWait is how long the recording tab waits for the audio chooser.
+var audioJoinWait = 20 * time.Second
+
 func classifySeat(sig seatSignals) seat {
 	if sig.hasRoom {
 		logx.Debugf("bbb", "classifySeat: room selector -> room")
@@ -346,20 +349,29 @@ func audioOnce(page *rod.Page, role Role) {
 	if page == nil {
 		return
 	}
-	logx.Debugf("bbb", "audioOnce: role=%s", role)
-	p := page.Timeout(2 * time.Second)
-	if role == RolePresence {
-		if clickFirst(p, closeAudioSels) || clickByText(p, `(?i)close|закрыть|skip|пропуст`) {
-			logx.Debugf("bbb", "audioOnce: closed modal")
+	deadline := time.Now().Add(2 * time.Second)
+	if role == RoleRecord {
+		// Модалка выбора аудио появляется после входа в комнату с задержкой;
+		// записывающей вкладке нужно дождаться и нажать «Только слушать».
+		deadline = time.Now().Add(audioJoinWait)
+	}
+	logx.Debugf("bbb", "audioOnce: role=%s wait=%s", role, time.Until(deadline).Round(time.Second))
+	for time.Now().Before(deadline) {
+		p := page.Timeout(2 * time.Second)
+		if role == RolePresence {
+			if clickFirst(p, closeAudioSels) || clickByText(p, `(?i)close|закрыть|skip|пропуст`) {
+				logx.Debugf("bbb", "audioOnce: closed modal")
+				return
+			}
+		}
+		if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
+			logx.Debugf("bbb", "audioOnce: listen-only clicked")
 			return
 		}
-	}
-	if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
-		logx.Debugf("bbb", "audioOnce: listen-only clicked")
-		return
+		time.Sleep(300 * time.Millisecond)
 	}
 	if role == RoleRecord {
-		logx.Warnf("bbb", "listen-only не нажалась — звук может быть пустым")
+		logx.Warnf("bbb", "listen-only не нажалась — звук может быть пустым :: %s", clickablesHint(page))
 	} else {
 		logx.Debugf("bbb", "audioOnce: no audio control found")
 	}
