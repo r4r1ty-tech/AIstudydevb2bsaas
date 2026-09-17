@@ -44,9 +44,12 @@ type seatSignals struct {
 var formSels = []string{
 	"#join_name",
 	"#join-name",
+	"#input-name",
 	"input[name='join_name']",
 	"input[name='name']",
 	"input[autocomplete='name']",
+	"[data-test='nameInput']",
+	"input[type='text']",
 }
 
 // Приглашёнческая страница BBB: сначала кнопка «Join Room», только потом форма/звук.
@@ -62,13 +65,17 @@ var welcomeJoinRE = `(?i)join\s*room|войти в комнату|войти в 
 
 func clickWelcomeJoin(page *rod.Page) bool {
 	if page == nil {
+		logx.Debugf("bbb", "clickWelcomeJoin: nil page")
 		return false
 	}
 	p := page.Timeout(2 * time.Second)
 	if clickFirst(p, welcomeJoinSels) {
+		logx.Debugf("bbb", "clickWelcomeJoin: clicked by selector")
 		return true
 	}
-	return clickByText(p, welcomeJoinRE)
+	ok := clickByText(p, welcomeJoinRE)
+	logx.Debugf("bbb", "clickWelcomeJoin: by text=%v", ok)
+	return ok
 }
 
 var roomSels = []string{
@@ -115,50 +122,66 @@ var afterJoinWait = 45 * time.Second
 
 func classifySeat(sig seatSignals) seat {
 	if sig.hasRoom {
+		logx.Debugf("bbb", "classifySeat: room selector -> room")
 		return seatRoom
 	}
 	if sig.hasLobby {
+		logx.Debugf("bbb", "classifySeat: lobby selector -> lobby")
 		return seatLobby
 	}
 	if sig.hasForm {
+		logx.Debugf("bbb", "classifySeat: form -> form")
 		return seatForm
 	}
 	low := strings.ToLower(sig.text)
 	for _, m := range lobbyTextMarks {
 		if strings.Contains(low, m) {
+			logx.Debugf("bbb", "classifySeat: text mark %q -> lobby", m)
 			return seatLobby
 		}
 	}
+	logx.Debugf("bbb", "classifySeat: unknown form=%v room=%v lobby=%v audio=%v", sig.hasForm, sig.hasRoom, sig.hasLobby, sig.hasAudio)
 	return seatUnknown
 }
 
 func (s *chromeSession) InLobby(ctx context.Context) (bool, error) {
 	st, err := s.seat(ctx)
 	if err != nil {
-		return false, err
+		logx.Errorf("bbb", "InLobby: seat: %v", err)
+		return false, fmt.Errorf("InLobby: seat: %w", err)
 	}
-	return st == seatLobby, nil
+	in := st == seatLobby
+	logx.Debugf("bbb", "InLobby: seat=%s -> %v", st, in)
+	return in, nil
 }
 
 func (s *chromeSession) InRoom(ctx context.Context) (bool, error) {
 	st, err := s.seat(ctx)
 	if err != nil {
-		return false, err
+		logx.Errorf("bbb", "InRoom: seat: %v", err)
+		return false, fmt.Errorf("InRoom: seat: %w", err)
 	}
-	return st == seatRoom, nil
+	in := st == seatRoom
+	logx.Debugf("bbb", "InRoom: seat=%s -> %v", st, in)
+	return in, nil
 }
 
 func (s *chromeSession) seat(ctx context.Context) (seat, error) {
 	sig, err := s.signals(ctx)
 	if err != nil {
-		return seatUnknown, err
+		logx.Errorf("bbb", "seat: signals: %v", err)
+		return seatUnknown, fmt.Errorf("seat: signals: %w", err)
 	}
-	return classifySeat(sig), nil
+	st := classifySeat(sig)
+	logx.Debugf("bbb", "seat: %s", st)
+	return st, nil
 }
 
 func (s *chromeSession) signals(ctx context.Context) (seatSignals, error) {
 	if s == nil || s.page == nil {
-		return seatSignals{}, fmt.Errorf("нет вкладки")
+		err := fmt.Errorf("нет вкладки")
+		logx.Errorf("bbb", "signals: %v", err)
+		return seatSignals{}, err
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -172,9 +195,11 @@ func (s *chromeSession) signals(ctx context.Context) (seatSignals, error) {
 	}
 	text, err := visibleText(p)
 	if err != nil {
-		return sig, err
+		logx.Errorf("bbb", "signals: visibleText: %v", err)
+		return sig, fmt.Errorf("signals: visibleText: %w", err)
 	}
 	sig.text = text
+	logx.Debugf("bbb", "signals: form=%v room=%v lobby=%v audio=%v textlen=%d", sig.hasForm, sig.hasRoom, sig.hasLobby, sig.hasAudio, len(text))
 	return sig, nil
 }
 
@@ -184,12 +209,16 @@ func visibleText(page *rod.Page) (string, error) {
 		return String(t).slice(0, 4000)
 	}`)
 	if err != nil {
-		return "", err
+		logx.Debugf("bbb", "visibleText: eval: %v", err)
+		return "", fmt.Errorf("visibleText: %w", err)
 	}
 	if res == nil {
+		logx.Debugf("bbb", "visibleText: nil result")
 		return "", nil
 	}
-	return res.Value.Str(), nil
+	t := res.Value.Str()
+	logx.Debugf("bbb", "visibleText: len=%d", len(t))
+	return t, nil
 }
 
 func pageHint(page *rod.Page) string {
@@ -203,9 +232,12 @@ func pageHint(page *rod.Page) string {
 		return title + ' | ' + href + ' | ' + t
 	}`)
 	if err != nil || res == nil {
+		logx.Debugf("bbb", "pageHint: eval: %v", err)
 		return errString(err)
 	}
-	return strings.TrimSpace(res.Value.Str())
+	hint := strings.TrimSpace(res.Value.Str())
+	logx.Debugf("bbb", "pageHint: %s", hint)
+	return hint
 }
 
 func errString(err error) string {
@@ -217,8 +249,11 @@ func errString(err error) string {
 
 func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 	if s == nil || s.page == nil {
-		return fmt.Errorf("нет вкладки")
+		err := fmt.Errorf("нет вкладки")
+		logx.Errorf("bbb", "waitSeated: %v", err)
+		return err
 	}
+	logx.Debugf("bbb", "waitSeated: role=%s fio=%q url=%s", req.Role, req.FIO, redactURL(req.URL))
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -228,31 +263,39 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 	var last seat
 	for time.Now().Before(deadline) {
 		if err := ctx.Err(); err != nil {
-			return err
+			logx.Errorf("bbb", "waitSeated: ctx: %v", err)
+			return fmt.Errorf("waitSeated: ctx: %w", err)
 		}
 		sig, err := s.signals(ctx)
 		if err != nil {
-			return err
+			logx.Errorf("bbb", "waitSeated: signals: %v", err)
+			return fmt.Errorf("waitSeated: signals: %w", err)
 		}
 		last = classifySeat(sig)
 		if last == seatLobby || last == seatRoom {
+			logx.Debugf("bbb", "waitSeated: seated=%s", last)
 			audioOnce(s.page.Context(ctx), req.Role)
 			return nil
 		}
 		if sig.hasAudio {
+			logx.Debugf("bbb", "waitSeated: audio modal, dismiss")
 			audioOnce(s.page.Context(ctx), req.Role)
 		}
 		if last == seatForm && !filled {
+			logx.Debugf("bbb", "waitSeated: form, fill guest name")
 			if err := fillGuestName(s.page.Context(ctx), req.FIO); err != nil {
+				logx.Errorf("bbb", "waitSeated: fillGuestName: %v", err)
 				return fmt.Errorf("форма гостя: %w", err)
 			}
 			filled = true
 			continue
 		}
 		// Приглашённая страница: пока не нажмём «Join Room», формы/лобби не будет.
-		if last == seatUnknown && !sig.hasAudio && joinClicks < 3 {
+		// Пробуем до аудио-модалки: на приглашённой странице может быть и её скрытый DOM.
+		if last == seatUnknown && joinClicks < 3 {
 			if clickWelcomeJoin(s.page.Context(ctx)) {
 				joinClicks++
+				logx.Debugf("bbb", "waitSeated: welcome join click=%d", joinClicks)
 				time.Sleep(800 * time.Millisecond)
 				continue
 			}
@@ -263,23 +306,61 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 	if hint == "" {
 		hint = last.String()
 	}
-	return fmt.Errorf("не в комнате (%s): %s", last, hint)
+	if clicks := clickablesHint(s.page.Context(ctx)); clicks != "" {
+		hint += " :: " + clicks
+	}
+	err := fmt.Errorf("не в комнате (%s): %s", last, hint)
+	logx.Warnf("bbb", "waitSeated: %v", err)
+	return err
+}
+
+// clickablesHint перечисляет кнопки/ссылки/поля на странице — чтобы понять,
+// что за экран BBB, когда заход не распознан.
+func clickablesHint(page *rod.Page) string {
+	if page == nil {
+		return ""
+	}
+	res, err := page.Timeout(3 * time.Second).Eval(`() => {
+		const out = []
+		const nodes = document.querySelectorAll('button, a, [role="button"], [data-test], input')
+		for (const n of nodes) {
+			const dt = n.getAttribute('data-test') || ''
+			const al = n.getAttribute('aria-label') || ''
+			const tx = (n.innerText || n.value || '').replace(/\s+/g, ' ').trim().slice(0, 40)
+			if (!dt && !al && !tx) continue
+			out.push(n.tagName.toLowerCase() + (dt ? ' dt=' + dt : '') + (al ? ' aria=' + al : '') + (tx ? ' "' + tx + '"' : ''))
+			if (out.length >= 25) break
+		}
+		return out.join(' | ')
+	}`)
+	if err != nil || res == nil {
+		logx.Debugf("bbb", "clickablesHint: eval: %v", err)
+		return ""
+	}
+	h := strings.TrimSpace(res.Value.Str())
+	logx.Debugf("bbb", "clickablesHint: %s", h)
+	return h
 }
 
 func audioOnce(page *rod.Page, role Role) {
 	if page == nil {
 		return
 	}
+	logx.Debugf("bbb", "audioOnce: role=%s", role)
 	p := page.Timeout(2 * time.Second)
 	if role == RolePresence {
 		if clickFirst(p, closeAudioSels) || clickByText(p, `(?i)close|закрыть|skip|пропуст`) {
+			logx.Debugf("bbb", "audioOnce: closed modal")
 			return
 		}
 	}
 	if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
+		logx.Debugf("bbb", "audioOnce: listen-only clicked")
 		return
 	}
 	if role == RoleRecord {
 		logx.Warnf("bbb", "listen-only не нажалась — звук может быть пустым")
+	} else {
+		logx.Debugf("bbb", "audioOnce: no audio control found")
 	}
 }
