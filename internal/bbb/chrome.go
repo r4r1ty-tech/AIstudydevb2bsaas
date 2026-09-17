@@ -628,10 +628,35 @@ func clickFirst(page *rod.Page, sels []string) bool {
 			return true
 		} else {
 			logx.Debugf("bbb", "clickFirst: click %s: %v", sel, err)
+			if clickJS(page, sel) {
+				logx.Debugf("bbb", "clickFirst: js-clicked %s", sel)
+				return true
+			}
 		}
 	}
 	logx.Debugf("bbb", "clickFirst: none of %d selectors clicked", len(sels))
 	return false
+}
+
+// clickJS clicks through the DOM directly, for elements rod deems unclickable
+// (e.g. a modal button that is present but not yet interactable).
+func clickJS(page *rod.Page, sel string) bool {
+	if page == nil || sel == "" {
+		return false
+	}
+	res, err := page.Timeout(3*time.Second).Eval(`(sel) => {
+		const n = document.querySelector(sel)
+		if (!n) return false
+		n.click()
+		return true
+	}`, sel)
+	if err != nil || res == nil {
+		logx.Debugf("bbb", "clickJS: %s: %v", sel, err)
+		return false
+	}
+	ok := res.Value.Bool()
+	logx.Debugf("bbb", "clickJS: %s -> %v", sel, ok)
+	return ok
 }
 
 func clickByText(page *rod.Page, goRE string) bool {
