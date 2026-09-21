@@ -118,10 +118,11 @@ var lobbyTextMarks = []string{
 	"встреча еще не",
 }
 
-var afterJoinWait = 45 * time.Second
+// BBB-клиент через прокси грузится до ~45с; дедлайн с запасом.
+var afterJoinWait = 120 * time.Second
 
 // audioJoinWait is how long the recording tab waits for the audio chooser.
-var audioJoinWait = 20 * time.Second
+var audioJoinWait = 45 * time.Second
 
 // joinAudioSels opens the audio chooser from the navbar (HTML5 client).
 var joinAudioSels = []string{
@@ -299,8 +300,9 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	filled := false
+	filled := 0
 	joinClicks := 0
+	badSignals := 0
 	deadline := time.Now().Add(afterJoinWait)
 	var last seat
 	for time.Now().Before(deadline) {
@@ -310,9 +312,15 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 		}
 		sig, err := s.signals(ctx)
 		if err != nil {
-			logx.Errorf("bbb", "waitSeated: signals: %v", err)
-			return fmt.Errorf("waitSeated: signals: %w", err)
+			badSignals++
+			logx.Errorf("bbb", "waitSeated: signals (%d): %v", badSignals, err)
+			if badSignals >= 10 {
+				return fmt.Errorf("waitSeated: signals: %w", err)
+			}
+			time.Sleep(700 * time.Millisecond)
+			continue
 		}
+		badSignals = 0
 		last = classifySeat(sig)
 		if last == seatLobby || last == seatRoom {
 			logx.Debugf("bbb", "waitSeated: seated=%s", last)
@@ -322,14 +330,16 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 		if sig.hasAudio {
 			logx.Debugf("bbb", "waitSeated: audio modal, dismiss")
 			audioOnce(s.page.Context(ctx), req.Role)
+			continue
 		}
-		if last == seatForm && !filled {
-			logx.Debugf("bbb", "waitSeated: form, fill guest name")
+		if last == seatForm && filled < 3 {
+			logx.Debugf("bbb", "waitSeated: form, fill guest name (n=%d)", filled+1)
 			if err := fillGuestName(s.page.Context(ctx), req.FIO); err != nil {
-				logx.Errorf("bbb", "waitSeated: fillGuestName: %v", err)
-				return fmt.Errorf("форма гостя: %w", err)
+				logx.Warnf("bbb", "waitSeated: fillGuestName (попытка %d): %v", filled+1, err)
+				time.Sleep(time.Second)
+				continue
 			}
-			filled = true
+			filled++
 			continue
 		}
 		// Приглашённая страница: пока не нажмём «Join Room», формы/лобби не будет.
