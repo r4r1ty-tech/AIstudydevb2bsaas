@@ -48,7 +48,7 @@ jobs:
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
-          source: bin/tg,bin/rasp,bin/panel,bin/bbb,deploy/ssau-tg.service,deploy/ssau-rasp.service,deploy/ssau-panel.service,deploy/ssau-bbb.service,deploy/ssau-tunnel.service,deploy/ssau.target,deploy/remote.sh,deploy/tunnel.sh,deploy/audio.sh,deploy/wake.py,deploy/agent-ssh/setup.sh
+          source: bin/tg,bin/rasp,bin/panel,bin/bbb,deploy/ssau-tg.service,deploy/ssau-rasp.service,deploy/ssau-panel.service,deploy/ssau-bbb.service,deploy/ssau-tunnel.service,deploy/ssau.target,deploy/remote.sh,deploy/tunnel.sh,deploy/audio.sh,deploy/wake.py
           target: /tmp/ssau-deploy
           strip_components: 1
           overwrite: true
@@ -56,7 +56,6 @@ jobs:
       - name: Перезапустить systemd
         uses: appleboy/ssh-action@v1.2.2
         env:
-          AGENT_SSH_PUBKEY: ${{ secrets.AGENT_SSH_PUBKEY }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
           LLM_API_URL: ${{ secrets.LLM_API_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
@@ -69,7 +68,7 @@ jobs:
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
-          envs: AGENT_SSH_PUBKEY,LLM_API_KEY,LLM_API_URL,LLM_MODEL,LECTURES_TOKEN,LECTURES_OWNER,LECTURES_REPO,LECTURES_BRANCH
+          envs: LLM_API_KEY,LLM_API_URL,LLM_MODEL,LECTURES_TOKEN,LECTURES_OWNER,LECTURES_REPO,LECTURES_BRANCH
           script: |
             set -euo pipefail
             chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/tg /tmp/ssau-deploy/rasp /tmp/ssau-deploy/panel /tmp/ssau-deploy/bbb /tmp/ssau-deploy/tunnel.sh /tmp/ssau-deploy/audio.sh /tmp/ssau-deploy/wake.py
