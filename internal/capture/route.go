@@ -14,6 +14,7 @@ func pactlOut(args ...string) string {
 	out, err := cmd.CombinedOutput()
 	s := strings.Join(strings.Fields(string(out)), " ")
 	if err != nil {
+		logx.Debugf("capture", "pactlOut: pactl %v: %v", args, err)
 		if s == "" {
 			s = err.Error()
 		} else {

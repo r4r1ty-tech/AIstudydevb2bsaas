@@ -174,6 +174,9 @@ func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 			Set(flags.Flag("window-size"), "320,240")
 	}
 
+	// Stderr Chromium шумный; оставляем только то, что про звук и WebRTC —
+	// иначе «вкладка в аудио, а sink-input нет» не разобрать.
+	l = l.Logger(logx.LineWriter(logx.LevelWarn, "bbb", "chromium: ", chromeAudioLine))
 	u, err := l.Launch()
 	if err != nil {
 		logx.Errorf("bbb", "ensure: launch bin=%s quality=%v: %v", bin, quality, err)
@@ -715,4 +718,15 @@ func jsRegexp(goRE string) string {
 	s = strings.TrimPrefix(s, "(?s)")
 	logx.Debugf("bbb", "jsRegexp: in=%q out=%q", goRE, s)
 	return s
+}
+
+// chromeAudioLine keeps Chromium stderr lines about audio output and WebRTC.
+func chromeAudioLine(line string) bool {
+	low := strings.ToLower(line)
+	for _, k := range []string{"pulse", "alsa", "audio", "webrtc", "p2p", "stun", "media_stream", "getusermedia"} {
+		if strings.Contains(low, k) {
+			return true
+		}
+	}
+	return false
 }

@@ -105,3 +105,78 @@ func TestSetupSplitsToFile(t *testing.T) {
 		t.Fatalf("file = %q", string(data))
 	}
 }
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	reset(t)
+	t.Cleanup(func() { reset(t) })
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	return &buf
+}
+
+func TestLineWriterSplitsLines(t *testing.T) {
+	buf := captureLog(t)
+	w := LineWriter(LevelWarn, "capture", "ffmpeg: ", nil)
+	for _, chunk := range []string{"first li", "ne\r\nsecond\n\n   \nthi", "rd\n"} {
+		if n, err := w.Write([]byte(chunk)); err != nil || n != len(chunk) {
+			t.Fatalf("Write = %d, %v", n, err)
+		}
+	}
+	out := buf.String()
+	for _, want := range []string{"[WARN] capture: ffmpeg: first line", "ffmpeg: second", "ffmpeg: third"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+	if strings.Count(out, "\n") != 3 {
+		t.Errorf("blank lines must be dropped: %q", out)
+	}
+}
+
+func TestLineWriterFilterAndLevel(t *testing.T) {
+	buf := captureLog(t)
+	keep := func(s string) bool { return strings.Contains(s, "pulse") }
+	w := LineWriter(LevelWarn, "bbb", "chromium: ", keep)
+	_, _ = w.Write([]byte("dbus noise\npa_context_connect: pulse refused\n"))
+	if out := buf.String(); strings.Contains(out, "dbus") || !strings.Contains(out, "pulse refused") {
+		t.Fatalf("filter: %q", out)
+	}
+
+	buf.Reset()
+	setLevel(t, LevelError)
+	_, _ = LineWriter(LevelWarn, "x", "", nil).Write([]byte("hidden\n"))
+	if buf.Len() != 0 {
+		t.Fatalf("warn line must be filtered at error level: %q", buf.String())
+	}
+}
+
+func TestLineWriterFlushesHugeLine(t *testing.T) {
+	buf := captureLog(t)
+	w := LineWriter(LevelWarn, "x", "", nil).(*lineWriter)
+	_, _ = w.Write(bytes.Repeat([]byte("a"), maxLine+10))
+	if buf.Len() == 0 || len(w.buf) != 0 {
+		t.Fatalf("oversized partial line must flush, pending=%d", len(w.buf))
+	}
+}
+
+func TestCurrentLevelAndName(t *testing.T) {
+	reset(t)
+	t.Cleanup(func() { reset(t) })
+	setLevel(t, LevelWarn)
+	if CurrentLevel() != LevelWarn {
+		t.Fatalf("CurrentLevel = %d", CurrentLevel())
+	}
+	for l, want := range map[Level]string{LevelDebug: "debug", LevelInfo: "info", LevelWarn: "warn", LevelError: "error", Level(-1): "info", Level(9): "info"} {
+		if got := LevelName(l); got != want {
+			t.Errorf("LevelName(%d) = %q, want %q", l, got, want)
+		}
+	}
+}
+
+func setLevel(t *testing.T, l Level) {
+	t.Helper()
+	mu.Lock()
+	level = l
+	mu.Unlock()
+}
