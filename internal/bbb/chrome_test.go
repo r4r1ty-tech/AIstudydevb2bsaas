@@ -40,12 +40,15 @@ func TestChromeGuestJoinLocalHTML(t *testing.T) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, `<!doctype html><form method="get" action="/room">
-<input id="join_name" name="join_name" />
-<button type="submit">Join</button>
+<input required class="form-control join-form" name="/b/x[join_name]" id="_b_x_join_name" type="text" />
+<button id="room-join" type="submit" class="btn join-form">Присоединиться</button>
 </form>`)
 	})
 	mux.HandleFunc("/room", func(w http.ResponseWriter, r *http.Request) {
-		name := r.URL.Query().Get("join_name")
+		name := r.URL.Query().Get("/b/x[join_name]")
+		if name == "" {
+			name = r.URL.Query().Get("join_name")
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><div data-test="userListItem">%s</div>
 <button data-test="listenOnlyBtn">Listen only</button>
@@ -84,6 +87,10 @@ func TestChromeGuestJoinLocalHTML(t *testing.T) {
 	}
 	if lobby {
 		t.Fatal("local meeting should not look like lobby")
+	}
+	in, err := sess.InMeeting(ctx)
+	if err != nil || !in {
+		t.Fatalf("expected in meeting: %v %v", in, err)
 	}
 	if err := sess.Greet(ctx); err != nil {
 		t.Fatal(err)

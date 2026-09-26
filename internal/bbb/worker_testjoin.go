@@ -65,8 +65,15 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 	tj.Message = "захожу"
 	_ = w.Store.PutTestJoin(tj)
 
+	log.Printf("bbb: test join begin want=%s name=%q url=%s", tj.Want, tj.GuestName(), url)
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: tj.GuestName(), Role: role})
 	if err != nil {
+		if aborted, latest := w.testJoinAborted(tj.Want); aborted {
+			log.Printf("bbb: test join aborted(leave) after err=%v", err)
+			_ = w.Store.PutTestJoin(latest)
+			return
+		}
+		log.Printf("bbb: test join fail: %v", err)
 		tj.Status = model.TestError
 		tj.Mode = ""
 		tj.Message = err.Error()
@@ -74,20 +81,15 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+err.Error())
 		return
 	}
-	if latest, e := w.Store.GetTestJoin(); e == nil {
-		if latest.Want == model.TestWantOff {
-			_ = sess.Close()
-			latest.Status = model.TestIdle
-			latest.Mode = ""
-			latest.Message = "вышел"
-			_ = w.Store.PutTestJoin(latest)
-			return
-		}
-		if latest.Want != tj.Want {
-			_ = sess.Close()
-			w.ensureTestN(ctx, latest, now, depth+1)
-			return
-		}
+	log.Printf("bbb: test Join() ok, classifying lobby/meeting")
+	if aborted, latest := w.testJoinAborted(tj.Want); aborted {
+		_ = sess.Close()
+		_ = w.Store.PutTestJoin(latest)
+		return
+	} else if latest.Want != "" && latest.Want != tj.Want {
+		_ = sess.Close()
+		w.ensureTestN(ctx, latest, now, depth+1)
+		return
 	}
 	if tj.Want == model.TestWantListen {
 		sess = w.attachTestRecorder(ctx, sess)
@@ -98,7 +100,29 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 	if lobby, _ := sess.InLobby(ctx); lobby {
 		state = model.TestLobby
 		msg = "лобби, жду модератора"
+	} else if ok, _ := sess.InMeeting(ctx); !ok {
+		_ = sess.Close()
+		if aborted, latest := w.testJoinAborted(tj.Want); aborted {
+			_ = w.Store.PutTestJoin(latest)
+			return
+		}
+		tj.Status = model.TestError
+		tj.Mode = ""
+		tj.Message = "форма прошла, но комнаты нет"
+		_ = w.Store.PutTestJoin(tj)
+		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — нет UI комнаты")
+		return
 	}
+	if aborted, latest := w.testJoinAborted(tj.Want); aborted {
+		_ = sess.Close()
+		_ = w.Store.PutTestJoin(latest)
+		return
+	} else if latest.Want != "" {
+		tj.URL = latest.URL
+		tj.Name = latest.Name
+		tj.Want = latest.Want
+	}
+
 	w.mu.Lock()
 	w.sessions[testSessionKey] = sess
 	if state == model.TestLobby {
@@ -110,6 +134,7 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 	tj.Mode = tj.Want
 	tj.Message = msg
 	_ = w.Store.PutTestJoin(tj)
+	log.Printf("bbb: test status=%s want=%s name=%q", state, tj.Want, tj.GuestName())
 	_ = w.Store.AddEvent(model.Event{
 		At: now, Type: model.EventJoin, TelegramID: w.adminID(), Message: "тест " + tj.Want,
 	})
@@ -118,6 +143,25 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		return
 	}
 	notify.Admin(ctx, w.Cfg, testInRoomText(tj))
+}
+
+// testJoinAborted reports leave/off while Join was in flight and returns a
+// store-ready idle row so a late PutTestJoin cannot revive want/status.
+func (w *Worker) testJoinAborted(wantBefore string) (bool, model.TestJoin) {
+	latest, err := w.Store.GetTestJoin()
+	if err != nil {
+		return false, latest
+	}
+	if latest.Want == model.TestWantOff {
+		latest.Status = model.TestIdle
+		latest.Mode = ""
+		latest.Message = "вышел"
+		return true, latest
+	}
+	if wantBefore != "" && latest.Want != "" && latest.Want != wantBefore {
+		return false, latest
+	}
+	return false, latest
 }
 
 func testInRoomText(tj model.TestJoin) string {
@@ -141,6 +185,18 @@ func (w *Worker) watchTest(ctx context.Context, sess Session, tj model.TestJoin,
 			tj.Message = "лобби, жду модератора"
 			_ = w.Store.PutTestJoin(tj)
 		}
+		return
+	}
+	if ok, _ := sess.InMeeting(ctx); !ok {
+		w.stopTest(ctx, "lost", false)
+		if latest, e := w.Store.GetTestJoin(); e == nil {
+			latest.Status = model.TestError
+			latest.Want = model.TestWantOff
+			latest.Mode = ""
+			latest.Message = "пропал из комнаты"
+			_ = w.Store.PutTestJoin(latest)
+		}
+		notify.Admin(ctx, w.Cfg, "тест BBB: пропал из комнаты (UI нет).")
 		return
 	}
 	if tj.Status == model.TestLobby {

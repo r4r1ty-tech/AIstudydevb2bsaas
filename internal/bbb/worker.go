@@ -243,6 +243,19 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	state := model.PresenceRoom
 	if lobby, _ := sess.InLobby(ctx); lobby {
 		state = model.PresenceLobby
+	} else if ok, _ := sess.InMeeting(ctx); !ok {
+		_ = sess.Close()
+		w.hogs().Release()
+		_ = w.Store.SetPresence(model.Presence{
+			TelegramID: u.TelegramID, LessonID: lesson.ID,
+			State: model.PresenceError, Message: "не в комнате", UpdatedAt: now,
+		})
+		_ = w.Store.AddEvent(model.Event{
+			At: now, Type: model.EventError,
+			TelegramID: u.TelegramID, LessonID: lesson.ID, Message: "не в комнате после join",
+		})
+		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не смог зайти на «%s».", lesson.Discipline))
+		return
 	}
 	w.mu.Lock()
 	w.sessions[key] = sess
@@ -285,6 +298,9 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		return
 	}
 	if !lobby {
+		if ok, _ := sess.InMeeting(ctx); !ok {
+			return
+		}
 		_ = w.Store.SetPresence(model.Presence{
 			TelegramID: u.TelegramID, LessonID: lesson.ID,
 			State: model.PresenceRoom, Message: "join", UpdatedAt: now,
