@@ -14,11 +14,21 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
+// feedQueue is how many PCM chunks may wait for wake.py (~2s each from
+// Engine.Feed). Beyond that chunks are dropped: vosk loading its model or
+// lagging must never back up into ffmpeg, which records through the same pipe.
+const feedQueue = 30
+
 type ProcRecognizer struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
 	out   chan string
 	mu    sync.Mutex
+
+	feed    chan []byte
+	done    chan struct{}
+	closed  bool
+	dropped int
 }
 
 func Open(model, script string, vocab []string) (Recognizer, error) {
@@ -66,7 +76,30 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 	if cmd.Process != nil {
 		logx.Infof("wake", "vosk pid=%d", cmd.Process.Pid)
 	}
-	return &ProcRecognizer{cmd: cmd, stdin: stdin, out: ch}, nil
+	p := &ProcRecognizer{
+		cmd: cmd, stdin: stdin, out: ch,
+		feed: make(chan []byte, feedQueue),
+		done: make(chan struct{}),
+	}
+	go p.writeLoop(stdin)
+	return p, nil
+}
+
+// writeLoop is the only writer to wake.py stdin. A write error (the script
+// died) is logged once; later chunks are discarded until Close.
+func (p *ProcRecognizer) writeLoop(w io.Writer) {
+	defer close(p.done)
+	broken := false
+	for pcm := range p.feed {
+		if broken {
+			continue
+		}
+		if _, err := w.Write(pcm); err != nil {
+			broken = true
+			logx.Warnf("wake", "vosk stdin: %v — пейджер молчит до конца записи", err)
+		}
+	}
+	logx.Debugf("wake", "writeLoop: done broken=%v", broken)
 }
 
 func scanLines(r io.Reader, ch chan string) {
@@ -90,14 +123,18 @@ func (p *ProcRecognizer) Push(pcm []byte, sampleRate int) []string {
 		return nil
 	}
 	p.mu.Lock()
-	in := p.stdin
+	if !p.closed && p.feed != nil {
+		buf := append([]byte(nil), pcm...)
+		select {
+		case p.feed <- buf:
+		default:
+			p.dropped++
+			if p.dropped == 1 || p.dropped%100 == 0 {
+				logx.Warnf("wake", "vosk lags: dropped %d chunks (queue=%d)", p.dropped, feedQueue)
+			}
+		}
+	}
 	p.mu.Unlock()
-	if in == nil {
-		return drain(p.out)
-	}
-	if _, err := in.Write(pcm); err != nil {
-		return drain(p.out)
-	}
 	return drain(p.out)
 }
 
@@ -108,16 +145,29 @@ func (p *ProcRecognizer) Close() error {
 	p.mu.Lock()
 	in := p.stdin
 	cmd := p.cmd
+	feed := p.feed
+	already := p.closed
 	p.stdin = nil
 	p.cmd = nil
+	p.closed = true
+	dropped := p.dropped
 	p.mu.Unlock()
+	if already {
+		return nil
+	}
+	// Closing stdin first unblocks a writeLoop stuck in Write.
 	if in != nil {
 		_ = in.Close()
+	}
+	if feed != nil {
+		close(feed)
+		<-p.done
 	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		_ = cmd.Wait()
 	}
+	logx.Infof("wake", "vosk closed dropped=%d", dropped)
 	return nil
 }
 

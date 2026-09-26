@@ -665,23 +665,47 @@ func clickByText(page *rod.Page, goRE string) bool {
 		logx.Debugf("bbb", "clickByText: empty regex")
 		return false
 	}
-	res, err := page.Eval(`(re) => {
-		const rx = new RegExp(re, 'i')
-		const nodes = document.querySelectorAll('button, [role="button"], [data-test], span, div, a')
-		for (const n of nodes) {
-			const t = ((n.innerText || '') + ' ' + (n.getAttribute('aria-label') || '')).trim()
-			if (t && rx.test(t)) { n.click(); return true }
-		}
-		return false
-	}`, jsRE)
+	// Обёртки (#app, модалка) тоже содержат искомый текст в innerText; клик по
+	// ним ничего не делает. Берём самый вложенный видимый элемент с совпадением
+	// и жмём его ближайшего интерактивного предка.
+	res, err := page.Eval(clickByTextJS, jsRE)
 	if err != nil || res == nil {
 		logx.Debugf("bbb", "clickByText: eval re=%q: %v", jsRE, err)
 		return false
 	}
-	clicked := res.Value.Bool()
-	logx.Debugf("bbb", "clickByText: re=%q clicked=%v", jsRE, clicked)
-	return clicked
+	hit := strings.TrimSpace(res.Value.Str())
+	if hit == "" {
+		logx.Debugf("bbb", "clickByText: re=%q clicked=false", jsRE)
+		return false
+	}
+	logx.Debugf("bbb", "clickByText: re=%q clicked %s", jsRE, hit)
+	return true
 }
+
+const clickByTextJS = `(re) => {
+	const rx = new RegExp(re, 'i')
+	const interactive = 'button, a, [role="button"], [role="menuitem"], [data-test]'
+	const own = (n) => ((n.innerText || '') + ' ' + (n.getAttribute('aria-label') || '')).trim()
+	const visible = (n) => {
+		const r = n.getBoundingClientRect()
+		if (r.width === 0 && r.height === 0) return false
+		const s = getComputedStyle(n)
+		return s.visibility !== 'hidden' && s.display !== 'none'
+	}
+	let best = null, bestLen = Infinity
+	for (const n of document.querySelectorAll('button, a, [role="button"], [role="menuitem"], [data-test], span, div, label, li')) {
+		const t = own(n)
+		if (!t || !rx.test(t) || !visible(n)) continue
+		// Предпочитаем интерактивный элемент; среди равных — самый короткий текст.
+		const len = t.length - (n.matches(interactive) ? 100000 : 0)
+		if (len < bestLen) { best = n; bestLen = len }
+	}
+	if (!best) return ''
+	const target = best.closest(interactive) || best
+	target.click()
+	const dt = target.getAttribute('data-test') || ''
+	return target.tagName.toLowerCase() + (dt ? '[' + dt + ']' : '') + ' "' + own(target).replace(/\s+/g, ' ').slice(0, 40) + '"'
+}`
 
 // jsRegexp strips Go/PCRE inline flags — rod Eval runs in the browser.
 func jsRegexp(goRE string) string {

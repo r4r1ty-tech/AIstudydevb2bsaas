@@ -77,6 +77,19 @@ BBB_DRY_RUN=1 go run ./cmd/bbb       # Chromium не трогаем: DryJoiner �
 `BBB_DRY_RUN=1` удобен для проверки логики `ensureTestN`, но **не** проверяет реальную
 классификацию страницы, лобби и запись — это только TC-20…TC-28 в живой комнате.
 
+Сквозной тест звука (Chromium играет тон → `ssau_rec.monitor` → ffmpeg → PCM не тишина)
+создаёт sink и меняет default sink, поэтому гоняется только на **отдельном** PulseAudio,
+не на продовом `/run/user/0`:
+
+```bash
+T=$(mktemp -d); mkdir -p $T/xdg $T/home; chmod 700 $T/xdg
+export HOME=$T/home XDG_RUNTIME_DIR=$T/xdg PULSE_SERVER=unix:$T/xdg/pulse/native
+env -u DBUS_SESSION_BUS_ADDRESS pulseaudio -n --daemonize=yes --exit-idle-time=-1 \
+  -L module-native-protocol-unix -L "module-null-sink sink_name=dummy"
+SSAU_AUDIO_E2E=1 go test ./internal/bbb -run TestRecordTabAudioReachesFFmpeg -v
+pulseaudio --kill
+```
+
 ### 2.4. Telegram
 
 - Бот запущен под `TELEGRAM_BOT_TOKEN`, ты пишешь с `ADMIN_TELEGRAM_ID`.

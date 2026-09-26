@@ -40,13 +40,17 @@ func MergeSegments(ctx context.Context, dir, out string) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	segs, err := Segments(dir)
+	all, err := Segments(dir)
 	if err != nil {
 		logx.Errorf("capture", "MergeSegments: list segments %s: %v", dir, err)
 		return 0, fmt.Errorf("MergeSegments: segments: %w", err)
 	}
+	// Пустой файл (ffmpeg убит до первого flush) ломает concat навсегда:
+	// ffmpeg не может его открыть, и каждая следующая склейка падает.
+	segs := dropEmpty(all)
+	dropEmpty([]string{out})
 	if len(segs) == 0 {
-		logx.Errorf("capture", "MergeSegments: no segments in %s", dir)
+		logx.Errorf("capture", "MergeSegments: no non-empty segments in %s (had %d)", dir, len(all))
 		return 0, fmt.Errorf("capture: нет сегментов в %s", dir)
 	}
 
@@ -124,4 +128,28 @@ func MergeSegments(ctx context.Context, dir, out string) (int, error) {
 	}
 	logx.Infof("capture", "merge done: %s (%d segments)", out, len(segs))
 	return len(segs), nil
+}
+
+// dropEmpty removes zero-length files and returns the rest.
+func dropEmpty(paths []string) []string {
+	out := paths[:0:0]
+	for _, p := range paths {
+		st, err := os.Stat(p)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				logx.Warnf("capture", "dropEmpty: stat %s: %v", p, err)
+			}
+			continue
+		}
+		if st.Size() > 0 {
+			out = append(out, p)
+			continue
+		}
+		if err := os.Remove(p); err != nil {
+			logx.Warnf("capture", "dropEmpty: remove empty %s: %v", p, err)
+			continue
+		}
+		logx.Warnf("capture", "dropEmpty: removed empty %s", p)
+	}
+	return out
 }
