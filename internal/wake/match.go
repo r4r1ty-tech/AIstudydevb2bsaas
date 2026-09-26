@@ -102,13 +102,3 @@ func hasWord(list []string, word string) bool {
 	logx.Debugf("wake", "hasWord: miss %q", word)
 	return false
 }
-
-func wantsJoin(intent *model.JoinIntent) bool {
-	if intent == nil {
-		logx.Debugf("wake", "wantsJoin: nil intent -> true")
-		return true
-	}
-	out := intent.Decision != model.JoinNo
-	logx.Debugf("wake", "wantsJoin: decision=%v -> %v", intent.Decision, out)
-	return out
-}
