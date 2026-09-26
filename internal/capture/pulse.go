@@ -136,7 +136,7 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 		return cmd.Process.Signal(syscall.SIGINT)
 	}
 	cmd.WaitDelay = stopGrace
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = logx.LineWriter(logx.LevelWarn, "capture", "ffmpeg: ", nil)
 	pcm, err := cmd.StdoutPipe()
 	if err != nil {
 		logx.Errorf("capture", "Start: stdout pipe: %v", err)

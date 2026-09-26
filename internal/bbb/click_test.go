@@ -119,3 +119,18 @@ func TestAudioOnceOpensChooserThenListenOnly(t *testing.T) {
 		t.Fatal("listen-only not pressed after opening the chooser")
 	}
 }
+
+func TestChromeAudioLine(t *testing.T) {
+	t.Parallel()
+	for line, want := range map[string]bool{
+		"[ERROR:pulse_util.cc] pa_context_connect() failed": true,
+		"ALSA lib pcm.c: Unknown PCM default":               true,
+		"[WARNING:webrtc_voice_engine.cc] no audio device":  true,
+		"Failed to connect to the bus: service unknown":     false,
+		"[ERROR:gpu_init.cc] Passthrough is not supported":  false,
+	} {
+		if got := chromeAudioLine(line); got != want {
+			t.Errorf("chromeAudioLine(%q) = %v, want %v", line, got, want)
+		}
+	}
+}

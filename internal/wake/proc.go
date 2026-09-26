@@ -34,6 +34,7 @@ type ProcRecognizer struct {
 func Open(model, script string, vocab []string) (Recognizer, error) {
 	model = strings.TrimSpace(model)
 	script = strings.TrimSpace(script)
+	logx.Debugf("wake", "Open: model=%q script=%q vocab=%d", model, script, len(vocab))
 	if model == "" || script == "" {
 		return nil, fmt.Errorf("нет vosk model/script")
 	}
@@ -56,7 +57,7 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 	if cmd == nil {
 		return nil, fmt.Errorf("nil cmd")
 	}
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = logx.LineWriter(logx.LevelWarn, "wake", "wake.py: ", nil)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -106,16 +107,21 @@ func scanLines(r io.Reader, ch chan string) {
 	defer close(ch)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 4096), 64*1024)
+	lines, lost := 0, 0
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
+		lines++
 		select {
 		case ch <- line:
 		default:
+			lost++
 		}
 	}
+	// Конец stdout = wake.py завершился (или упал: трейсбек в journald).
+	logx.Infof("wake", "vosk stdout closed lines=%d lost=%d err=%v", lines, lost, sc.Err())
 }
 
 func (p *ProcRecognizer) Push(pcm []byte, sampleRate int) []string {

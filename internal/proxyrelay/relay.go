@@ -106,7 +106,9 @@ func (s *Slot) OK() {
 	if s == nil {
 		return
 	}
-	s.fails.Store(0)
+	if n := s.fails.Swap(0); n > 0 {
+		logx.Infof("proxyrelay", "proxy %s ok again after %d fails", s.p.Redacted(), n)
+	}
 }
 
 func (s *Slot) Fails() int {
@@ -124,6 +126,7 @@ func (s *Slot) Dead() bool {
 func (s *Slot) Reset() {
 	if s != nil {
 		s.fails.Store(0)
+		logx.Debugf("proxyrelay", "proxy %s reset", s.p.Redacted())
 	}
 }
 
@@ -202,7 +205,7 @@ func handle(c net.Conn, dial xproxy.Dialer, upstream string) {
 	defer c.Close()
 	target, err := socks5Accept(c)
 	if err != nil {
-		logx.Debugf("proxyrelay", "handle %s: handshake: %v", upstream, err)
+		logx.Warnf("proxyrelay", "handle %s: handshake from %s: %v", upstream, c.RemoteAddr(), err)
 		return
 	}
 	up, err := dial.Dial("tcp", target)
