@@ -490,3 +490,12 @@ func TestNotesPDFMissingOnDisk(t *testing.T) {
 	h.press(studentID, "nt:"+itoa(p.ID))
 	h.wantText(studentID, "Не смог отправить PDF")
 }
+
+func TestWordsCommandBeforeOnboardingShowsHint(t *testing.T) {
+	h := newHarness(t)
+	if err := h.st.UpsertUser(&model.User{TelegramID: studentID, FIO: "А Б В", Enabled: true, Subgroup: 1, OnboardStage: model.StageSub}); err != nil {
+		t.Fatal(err)
+	}
+	h.text(studentID, "/words")
+	h.wantText(studentID, askWordsNext)
+}

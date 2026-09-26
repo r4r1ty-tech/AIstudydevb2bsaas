@@ -59,8 +59,9 @@ func (s *Store) Close() error {
 		logx.Debugf("store", "Close: no db")
 		return nil
 	}
+	// db не зануляем: после Close sql.DB отвечает «database is closed», а
+	// nil-указатель ронял бы паникой запоздалый тик T-15/лобби при остановке.
 	err := s.db.Close()
-	s.db = nil
 	if err != nil {
 		logx.Errorf("store", "Close: close db: %v", err)
 		return err
