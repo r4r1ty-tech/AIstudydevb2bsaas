@@ -15,6 +15,8 @@ func clearEnv(t *testing.T) {
 		"DATABASE_PATH", "GROUP_ID", "GROUP_CODE", "LISTEN_ADDR", "TZ",
 		"RECORDINGS_DIR", "CHROME_BIN", "CHROME_USER_DATA_DIR", "BBB_DRY_RUN",
 		"LECTURE_PAUSE", "PANEL_PASSWORD", "WHITELIST_EXTRA",
+		"LLM_API_KEY", "LLM_API_URL", "LLM_MODEL",
+		"DEEPSEEK_API_KEY", "DEEPSEEK_API_URL", "DEEPSEEK_MODEL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -217,5 +219,31 @@ func TestLoadDotEnv(t *testing.T) {
 	}
 	if got := os.Getenv("SSAU_TEST_DOTENV_EXIST"); got != "from-env" {
 		t.Errorf("existing env should win, got %q", got)
+	}
+}
+
+// Prod 26.09: the VDS .env has DEEPSEEK_* (old names), the code read only
+// LLM_*, so Summarize always failed with «нет LLM_API_KEY».
+func TestLLMFallsBackToDeepSeekNames(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DEEPSEEK_API_KEY", "sk-old")
+	t.Setenv("DEEPSEEK_API_URL", "https://api.deepseek.com/")
+	t.Setenv("DEEPSEEK_MODEL", "deepseek-chat")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LLMAPIKey != "sk-old" || c.LLMAPIURL != "https://api.deepseek.com" || c.LLMModel != "deepseek-chat" {
+		t.Fatalf("fallback: key=%q url=%q model=%q", c.LLMAPIKey, c.LLMAPIURL, c.LLMModel)
+	}
+
+	t.Setenv("LLM_API_KEY", "sk-new")
+	t.Setenv("LLM_MODEL", "new-model")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LLMAPIKey != "sk-new" || c.LLMModel != "new-model" || c.LLMAPIURL != "https://api.deepseek.com" {
+		t.Fatalf("new names must win: key=%q model=%q url=%q", c.LLMAPIKey, c.LLMModel, c.LLMAPIURL)
 	}
 }

@@ -88,9 +88,9 @@ func Load() (*Config, error) {
 		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
 		LecturePause:     boolEnv("LECTURE_PAUSE", true),
 		PanelPassword:    strEnv("PANEL_PASSWORD", ""),
-		LLMAPIKey:        strEnv("LLM_API_KEY", ""),
-		LLMAPIURL:        strings.TrimRight(strEnv("LLM_API_URL", ""), "/"),
-		LLMModel:         strEnv("LLM_MODEL", ""),
+		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
+		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
+		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
 		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),
 		FishStudioAPIURL: strEnv("FISH_STUDIO_API_URL", "https://api.fish.audio"),
 		GrokAPIKey:       strEnv("GROK_API_KEY", ""),
@@ -181,6 +181,19 @@ func (c *Config) ResolveWebAppURL() string {
 	u := strings.TrimRight(strings.TrimSpace(c.WebAppURL), "/")
 	logx.Debugf("config", "ResolveWebAppURL: resolved from env url=%q", u)
 	return u
+}
+
+// legacyEnv reads key, falling back to its pre-rename name. The VDS .env
+// still has DEEPSEEK_* while the code wants LLM_*, so notes never built.
+func legacyEnv(key, old string) string {
+	if v := strEnv(key, ""); v != "" {
+		return v
+	}
+	v := strEnv(old, "")
+	if v != "" {
+		logx.Warnf("config", "%s не задан, беру старое %s — переименуй в .env", key, old)
+	}
+	return v
 }
 
 func strEnv(key, fallback string) string {
