@@ -193,3 +193,20 @@ func TestClosedStoreReturnsErrors(t *testing.T) {
 		t.Error("GetLessonBBB swallows the error into an empty link")
 	}
 }
+
+// Close twice, then use: errors, not nil-pointer panics (late ticks at shutdown).
+func TestUseAfterCloseIsAnError(t *testing.T) {
+	s := openTemp(t)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := s.ListUsers(); err == nil {
+		t.Fatal("use after Close must fail")
+	}
+	if _, err := s.GetTestJoin(); err == nil {
+		t.Fatal("GetTestJoin after Close must fail")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
@@ -194,5 +195,9 @@ func truncate(s string, n int) string {
 		return s
 	}
 	logx.Debugf("publish", "truncate: len=%d max=%d cut", len(s), n)
+	// Не резать посреди UTF-8: кириллица в пути иначе даёт битую строку.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
 	return s[:n] + "…"
 }
