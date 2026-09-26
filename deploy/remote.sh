@@ -200,14 +200,6 @@ set_env_vars \
   "GITHUB_REPO=${LECTURES_REPO:-LectionsSSAU}" \
   "GITHUB_BRANCH=${LECTURES_BRANCH:-main}"
 
-if [[ -n "${AGENT_SSH_PUBKEY:-}" ]]; then
-  if [[ -f "$SRC/agent-ssh/setup.sh" ]]; then
-    bash "$SRC/agent-ssh/setup.sh" "$AGENT_SSH_PUBKEY" || echo "agent-ssh: setup не прошёл, продолжаю"
-  else
-    echo "agent-ssh: нет $SRC/agent-ssh/setup.sh"
-  fi
-fi
-
 bbb_was_active=0
 if systemctl is-active --quiet ssau-bbb.service; then
   bbb_was_active=1
