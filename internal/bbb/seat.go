@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-rod/rod"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
@@ -135,6 +136,20 @@ var joinAudioSels = []string{
 	`button[aria-label='Подключить звук']`,
 }
 
+// audioJoinedSels are present once the tab is already in audio (listen-only
+// or mic); then there is nothing to click and navbar toggles must stay alone.
+var audioJoinedSels = []string{
+	"[data-test='leaveAudio']",
+	"[data-test='leaveListenOnly']",
+	`button[aria-label='Leave audio']`,
+	`button[aria-label='Выйти из аудио']`,
+	`button[aria-label='Отключить звук']`,
+}
+
+// joinAudioRE is the navbar "join audio" text. No bare "audio": it would also
+// match "Leave audio" and drop the tab out of the conference.
+const joinAudioRE = `(?i)join audio|подключить звук|присоединиться к аудио|подключиться к аудио`
+
 // audioProbeSels are logged on failure so it is clear which audio controls exist.
 var audioProbeSels = []string{
 	"[data-test='joinAudio']",
@@ -142,6 +157,7 @@ var audioProbeSels = []string{
 	"[data-test='microphoneBtn']",
 	"[data-test='audioControl']",
 	"[data-test='leaveAudio']",
+	"[data-test='leaveListenOnly']",
 	"[data-test='unmuteButton']",
 	"[data-test='muteButton']",
 	"[data-test='audioModal']",
@@ -414,11 +430,18 @@ func audioOnce(page *rod.Page, role Role) {
 			}
 		}
 		if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
-			logx.Debugf("bbb", "audioOnce: listen-only clicked")
+			logx.Infof("bbb", "audioOnce: role=%s listen-only clicked", role)
+			logAudioJoined(page, role)
+			return
+		}
+		// Уже в аудио (bbb_auto_join_audio сработал) — навбар не трогаем.
+		if role == RoleRecord && hasAny(p, audioJoinedSels) {
+			logx.Infof("bbb", "audioOnce: role=%s already in audio", role)
+			logAudioJoined(page, role)
 			return
 		}
 		// Аудио-модалки может не быть: открываем выбор аудио из навбара.
-		if clickFirst(p, joinAudioSels) || clickByText(p, `(?i)join audio|подключить звук|присоединиться к аудио|audio`) {
+		if clickFirst(p, joinAudioSels) || clickByText(p, joinAudioRE) {
 			logx.Debugf("bbb", "audioOnce: opened audio chooser")
 			time.Sleep(500 * time.Millisecond)
 			continue
@@ -431,4 +454,15 @@ func audioOnce(page *rod.Page, role Role) {
 	} else {
 		logx.Debugf("bbb", "audioOnce: no audio control found")
 	}
+}
+
+// logAudioJoined records which audio controls exist and where PulseAudio
+// routes streams right after the recording tab joins audio, so a silent
+// recording can be told apart from a tab that never played anything.
+func logAudioJoined(page *rod.Page, role Role) {
+	if role != RoleRecord {
+		return
+	}
+	logx.Infof("bbb", "audio joined :: audio=[%s]", audioProbeHint(page))
+	capture.LogRoute("bbb", "audio-joined")
 }

@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
@@ -18,6 +20,9 @@ const (
 	SinkName = "ssau_rec"
 	WakeRate = 16000
 )
+
+// stopGrace is how long ffmpeg gets to finish the ogg after SIGINT.
+var stopGrace = 10 * time.Second
 
 type Rec struct {
 	cmd    *exec.Cmd
@@ -124,6 +129,13 @@ func Start(ctx context.Context, outPath string) (*Rec, error) {
 	cctx, cancel := context.WithCancel(ctx)
 	cmd := exec.CommandContext(cctx, ffmpeg, FFmpegArgs(outPath)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// По умолчанию CommandContext шлёт SIGKILL: ogg не дописывается и недавний
+	// звук теряется при каждом рестарте сервиса. SIGINT даёт ffmpeg закрыть файл.
+	cmd.Cancel = func() error {
+		logx.Infof("capture", "ffmpeg ctx done, SIGINT pid=%d", cmd.Process.Pid)
+		return cmd.Process.Signal(syscall.SIGINT)
+	}
+	cmd.WaitDelay = stopGrace
 	cmd.Stderr = os.Stderr
 	pcm, err := cmd.StdoutPipe()
 	if err != nil {
@@ -161,14 +173,35 @@ func (r *Rec) Stop() error {
 		logx.Debugf("capture", "Rec.Stop: no process")
 		return nil
 	}
+	pid := r.cmd.Process.Pid
 	if err := r.cmd.Process.Signal(syscall.SIGINT); err != nil {
-		logx.Warnf("capture", "Rec.Stop: signal pid=%d: %v", r.cmd.Process.Pid, err)
+		logx.Warnf("capture", "Rec.Stop: signal pid=%d: %v", pid, err)
 	} else {
-		logx.Infof("capture", "ffmpeg stop signal pid=%d", r.cmd.Process.Pid)
+		logx.Infof("capture", "ffmpeg stop signal pid=%d", pid)
 	}
-	err := r.cmd.Wait()
+	done := make(chan error, 1)
+	go func(cmd *exec.Cmd) { done <- cmd.Wait() }(r.cmd)
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(stopGrace):
+		logx.Warnf("capture", "Rec.Stop: ffmpeg pid=%d ignored SIGINT for %s, killing", pid, stopGrace)
+		if kerr := r.cmd.Process.Kill(); kerr != nil {
+			logx.Warnf("capture", "Rec.Stop: kill pid=%d: %v", pid, kerr)
+		}
+		err = <-done
+	}
+	if isInterrupted(err) {
+		logx.Debugf("capture", "Rec.Stop: pid=%d exited 255 after SIGINT — норма", pid)
+		err = nil
+	}
 	if err != nil {
-		logx.Warnf("capture", "Rec.Stop: wait: %v", err)
+		logx.Warnf("capture", "Rec.Stop: wait pid=%d: %v", pid, err)
+	}
+	if st, serr := os.Stat(r.path); serr == nil {
+		logx.Infof("capture", "Rec.Stop: %s size=%d", r.path, st.Size())
+	} else {
+		logx.Warnf("capture", "Rec.Stop: stat %s: %v", r.path, serr)
 	}
 	if r.cancel != nil {
 		r.cancel()
@@ -176,6 +209,12 @@ func (r *Rec) Stop() error {
 	r.cmd = nil
 	logx.Debugf("capture", "Rec.Stop: exit err=%v", err)
 	return err
+}
+
+// isInterrupted: ffmpeg exits 255 when it stops on SIGINT; that is a clean stop.
+func isInterrupted(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == 255
 }
 
 func PulseEnv() []string {

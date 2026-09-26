@@ -2,6 +2,7 @@ package bbb
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"time"
 
@@ -71,6 +72,7 @@ func (w *Worker) startSpotter(ctx context.Context, rec *capture.Rec, lesson mode
 		}
 	}
 
+	meter := capture.NewMeter(capture.WakeRate, 60, silenceAlertMinutes)
 	buf := make([]byte, capture.WakeRate*2/5) // 200ms s16le
 	for {
 		if ctx != nil {
@@ -83,6 +85,7 @@ func (w *Worker) startSpotter(ctx context.Context, rec *capture.Rec, lesson mode
 		}
 		n, err := rec.Read(buf)
 		if n > 0 {
+			w.onLevel(ctx, lesson, meter, meter.Feed(buf[:n]))
 			for _, h := range eng.Feed(buf[:n], capture.WakeRate, vocab) {
 				w.onWake(ctx, lesson, users, h.Word)
 			}
@@ -90,6 +93,34 @@ func (w *Worker) startSpotter(ctx context.Context, rec *capture.Rec, lesson mode
 		if err != nil {
 			logx.Debugf("bbb", "startSpotter: read: %v", err)
 			return
+		}
+	}
+}
+
+// silenceAlertMinutes of silence in a row mean the recording tab most likely
+// never got audio (listen-only not joined, stream not routed to ssau_rec).
+const silenceAlertMinutes = 5
+
+func (w *Worker) onLevel(ctx context.Context, lesson model.Lesson, m *capture.Meter, ev capture.LevelEvent) {
+	if ev == capture.LevelNone || m == nil {
+		return
+	}
+	peak, silent, windows := m.Last()
+	logx.Infof("capture", "audio level %q min=%d peak=%d (%.1f dBFS) silent_streak=%d", lesson.Discipline, windows, peak, capture.DBFS(peak), silent)
+	if windows == 1 {
+		capture.LogRoute("capture", "first-minute")
+	}
+	switch ev {
+	case capture.LevelSilent:
+		logx.Warnf("capture", "recording %q silent for %d min — аудио, похоже, не подключилось", lesson.Discipline, silent)
+		capture.LogRoute("capture", "silent")
+		if w != nil {
+			notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s»: %d мин тишины. Либо лектор молчит, либо вкладка не подключила звук — глянь журнал (audio route silent).", lesson.Discipline, silent))
+		}
+	case capture.LevelBack:
+		logx.Infof("capture", "recording %q: sound is back, peak=%d", lesson.Discipline, peak)
+		if w != nil {
+			notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"»: звук появился.")
 		}
 	}
 }
