@@ -178,6 +178,17 @@ func (s *chromeSession) InLobby(ctx context.Context) (bool, error) {
 	return ok, nil
 }
 
+func (s *chromeSession) InMeeting(ctx context.Context) (bool, error) {
+	if s == nil || s.page == nil {
+		return false, nil
+	}
+	p := s.page.Context(ctx).Timeout(3 * time.Second)
+	if hasAny(p, meetingSels) {
+		return true, nil
+	}
+	return false, nil
+}
+
 func (s *chromeSession) Greet(ctx context.Context) error {
 	if s == nil || s.page == nil {
 		return nil
@@ -227,6 +238,12 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	proxyHint := "direct"
+	if strings.TrimSpace(req.SOCKS5) != "" {
+		proxyHint = "socks5"
+	}
+	log.Printf("bbb: join start url=%s name=%q role=%d proxy=%s", req.URL, req.FIO, req.Role, proxyHint)
+
 	root, err := c.ensure(req.Role == RoleRecord)
 	if err != nil {
 		return nil, err
@@ -277,27 +294,68 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	}
 
 	if err := page.Timeout(30 * time.Second).Navigate(req.URL); err != nil {
+		log.Printf("bbb: navigate fail: %v | %s", err, pageSnap(page))
 		_ = sess.Close()
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
-	_ = page.Timeout(15 * time.Second).WaitLoad()
+	if err := page.Timeout(15 * time.Second).WaitLoad(); err != nil {
+		log.Printf("bbb: waitload: %v | %s", err, pageSnap(page))
+	} else {
+		log.Printf("bbb: navigated | %s", pageSnap(page))
+	}
 
 	if err := fillGuestName(page, req.FIO); err != nil {
-		log.Printf("bbb: guest form: %v", err)
+		log.Printf("bbb: guest form fail: %v | %s | hits=%s", err, pageSnap(page), guestFormHits(page))
+		_ = sess.Close()
+		return nil, fmt.Errorf("guest form: %w", err)
+	}
+	log.Printf("bbb: guest form ok name=%q | %s", req.FIO, pageSnap(page))
+
+	if err := waitJoined(page, 45*time.Second); err != nil {
+		log.Printf("bbb: waitJoined fail: %v | %s | hits=%s", err, pageSnap(page), joinHits(page))
+		_ = sess.Close()
+		return nil, err
+	}
+	log.Printf("bbb: waitJoined ok | %s | hits=%s", pageSnap(page), joinHits(page))
+
+	if lobby, lerr := sess.InLobby(ctx); lerr != nil {
+		log.Printf("bbb: InLobby err: %v", lerr)
+	} else if lobby {
+		log.Printf("bbb: in lobby | %s", pageSnap(page))
+		return sess, nil
 	}
 	if req.Role == RolePresence {
 		if err := dismissAudio(page); err != nil {
-			log.Printf("bbb: skip audio: %v", err)
+			log.Printf("bbb: skip audio: %v | %s | hits=%s", err, pageSnap(page), joinHits(page))
+		} else {
+			log.Printf("bbb: audio dismissed/skipped | %s", pageSnap(page))
 		}
 	} else if err := clickListenOnly(page); err != nil {
-		log.Printf("bbb: listen-only: %v", err)
+		log.Printf("bbb: listen-only: %v | %s | hits=%s", err, pageSnap(page), joinHits(page))
+	} else {
+		log.Printf("bbb: listen-only ok | %s", pageSnap(page))
 	}
-	return sess, nil
+	if ok, merr := sess.InMeeting(ctx); merr != nil {
+		log.Printf("bbb: InMeeting err: %v", merr)
+	} else if ok {
+		log.Printf("bbb: in meeting | %s", pageSnap(page))
+		return sess, nil
+	}
+	if lobby, _ := sess.InLobby(ctx); lobby {
+		log.Printf("bbb: lobby after audio | %s", pageSnap(page))
+		return sess, nil
+	}
+	log.Printf("bbb: not in room after join | %s | hits=%s", pageSnap(page), joinHits(page))
+	_ = sess.Close()
+	return nil, fmt.Errorf("не в комнате после захода")
 }
 
 func fillGuestName(page *rod.Page, fio string) error {
-	p := page.Timeout(15 * time.Second)
+	p := page.Timeout(20 * time.Second)
 	el, err := p.Race().
+		Element("input.join-form[type='text']").
+		Element("input[name*='join_name']").
+		Element("input[id*='join_name']").
 		Element("#join_name").
 		Element("#join-name").
 		Element("input[name='join_name']").
@@ -308,27 +366,185 @@ func fillGuestName(page *rod.Page, fio string) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("bbb: guest name field found")
 	_ = el.SelectAllText()
 	if err := el.Input(fio); err != nil {
+		return fmt.Errorf("input name: %w", err)
+	}
+	// Prefer JS submit: rod mouse Click often dies with "context deadline exceeded"
+	// on Greenlight (#room-join present but not stably actionable under CDP).
+	if err := submitGuestJoin(page); err != nil {
 		return err
 	}
-	if ok, box, _ := page.Has("input[type='checkbox']"); ok && box != nil {
-		_ = box.Click(proto.InputMouseButtonLeft, 1)
+	if err := page.Timeout(20 * time.Second).WaitLoad(); err != nil {
+		log.Printf("bbb: post-join waitload: %v", err)
 	}
-	btn, err := page.Timeout(8 * time.Second).Race().
-		Element("button[type='submit']").
-		Element("[data-test='joinButton']").
-		Element("[data-test='sessionJoinButton']").
-		Do()
-	if err != nil {
-		if !clickByText(page.Timeout(4*time.Second), joinNameRE) {
-			return err
-		}
-	} else if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		return err
-	}
-	_ = page.Timeout(20 * time.Second).WaitLoad()
 	return nil
+}
+
+func submitGuestJoin(page *rod.Page) error {
+	p := page.Timeout(10 * time.Second)
+	res, err := p.Eval(`() => {
+		const btn = document.querySelector('#room-join')
+			|| document.querySelector('button.join-form[type="submit"]')
+			|| document.querySelector('form button[type="submit"]');
+		if (btn) {
+			btn.removeAttribute('disabled');
+			btn.click();
+			return 'btn:' + (btn.id || btn.className || 'submit');
+		}
+		const form = document.querySelector('form');
+		if (form) {
+			if (typeof form.requestSubmit === 'function') form.requestSubmit();
+			else form.submit();
+			return 'form';
+		}
+		return '';
+	}`)
+	if err == nil && res != nil {
+		if how := strings.TrimSpace(res.Value.Str()); how != "" {
+			log.Printf("bbb: join submitted via js (%s)", how)
+			return nil
+		}
+	}
+	if clickByText(p, joinNameRE) {
+		log.Printf("bbb: join clicked by text fallback")
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("join submit: %w", err)
+	}
+	return fmt.Errorf("join submit: кнопка/форма не найдены")
+}
+
+func waitJoined(page *rod.Page, d time.Duration) error {
+	if page == nil {
+		return fmt.Errorf("нет вкладки")
+	}
+	deadline := time.Now().Add(d)
+	lastLog := time.Time{}
+	for time.Now().Before(deadline) {
+		p := page.Timeout(3 * time.Second)
+		if hasAny(p, lobbySels) {
+			log.Printf("bbb: waitJoined hit lobby sel | %s", pageSnap(page))
+			return nil
+		}
+		if sel := firstHit(p, meetingSels); sel != "" {
+			log.Printf("bbb: waitJoined hit meeting sel=%s | %s", sel, pageSnap(page))
+			return nil
+		}
+		html, err := p.HTML()
+		if err == nil {
+			low := strings.ToLower(html)
+			for _, m := range []string{
+				"waiting for a moderator",
+				"waiting for the moderator",
+				"you'll join when",
+				"guest lobby",
+				"ожидайте",
+			} {
+				if strings.Contains(low, m) {
+					log.Printf("bbb: waitJoined hit lobby text=%q | %s", m, pageSnap(page))
+					return nil
+				}
+			}
+		}
+		if time.Since(lastLog) >= 5*time.Second {
+			log.Printf("bbb: waitJoined… left=%s | %s | hits=%s",
+				time.Until(deadline).Round(time.Second), pageSnap(page), joinHits(page))
+			lastLog = time.Now()
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	return fmt.Errorf("нет лобби/комнаты после формы гостя")
+}
+
+func pageSnap(page *rod.Page) string {
+	if page == nil {
+		return "page=nil"
+	}
+	p := page.Timeout(3 * time.Second)
+	url := "?"
+	title := "-"
+	body := "-"
+	if t, err := p.Eval(`() => ({
+		url: location.href || '',
+		title: document.title || '',
+		body: ((document.body && (document.body.innerText || document.body.textContent) || '').replace(/\s+/g, ' ').trim()).slice(0, 220)
+	})`); err == nil && t != nil {
+		m := t.Value.Map()
+		if v, ok := m["url"]; ok {
+			url = v.Str()
+		}
+		if v, ok := m["title"]; ok {
+			if s := strings.TrimSpace(v.Str()); s != "" {
+				title = s
+			}
+		}
+		if v, ok := m["body"]; ok {
+			if s := strings.TrimSpace(v.Str()); s != "" {
+				body = s
+			}
+		}
+	}
+	return fmt.Sprintf("url=%s title=%q body=%q", url, title, body)
+}
+
+func guestFormHits(page *rod.Page) string {
+	sels := []string{
+		"input.join-form[type='text']",
+		"input[name*='join_name']",
+		"input[id*='join_name']",
+		"#join_name",
+		"#room-join",
+		"button.join-form[type='submit']",
+		"button[type='submit']",
+		"input[type='text']",
+		"form",
+	}
+	return selHits(page, sels)
+}
+
+func joinHits(page *rod.Page) string {
+	sels := append(append([]string{}, lobbySels...), meetingSels...)
+	sels = append(sels,
+		"input.join-form[type='text']",
+		"#room-join",
+		"[data-test='audioModal']",
+		"[data-test='listeningButton']",
+		"button[aria-label*='Listen']",
+		"button[aria-label*='слушать']",
+	)
+	return selHits(page, sels)
+}
+
+func selHits(page *rod.Page, sels []string) string {
+	if page == nil {
+		return "-"
+	}
+	p := page.Timeout(2 * time.Second)
+	var hit []string
+	for _, sel := range sels {
+		if ok, _, err := p.Has(sel); err == nil && ok {
+			hit = append(hit, sel)
+		}
+	}
+	if len(hit) == 0 {
+		return "none"
+	}
+	return strings.Join(hit, ",")
+}
+
+func firstHit(page *rod.Page, sels []string) string {
+	if page == nil {
+		return ""
+	}
+	for _, sel := range sels {
+		if ok, _, err := page.Has(sel); err == nil && ok {
+			return sel
+		}
+	}
+	return ""
 }
 
 var listenOnlySels = []string{
@@ -339,15 +555,27 @@ var listenOnlySels = []string{
 	`button[aria-label='Только слушать']`,
 }
 
-var inMeetingSels = []string{
+var lobbySels = []string{
 	"[data-test='waitingUsers']",
 	"[data-test='waitingusers']",
-	"[data-test='userListItem']",
 }
+
+var meetingSels = []string{
+	"[data-test='userListItem']",
+	"[data-test='chatButton']",
+	"[data-test='publicChatTab']",
+	"[data-test='whiteboard']",
+	"[data-test='presentationInner']",
+	"[data-test='listenOnlyBtn']",
+	"[data-test='closeModalButton']",
+}
+
+// inMeetingSels: lobby OR meeting — used while waiting for audio UI.
+var inMeetingSels = append(append([]string{}, lobbySels...), meetingSels...)
 
 const (
 	listenOnlyRE = `(?i)listen\s*only|только\s*слушать`
-	joinNameRE   = `(?i)join|войти|подключ`
+	joinNameRE   = `(?i)join|войти|подключ|присоедин`
 	chatOpenRE   = `(?i)public chat|публичн.*чат|открыть чат`
 	helloText    = "Здравствуйте"
 )

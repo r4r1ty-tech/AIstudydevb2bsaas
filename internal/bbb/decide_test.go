@@ -58,6 +58,10 @@ func TestDryJoin(t *testing.T) {
 	if err != nil || lobby {
 		t.Fatalf("lobby: %v %v", lobby, err)
 	}
+	in, err := s.InMeeting(context.Background())
+	if err != nil || !in {
+		t.Fatalf("meeting: %v %v", in, err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
