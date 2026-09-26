@@ -75,7 +75,7 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 	}
 	abs := filepath.Join(w.recRoot(), pack.Dir)
 	seg := capture.SegmentPath(abs, time.Now().UnixNano())
-	rec, err := capture.Start(ctx, seg)
+	rec, err := startRecorder(ctx, seg)
 	if err != nil {
 		logx.Errorf("bbb", "ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"» не стартовала: "+err.Error())
@@ -386,11 +386,15 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) {
 	w.publishPack(ctx, p)
 }
 
+// githubAPI overrides the GitHub API base in tests; "" means the real one.
+var githubAPI = ""
+
 func (w *Worker) publisher() *publish.GitHub {
 	if w == nil || w.Cfg == nil || w.Cfg.GitHubToken == "" {
 		return nil
 	}
 	return &publish.GitHub{
+		API:    githubAPI,
 		Token:  w.Cfg.GitHubToken,
 		Owner:  w.Cfg.GitHubOwner,
 		Repo:   w.Cfg.GitHubRepo,

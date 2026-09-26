@@ -43,7 +43,23 @@ func (w *Worker) lectureUsers(lesson model.Lesson, now time.Time) []model.User {
 	return out
 }
 
-func (w *Worker) startSpotter(ctx context.Context, rec *capture.Rec, lesson model.Lesson, users []model.User) {
+// recorder is a running capture: 16 kHz PCM for the spotter, Stop to finish.
+type recorder interface {
+	io.Reader
+	Stop() error
+}
+
+// startRecorder starts ffmpeg on ssau_rec.monitor; tests swap it so they
+// never touch the PulseAudio of the machine they run on.
+var startRecorder = func(ctx context.Context, path string) (recorder, error) {
+	r, err := capture.Start(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (w *Worker) startSpotter(ctx context.Context, rec recorder, lesson model.Lesson, users []model.User) {
 	if rec == nil {
 		logx.Debugf("bbb", "startSpotter: no rec, skip")
 		return

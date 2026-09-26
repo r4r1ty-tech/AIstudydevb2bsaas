@@ -346,7 +346,7 @@ func (w *Worker) attachTestRecorder(ctx context.Context, sess Session) Session {
 	logx.Debugf("bbb", "attachTestRecorder: enter")
 	dir := filepath.Join(w.recRoot(), "test")
 	seg := capture.SegmentPath(dir, time.Now().UnixNano())
-	rec, err := capture.Start(ctx, seg)
+	rec, err := startRecorder(ctx, seg)
 	if err != nil {
 		logx.Warnf("bbb", "test ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "тест: звук не стартанул — "+err.Error())
