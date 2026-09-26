@@ -3,7 +3,7 @@ package bbb
 import (
 	"context"
 	"fmt"
-	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +17,16 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/capture"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/proxyrelay"
 )
 
 type ChromeJoiner struct {
 	Bin         string
 	UserDataDir string
+
+	// Proxies, if set, gives every tab its own upstream via a browser context.
+	Proxies *proxyrelay.Pool
 
 	mu          sync.Mutex
 	browser     *rod.Browser
@@ -31,28 +36,39 @@ type ChromeJoiner struct {
 }
 
 func NewChromeJoiner(bin string) *ChromeJoiner {
+	logx.Debugf("bbb", "NewChromeJoiner: bin=%q", bin)
 	if bin == "" {
 		bin = FindChrome("")
 	}
-	return &ChromeJoiner{Bin: bin, UserDataDir: chromeUserDir()}
+	dir := chromeUserDir()
+	logx.Debugf("bbb", "NewChromeJoiner: bin=%q userDataDir=%q", bin, dir)
+	return &ChromeJoiner{Bin: bin, UserDataDir: dir}
 }
 
 func chromeUserDir() string {
 	if d := strings.TrimSpace(os.Getenv("CHROME_USER_DATA_DIR")); d != "" {
+		logx.Debugf("bbb", "chromeUserDir: env=%q", d)
 		return d
 	}
-	return filepath.Join(os.TempDir(), "ssau-bbb-chrome")
+	d := filepath.Join(os.TempDir(), "ssau-bbb-chrome")
+	logx.Debugf("bbb", "chromeUserDir: default=%q", d)
+	return d
 }
 
 func (c *ChromeJoiner) Close() error {
+	logx.Debugf("bbb", "ChromeJoiner.Close: browser=%v recBrowser=%v", c.browser != nil, c.recBrowser != nil)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.browser != nil {
-		_ = c.browser.Close()
+		if err := c.browser.Close(); err != nil {
+			logx.Debugf("bbb", "ChromeJoiner.Close: browser close: %v", err)
+		}
 		c.browser = nil
 	}
 	if c.recBrowser != nil {
-		_ = c.recBrowser.Close()
+		if err := c.recBrowser.Close(); err != nil {
+			logx.Debugf("bbb", "ChromeJoiner.Close: recBrowser close: %v", err)
+		}
 		c.recBrowser = nil
 	}
 	if c.launcher != nil {
@@ -63,20 +79,33 @@ func (c *ChromeJoiner) Close() error {
 		c.recLauncher.Kill()
 		c.recLauncher = nil
 	}
+	if c.Proxies != nil {
+		if err := c.Proxies.Close(); err != nil {
+			logx.Debugf("bbb", "ChromeJoiner.Close: proxies close: %v", err)
+		}
+		c.Proxies = nil
+	}
+	logx.Debugf("bbb", "ChromeJoiner.Close: done")
 	return nil
 }
 
 func (c *ChromeJoiner) ensureBrowser() (*rod.Browser, error) {
+	logx.Debugf("bbb", "ensureBrowser: quality=false")
 	return c.ensure(false)
 }
 
-func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
+// quality=false — минимальный браузер для зрителей (крошечное окно, без звука).
+// quality=true — окно побольше: запись и снятие слайдов.
+func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
+	logx.Debugf("bbb", "ensure: quality=%v", quality)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if record && c.recBrowser != nil {
+	if quality && c.recBrowser != nil {
+		logx.Debugf("bbb", "ensure: reuse recBrowser")
 		return c.recBrowser, nil
 	}
-	if !record && c.browser != nil {
+	if !quality && c.browser != nil {
+		logx.Debugf("bbb", "ensure: reuse browser")
 		return c.browser, nil
 	}
 	bin := c.Bin
@@ -84,17 +113,21 @@ func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 		bin = FindChrome("")
 	}
 	if bin == "" {
-		return nil, fmt.Errorf("chromium не найден — apt install chromium или CHROME_BIN")
+		err := fmt.Errorf("chromium не найден — apt install chromium или CHROME_BIN")
+		logx.Errorf("bbb", "ensure: %v", err)
+		return nil, err
 	}
 
 	dir := c.UserDataDir
 	if dir == "" {
 		dir = chromeUserDir()
 	}
-	if record {
+	if quality {
 		dir = dir + "-rec"
 	}
-	_ = os.MkdirAll(dir, 0o755)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logx.Debugf("bbb", "ensure: mkdir %s: %v", dir, err)
+	}
 
 	l := launcher.New().
 		Bin(bin).
@@ -105,116 +138,109 @@ func (c *ChromeJoiner) ensure(record bool) (*rod.Browser, error) {
 		Set(flags.Flag("disable-gpu")).
 		Set(flags.Flag("disable-dev-shm-usage")).
 		Set(flags.Flag("disable-crash-reporter")).
+		Set(flags.Flag("disable-breakpad")).
+		Set(flags.Flag("disable-background-networking")).
+		Set(flags.Flag("disable-sync")).
+		Set(flags.Flag("disable-default-apps")).
+		Set(flags.Flag("disable-component-extensions-with-background-pages")).
 		Set(flags.Flag("no-first-run")).
 		Set(flags.Flag("no-default-browser-check")).
 		Set(flags.Flag("autoplay-policy"), "no-user-gesture-required").
-		Set(flags.Flag("use-fake-ui-for-media-stream"))
+		Set(flags.Flag("use-fake-ui-for-media-stream")).
+		Set(flags.Flag("process-per-site")).
+		Set(flags.Flag("renderer-process-limit"), "2").
+		Set(flags.Flag("js-flags"), "--max-old-space-size=128").
+		Set(flags.Flag("disk-cache-size"), "1").
+		Set(flags.Flag("media-cache-size"), "1").
+		Set(flags.Flag("disable-features"), "AudioServiceOutOfProcess")
 
-	if record {
-		l = l.Env(capture.PulseEnv()...)
+	if quality {
+		// Sink должен существовать до старта браузера, иначе Chromium создаст
+		// поток на дефолтном устройстве, а не на ssau_rec.monitor.
+		if err := capture.EnsureSink(); err != nil {
+			logx.Warnf("bbb", "ensure: ensure sink: %v", err)
+		}
+		if err := capture.EnsureDefaultSink(); err != nil {
+			logx.Warnf("bbb", "ensure: default sink: %v", err)
+		}
+		// Одна вкладка, чей звук идёт в null-sink на запись и вейкворды.
+		l = l.Env(capture.PulseEnv()...).
+			Set(flags.Flag("window-size"), "1280,800")
 	} else {
-		l = l.Set(flags.Flag("use-fake-device-for-media-stream"))
+		// Зрители: крошечное окно, фейковый микрофон, без вывода звука.
+		// Не дублируют запись и жрут минимум CPU/RAM.
+		l = l.Set(flags.Flag("use-fake-device-for-media-stream")).
+			Set(flags.Flag("mute-audio")).
+			Set(flags.Flag("window-size"), "320,240")
 	}
 
 	u, err := l.Launch()
 	if err != nil {
+		logx.Errorf("bbb", "ensure: launch bin=%s quality=%v: %v", bin, quality, err)
 		return nil, fmt.Errorf("chrome launch: %w", err)
 	}
 	b := rod.New().ControlURL(u).NoDefaultDevice()
 	if err := b.Connect(); err != nil {
 		l.Kill()
+		logx.Errorf("bbb", "ensure: connect %s quality=%v: %v", u, quality, err)
 		return nil, fmt.Errorf("chrome connect: %w", err)
 	}
-	if record {
+	if quality {
 		c.recLauncher = l
 		c.recBrowser = b
-		log.Printf("bbb: chromium-rec %s", bin)
+		logx.Infof("bbb", "chromium-rec %s", bin)
+		capture.LogRoute("bbb", "chrome-rec-launched")
 	} else {
 		c.launcher = l
 		c.browser = b
-		log.Printf("bbb: chromium %s", bin)
+		logx.Infof("bbb", "chromium %s", bin)
 	}
+	logx.Debugf("bbb", "ensure: ready quality=%v dir=%s", quality, dir)
 	return b, nil
 }
 
 type chromeSession struct {
-	page      *rod.Page
-	root      *rod.Browser
-	contextID proto.BrowserBrowserContextID
-	bridge    *socksBridge
+	page *rod.Page
+
+	ctxBrowser *rod.Browser
 
 	greetMu sync.Mutex
 	greeted bool
 }
 
-func (s *chromeSession) InLobby(ctx context.Context) (bool, error) {
-	if s == nil || s.page == nil {
-		return false, nil
-	}
-	p := s.page.Context(ctx)
-	html, err := p.Timeout(5 * time.Second).HTML()
-	if err != nil {
-		return false, err
-	}
-	low := strings.ToLower(html)
-	for _, m := range []string{
-		"please wait",
-		"ожидайте",
-		"waiting for a moderator",
-		"waiting for the moderator",
-		"you'll join when",
-		"guest lobby",
-		`data-test="waitingusers"`,
-		"waitingusers",
-	} {
-		if strings.Contains(low, m) {
-			return true, nil
-		}
-	}
-	ok, _, err := p.Timeout(2 * time.Second).Has("[data-test='waitingUsers']")
-	if err != nil {
-		return false, nil
-	}
-	return ok, nil
-}
-
-func (s *chromeSession) InMeeting(ctx context.Context) (bool, error) {
-	if s == nil || s.page == nil {
-		return false, nil
-	}
-	p := s.page.Context(ctx).Timeout(3 * time.Second)
-	if hasAny(p, meetingSels) {
-		return true, nil
-	}
-	return false, nil
-}
-
 func (s *chromeSession) Greet(ctx context.Context) error {
 	if s == nil || s.page == nil {
+		logx.Debugf("bbb", "chromeSession.Greet: no page, skip")
 		return nil
 	}
+	logx.Debugf("bbb", "chromeSession.Greet: enter")
 	s.greetMu.Lock()
 	done := s.greeted
 	s.greetMu.Unlock()
 	if done {
+		logx.Debugf("bbb", "chromeSession.Greet: already greeted")
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lobby, err := s.InLobby(ctx)
+	st, err := s.seat(ctx)
 	if err != nil {
-		return err
+		logx.Errorf("bbb", "chromeSession.Greet: seat: %v", err)
+		return fmt.Errorf("chromeSession.Greet: seat: %w", err)
 	}
-	if lobby {
+	if st != seatRoom {
+		logx.Debugf("bbb", "chromeSession.Greet: seat=%s, skip", st)
 		return nil
 	}
 	if err := sendHello(s.page.Context(ctx)); err != nil {
-		return err
+		logx.Errorf("bbb", "chromeSession.Greet: hello: %v", err)
+		return fmt.Errorf("chromeSession.Greet: hello: %w", err)
 	}
 	s.greetMu.Lock()
 	s.greeted = true
 	s.greetMu.Unlock()
+	logx.Infof("bbb", "greeted page=%s", pageHint(s.page))
 	return nil
 }
 
@@ -222,140 +248,158 @@ func (s *chromeSession) Close() error {
 	if s == nil {
 		return nil
 	}
+	logx.Debugf("bbb", "chromeSession.Close: page=%v ctx=%v", s.page != nil, s.ctxBrowser != nil)
 	if s.page != nil {
-		_ = s.page.Close()
+		if err := s.page.Close(); err != nil {
+			logx.Debugf("bbb", "chromeSession.Close: page close: %v", err)
+		}
 	}
-	if s.root != nil && s.contextID != "" {
-		_ = proto.TargetDisposeBrowserContext{BrowserContextID: s.contextID}.Call(s.root)
-	}
-	if s.bridge != nil {
-		_ = s.bridge.Close()
+	if s.ctxBrowser != nil {
+		if err := s.ctxBrowser.Close(); err != nil {
+			logx.Debugf("bbb", "chromeSession.Close: context dispose: %v", err)
+		} else {
+			logx.Debugf("bbb", "chromeSession.Close: context disposed")
+		}
 	}
 	return nil
 }
 
+// maxJoinAttempts is how many different proxies one join may try before giving up.
+const maxJoinAttempts = 3
+
+// withListenOnlyAudio asks the BBB client to auto-join audio in listen-only
+// mode, so the recording tab does not depend on clicking the audio modal.
+func withListenOnlyAudio(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" {
+		logx.Debugf("bbb", "withListenOnlyAudio: keep raw url err=%v", err)
+		return raw
+	}
+	q := u.Query()
+	q.Set("userdata-bbb_auto_join_audio", "true")
+	q.Set("userdata-bbb_force_listen_only", "true")
+	q.Set("userdata-bbb_listen_only_mode", "true")
+	q.Set("userdata-bbb_skip_check_audio", "true")
+	u.RawQuery = q.Encode()
+	logx.Infof("bbb", "withListenOnlyAudio: url=%s", redactURL(u.String()))
+	return u.String()
+}
+
 func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
+	logx.Debugf("bbb", "ChromeJoiner.Join: role=%s fio=%q url=%s", req.Role, req.FIO, redactURL(req.URL))
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	proxyHint := "direct"
-	if strings.TrimSpace(req.SOCKS5) != "" {
-		proxyHint = "socks5"
-	}
-	log.Printf("bbb: join start url=%s name=%q role=%d proxy=%s", req.URL, req.FIO, req.Role, proxyHint)
-
-	root, err := c.ensure(req.Role == RoleRecord)
+	root, err := c.ensure(req.Role != RolePresence)
 	if err != nil {
-		return nil, err
+		logx.Errorf("bbb", "ChromeJoiner.Join: ensure: %v", err)
+		return nil, fmt.Errorf("ChromeJoiner.Join: ensure: %w", err)
 	}
 
-	bridge, err := startSOCKSBridge(req.SOCKS5)
-	if err != nil {
-		return nil, err
-	}
-	proxyURL, err := chromeProxyURL(req.SOCKS5, bridge)
-	if err != nil {
-		if bridge != nil {
-			_ = bridge.Close()
+	attempts := 1
+	if c.Proxies.Len() > 0 {
+		attempts = maxJoinAttempts
+		if c.Proxies.Len() < attempts {
+			attempts = c.Proxies.Len()
 		}
-		return nil, err
 	}
 
-	create := proto.TargetCreateBrowserContext{}
-	if proxyURL != "" {
-		create.ProxyServer = proxyURL
-	}
-	res, err := create.Call(root)
-	if err != nil {
-		if bridge != nil {
-			_ = bridge.Close()
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		var slot *proxyrelay.Slot
+		if c.Proxies.Len() > 0 {
+			s, perr := c.Proxies.Next()
+			if perr != nil {
+				logx.Warnf("bbb", "ChromeJoiner.Join: proxy: %v — иду напрямую", perr)
+			}
+			slot = s
 		}
-		return nil, fmt.Errorf("browser context: %w", err)
+		sess, err := c.attemptJoin(ctx, root, req, slot)
+		if err == nil {
+			slot.OK()
+			return sess, nil
+		}
+		lastErr = err
+		if slot == nil {
+			// direct attempt failed, or every proxy is dead — не повторяем
+			logx.Errorf("bbb", "ChromeJoiner.Join: attempt=%d direct failed: %v", attempt, err)
+			return nil, err
+		}
+		slot.Fail()
+		logx.Warnf("bbb", "ChromeJoiner.Join: attempt=%d proxy=%s failed: %v — меняю прокси", attempt, slot.Redacted(), err)
 	}
+	logx.Errorf("bbb", "ChromeJoiner.Join: все %d попытки провалились: %v", attempts, lastErr)
+	return nil, lastErr
+}
 
-	incog := *root
-	incog.BrowserContextID = res.BrowserContextID
+// attemptJoin performs one join through an optional proxy slot, in its own
+// browser context so the proxy applies to this tab only.
+func (c *ChromeJoiner) attemptJoin(ctx context.Context, root *rod.Browser, req JoinReq, slot *proxyrelay.Slot) (Session, error) {
+	browser := root
+	var ctxBrowser *rod.Browser
+	proxyLabel := "direct"
+	if slot != nil {
+		res, cerr := proto.TargetCreateBrowserContext{ProxyServer: slot.LocalURL()}.Call(root)
+		if cerr != nil {
+			logx.Warnf("bbb", "attemptJoin: proxy context %s: %v — иду напрямую", slot.Redacted(), cerr)
+		} else {
+			sub := *root
+			sub.BrowserContextID = res.BrowserContextID
+			browser = &sub
+			ctxBrowser = &sub
+			proxyLabel = slot.Redacted()
+		}
+	}
+	logx.Infof("bbb", "attemptJoin: proxy=%s url=%s role=%s", proxyLabel, redactURL(req.URL), req.Role)
 
-	page, err := incog.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	page, err := browser.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {
-		_ = proto.TargetDisposeBrowserContext{BrowserContextID: res.BrowserContextID}.Call(root)
-		if bridge != nil {
-			_ = bridge.Close()
+		logx.Errorf("bbb", "attemptJoin: tab: %v", err)
+		if ctxBrowser != nil {
+			if derr := ctxBrowser.Close(); derr != nil {
+				logx.Debugf("bbb", "attemptJoin: dispose after tab fail: %v", derr)
+			}
 		}
 		return nil, fmt.Errorf("tab: %w", err)
 	}
 	page = page.Context(ctx)
 
-	sess := &chromeSession{
-		page:      page,
-		root:      root,
-		contextID: res.BrowserContextID,
-		bridge:    bridge,
-	}
+	sess := &chromeSession{page: page, ctxBrowser: ctxBrowser}
 
-	if err := page.Timeout(30 * time.Second).Navigate(req.URL); err != nil {
-		log.Printf("bbb: navigate fail: %v | %s", err, pageSnap(page))
-		_ = sess.Close()
+	target := req.URL
+	if req.Role == RoleRecord {
+		target = withListenOnlyAudio(req.URL)
+	}
+	if err := page.Timeout(30 * time.Second).Navigate(target); err != nil {
+		if cerr := sess.Close(); cerr != nil {
+			logx.Debugf("bbb", "attemptJoin: cleanup close: %v", cerr)
+		}
+		logx.Errorf("bbb", "attemptJoin: navigate %s: %v", redactURL(target), err)
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
 	if err := page.Timeout(15 * time.Second).WaitLoad(); err != nil {
-		log.Printf("bbb: waitload: %v | %s", err, pageSnap(page))
-	} else {
-		log.Printf("bbb: navigated | %s", pageSnap(page))
+		logx.Debugf("bbb", "attemptJoin: waitload: %v", err)
 	}
 
-	if err := fillGuestName(page, req.FIO); err != nil {
-		log.Printf("bbb: guest form fail: %v | %s | hits=%s", err, pageSnap(page), guestFormHits(page))
-		_ = sess.Close()
-		return nil, fmt.Errorf("guest form: %w", err)
-	}
-	log.Printf("bbb: guest form ok name=%q | %s", req.FIO, pageSnap(page))
-
-	if err := waitJoined(page, 45*time.Second); err != nil {
-		log.Printf("bbb: waitJoined fail: %v | %s | hits=%s", err, pageSnap(page), joinHits(page))
-		_ = sess.Close()
-		return nil, err
-	}
-	log.Printf("bbb: waitJoined ok | %s | hits=%s", pageSnap(page), joinHits(page))
-
-	if lobby, lerr := sess.InLobby(ctx); lerr != nil {
-		log.Printf("bbb: InLobby err: %v", lerr)
-	} else if lobby {
-		log.Printf("bbb: in lobby | %s", pageSnap(page))
-		return sess, nil
-	}
-	if req.Role == RolePresence {
-		if err := dismissAudio(page); err != nil {
-			log.Printf("bbb: skip audio: %v | %s | hits=%s", err, pageSnap(page), joinHits(page))
-		} else {
-			log.Printf("bbb: audio dismissed/skipped | %s", pageSnap(page))
+	if err := sess.waitSeated(ctx, req); err != nil {
+		if cerr := sess.Close(); cerr != nil {
+			logx.Debugf("bbb", "attemptJoin: cleanup close: %v", cerr)
 		}
-	} else if err := clickListenOnly(page); err != nil {
-		log.Printf("bbb: listen-only: %v | %s | hits=%s", err, pageSnap(page), joinHits(page))
-	} else {
-		log.Printf("bbb: listen-only ok | %s", pageSnap(page))
+		logx.Errorf("bbb", "attemptJoin: waitSeated: %v", err)
+		return nil, fmt.Errorf("ChromeJoiner.Join: waitSeated: %w", err)
 	}
-	if ok, merr := sess.InMeeting(ctx); merr != nil {
-		log.Printf("bbb: InMeeting err: %v", merr)
-	} else if ok {
-		log.Printf("bbb: in meeting | %s", pageSnap(page))
-		return sess, nil
+	st, err := sess.seat(ctx)
+	if err != nil {
+		logx.Debugf("bbb", "attemptJoin: seat probe: %v", err)
 	}
-	if lobby, _ := sess.InLobby(ctx); lobby {
-		log.Printf("bbb: lobby after audio | %s", pageSnap(page))
-		return sess, nil
-	}
-	log.Printf("bbb: not in room after join | %s | hits=%s", pageSnap(page), joinHits(page))
-	_ = sess.Close()
-	return nil, fmt.Errorf("не в комнате после захода")
+	logx.Infof("bbb", "seat=%s proxy=%s %s", st, proxyLabel, pageHint(page))
+	return sess, nil
 }
 
 func fillGuestName(page *rod.Page, fio string) error {
-	p := page.Timeout(20 * time.Second)
+	logx.Debugf("bbb", "fillGuestName: fio=%q", fio)
+	p := page.Timeout(15 * time.Second)
 	el, err := p.Race().
-		Element("input.join-form[type='text']").
-		Element("input[name*='join_name']").
-		Element("input[id*='join_name']").
 		Element("#join_name").
 		Element("#join-name").
 		Element("input[name='join_name']").
@@ -364,187 +408,42 @@ func fillGuestName(page *rod.Page, fio string) error {
 		Element("input[id*='name'][type='text']").
 		Do()
 	if err != nil {
-		return err
+		logx.Errorf("bbb", "fillGuestName: name field: %v", err)
+		return fmt.Errorf("fillGuestName: name field: %w", err)
 	}
-	log.Printf("bbb: guest name field found")
-	_ = el.SelectAllText()
+	if err := el.SelectAllText(); err != nil {
+		logx.Debugf("bbb", "fillGuestName: select all: %v", err)
+	}
 	if err := el.Input(fio); err != nil {
-		return fmt.Errorf("input name: %w", err)
+		logx.Errorf("bbb", "fillGuestName: input: %v", err)
+		return fmt.Errorf("fillGuestName: input: %w", err)
 	}
-	// Prefer JS submit: rod mouse Click often dies with "context deadline exceeded"
-	// on Greenlight (#room-join present but not stably actionable under CDP).
-	if err := submitGuestJoin(page); err != nil {
-		return err
-	}
-	if err := page.Timeout(20 * time.Second).WaitLoad(); err != nil {
-		log.Printf("bbb: post-join waitload: %v", err)
-	}
-	return nil
-}
-
-func submitGuestJoin(page *rod.Page) error {
-	p := page.Timeout(10 * time.Second)
-	res, err := p.Eval(`() => {
-		const btn = document.querySelector('#room-join')
-			|| document.querySelector('button.join-form[type="submit"]')
-			|| document.querySelector('form button[type="submit"]');
-		if (btn) {
-			btn.removeAttribute('disabled');
-			btn.click();
-			return 'btn:' + (btn.id || btn.className || 'submit');
-		}
-		const form = document.querySelector('form');
-		if (form) {
-			if (typeof form.requestSubmit === 'function') form.requestSubmit();
-			else form.submit();
-			return 'form';
-		}
-		return '';
-	}`)
-	if err == nil && res != nil {
-		if how := strings.TrimSpace(res.Value.Str()); how != "" {
-			log.Printf("bbb: join submitted via js (%s)", how)
-			return nil
+	if ok, box, err := page.Has("input[type='checkbox']"); err != nil {
+		logx.Debugf("bbb", "fillGuestName: checkbox has: %v", err)
+	} else if ok && box != nil {
+		if err := box.Click(proto.InputMouseButtonLeft, 1); err != nil {
+			logx.Debugf("bbb", "fillGuestName: checkbox click: %v", err)
 		}
 	}
-	if clickByText(p, joinNameRE) {
-		log.Printf("bbb: join clicked by text fallback")
-		return nil
-	}
+	btn, err := page.Timeout(8 * time.Second).Race().
+		Element("button[type='submit']").
+		Element("[data-test='joinButton']").
+		Element("[data-test='sessionJoinButton']").
+		Do()
 	if err != nil {
-		return fmt.Errorf("join submit: %w", err)
-	}
-	return fmt.Errorf("join submit: кнопка/форма не найдены")
-}
-
-func waitJoined(page *rod.Page, d time.Duration) error {
-	if page == nil {
-		return fmt.Errorf("нет вкладки")
-	}
-	deadline := time.Now().Add(d)
-	lastLog := time.Time{}
-	for time.Now().Before(deadline) {
-		p := page.Timeout(3 * time.Second)
-		if hasAny(p, lobbySels) {
-			log.Printf("bbb: waitJoined hit lobby sel | %s", pageSnap(page))
-			return nil
+		if !clickByText(page.Timeout(4*time.Second), joinNameRE) {
+			logx.Errorf("bbb", "fillGuestName: join button: %v", err)
+			return fmt.Errorf("fillGuestName: join button: %w", err)
 		}
-		if sel := firstHit(p, meetingSels); sel != "" {
-			log.Printf("bbb: waitJoined hit meeting sel=%s | %s", sel, pageSnap(page))
-			return nil
-		}
-		html, err := p.HTML()
-		if err == nil {
-			low := strings.ToLower(html)
-			for _, m := range []string{
-				"waiting for a moderator",
-				"waiting for the moderator",
-				"you'll join when",
-				"guest lobby",
-				"ожидайте",
-			} {
-				if strings.Contains(low, m) {
-					log.Printf("bbb: waitJoined hit lobby text=%q | %s", m, pageSnap(page))
-					return nil
-				}
-			}
-		}
-		if time.Since(lastLog) >= 5*time.Second {
-			log.Printf("bbb: waitJoined… left=%s | %s | hits=%s",
-				time.Until(deadline).Round(time.Second), pageSnap(page), joinHits(page))
-			lastLog = time.Now()
-		}
-		time.Sleep(400 * time.Millisecond)
+	} else if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		logx.Errorf("bbb", "fillGuestName: join click: %v", err)
+		return fmt.Errorf("fillGuestName: join click: %w", err)
 	}
-	return fmt.Errorf("нет лобби/комнаты после формы гостя")
-}
-
-func pageSnap(page *rod.Page) string {
-	if page == nil {
-		return "page=nil"
+	if err := page.Timeout(8 * time.Second).WaitLoad(); err != nil {
+		logx.Debugf("bbb", "fillGuestName: waitload: %v", err)
 	}
-	p := page.Timeout(3 * time.Second)
-	url := "?"
-	title := "-"
-	body := "-"
-	if t, err := p.Eval(`() => ({
-		url: location.href || '',
-		title: document.title || '',
-		body: ((document.body && (document.body.innerText || document.body.textContent) || '').replace(/\s+/g, ' ').trim()).slice(0, 220)
-	})`); err == nil && t != nil {
-		m := t.Value.Map()
-		if v, ok := m["url"]; ok {
-			url = v.Str()
-		}
-		if v, ok := m["title"]; ok {
-			if s := strings.TrimSpace(v.Str()); s != "" {
-				title = s
-			}
-		}
-		if v, ok := m["body"]; ok {
-			if s := strings.TrimSpace(v.Str()); s != "" {
-				body = s
-			}
-		}
-	}
-	return fmt.Sprintf("url=%s title=%q body=%q", url, title, body)
-}
-
-func guestFormHits(page *rod.Page) string {
-	sels := []string{
-		"input.join-form[type='text']",
-		"input[name*='join_name']",
-		"input[id*='join_name']",
-		"#join_name",
-		"#room-join",
-		"button.join-form[type='submit']",
-		"button[type='submit']",
-		"input[type='text']",
-		"form",
-	}
-	return selHits(page, sels)
-}
-
-func joinHits(page *rod.Page) string {
-	sels := append(append([]string{}, lobbySels...), meetingSels...)
-	sels = append(sels,
-		"input.join-form[type='text']",
-		"#room-join",
-		"[data-test='audioModal']",
-		"[data-test='listeningButton']",
-		"button[aria-label*='Listen']",
-		"button[aria-label*='слушать']",
-	)
-	return selHits(page, sels)
-}
-
-func selHits(page *rod.Page, sels []string) string {
-	if page == nil {
-		return "-"
-	}
-	p := page.Timeout(2 * time.Second)
-	var hit []string
-	for _, sel := range sels {
-		if ok, _, err := p.Has(sel); err == nil && ok {
-			hit = append(hit, sel)
-		}
-	}
-	if len(hit) == 0 {
-		return "none"
-	}
-	return strings.Join(hit, ",")
-}
-
-func firstHit(page *rod.Page, sels []string) string {
-	if page == nil {
-		return ""
-	}
-	for _, sel := range sels {
-		if ok, _, err := page.Has(sel); err == nil && ok {
-			return sel
-		}
-	}
-	return ""
+	logx.Debugf("bbb", "fillGuestName: done")
+	return nil
 }
 
 var listenOnlySels = []string{
@@ -555,27 +454,11 @@ var listenOnlySels = []string{
 	`button[aria-label='Только слушать']`,
 }
 
-var lobbySels = []string{
-	"[data-test='waitingUsers']",
-	"[data-test='waitingusers']",
-}
-
-var meetingSels = []string{
-	"[data-test='userListItem']",
-	"[data-test='chatButton']",
-	"[data-test='publicChatTab']",
-	"[data-test='whiteboard']",
-	"[data-test='presentationInner']",
-	"[data-test='listenOnlyBtn']",
-	"[data-test='closeModalButton']",
-}
-
-// inMeetingSels: lobby OR meeting — used while waiting for audio UI.
-var inMeetingSels = append(append([]string{}, lobbySels...), meetingSels...)
+var inMeetingSels = roomSels
 
 const (
 	listenOnlyRE = `(?i)listen\s*only|только\s*слушать`
-	joinNameRE   = `(?i)join|войти|подключ|присоедин`
+	joinNameRE   = `(?i)join|войти|подключ`
 	chatOpenRE   = `(?i)public chat|публичн.*чат|открыть чат`
 	helloText    = "Здравствуйте"
 )
@@ -606,39 +489,57 @@ var chatSendSels = []string{
 }
 
 func sendHello(page *rod.Page) error {
+	logx.Debugf("bbb", "sendHello: enter")
 	var last error
 	for i := 0; i < 8; i++ {
 		p := page.Timeout(2 * time.Second)
-		_ = clickFirst(p, chatOpenSels)
-		_ = clickByText(p, chatOpenRE)
+		if !clickFirst(p, chatOpenSels) {
+			logx.Debugf("bbb", "sendHello: attempt=%d no chat open button", i)
+		}
+		if !clickByText(p, chatOpenRE) {
+			logx.Debugf("bbb", "sendHello: attempt=%d no chat open text", i)
+		}
 		last = typeHello(p)
 		if last == nil {
+			logx.Debugf("bbb", "sendHello: sent on attempt=%d", i)
 			return nil
 		}
+		logx.Debugf("bbb", "sendHello: attempt=%d type: %v", i, last)
 		time.Sleep(400 * time.Millisecond)
 	}
 	if last == nil {
 		last = fmt.Errorf("поле чата не найдено")
 	}
-	return last
+	logx.Errorf("bbb", "sendHello: %v", last)
+	return fmt.Errorf("sendHello: %w", last)
 }
 
 func typeHello(page *rod.Page) error {
+	logx.Debugf("bbb", "typeHello: enter")
 	el, err := findFirst(page, chatInputSels)
 	if err != nil {
-		return err
+		logx.Errorf("bbb", "typeHello: input: %v", err)
+		return fmt.Errorf("typeHello: input: %w", err)
 	}
-	_ = el.Click(proto.InputMouseButtonLeft, 1)
-	_ = el.SelectAllText()
+	if err := el.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		logx.Debugf("bbb", "typeHello: click: %v", err)
+	}
+	if err := el.SelectAllText(); err != nil {
+		logx.Debugf("bbb", "typeHello: select: %v", err)
+	}
 	if err := el.Input(helloText); err != nil {
-		return err
+		logx.Errorf("bbb", "typeHello: input text: %v", err)
+		return fmt.Errorf("typeHello: input text: %w", err)
 	}
 	if clickFirst(page, chatSendSels) {
+		logx.Debugf("bbb", "typeHello: sent via button")
 		return nil
 	}
 	if err := el.Type(input.Enter); err != nil {
+		logx.Errorf("bbb", "typeHello: send: %v", err)
 		return fmt.Errorf("отправить: %w", err)
 	}
+	logx.Debugf("bbb", "typeHello: sent via enter")
 	return nil
 }
 
@@ -646,26 +547,33 @@ func findFirst(page *rod.Page, sels []string) (*rod.Element, error) {
 	for _, sel := range sels {
 		ok, el, err := page.Has(sel)
 		if err == nil && ok && el != nil {
+			logx.Debugf("bbb", "findFirst: matched %s", sel)
 			return el, nil
 		}
 	}
+	logx.Warnf("bbb", "findFirst: no chat field among %d selectors", len(sels))
 	return nil, fmt.Errorf("поле чата не найдено")
 }
 
 func clickListenOnly(page *rod.Page) error {
+	logx.Debugf("bbb", "clickListenOnly: enter")
 	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
 		p := page.Timeout(3 * time.Second)
 		if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
+			logx.Debugf("bbb", "clickListenOnly: clicked")
 			return nil
 		}
 		// Lobby / already in the roster: audio modal may never appear.
 		if hasAny(p, inMeetingSels) {
+			logx.Debugf("bbb", "clickListenOnly: in meeting already")
 			return nil
 		}
 		time.Sleep(400 * time.Millisecond)
 	}
-	return fmt.Errorf("кнопка «только слушать» не найдена")
+	err := fmt.Errorf("кнопка «только слушать» не найдена")
+	logx.Warnf("bbb", "clickListenOnly: %v", err)
+	return err
 }
 
 var closeAudioSels = []string{
@@ -677,18 +585,27 @@ var closeAudioSels = []string{
 }
 
 func dismissAudio(page *rod.Page) error {
+	logx.Debugf("bbb", "dismissAudio: enter")
 	deadline := time.Now().Add(12 * time.Second)
 	for time.Now().Before(deadline) {
 		p := page.Timeout(2 * time.Second)
 		if clickFirst(p, closeAudioSels) || clickByText(p, `(?i)close|закрыть|skip|пропуст`) {
+			logx.Debugf("bbb", "dismissAudio: closed")
 			return nil
 		}
 		if hasAny(p, inMeetingSels) {
+			logx.Debugf("bbb", "dismissAudio: in meeting already")
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	return clickListenOnly(page)
+	logx.Warnf("bbb", "dismissAudio: timeout, fallback listen-only")
+	err := clickListenOnly(page)
+	if err != nil {
+		logx.Errorf("bbb", "dismissAudio: %v", err)
+		return fmt.Errorf("dismissAudio: %w", err)
+	}
+	return nil
 }
 
 func hasAny(page *rod.Page, sels []string) bool {
@@ -707,15 +624,45 @@ func clickFirst(page *rod.Page, sels []string) bool {
 			continue
 		}
 		if err := el.Click(proto.InputMouseButtonLeft, 1); err == nil {
+			logx.Debugf("bbb", "clickFirst: clicked %s", sel)
 			return true
+		} else {
+			logx.Debugf("bbb", "clickFirst: click %s: %v", sel, err)
+			if clickJS(page, sel) {
+				logx.Debugf("bbb", "clickFirst: js-clicked %s", sel)
+				return true
+			}
 		}
 	}
+	logx.Debugf("bbb", "clickFirst: none of %d selectors clicked", len(sels))
 	return false
+}
+
+// clickJS clicks through the DOM directly, for elements rod deems unclickable
+// (e.g. a modal button that is present but not yet interactable).
+func clickJS(page *rod.Page, sel string) bool {
+	if page == nil || sel == "" {
+		return false
+	}
+	res, err := page.Timeout(3*time.Second).Eval(`(sel) => {
+		const n = document.querySelector(sel)
+		if (!n) return false
+		n.click()
+		return true
+	}`, sel)
+	if err != nil || res == nil {
+		logx.Debugf("bbb", "clickJS: %s: %v", sel, err)
+		return false
+	}
+	ok := res.Value.Bool()
+	logx.Debugf("bbb", "clickJS: %s -> %v", sel, ok)
+	return ok
 }
 
 func clickByText(page *rod.Page, goRE string) bool {
 	jsRE := jsRegexp(goRE)
 	if jsRE == "" {
+		logx.Debugf("bbb", "clickByText: empty regex")
 		return false
 	}
 	res, err := page.Eval(`(re) => {
@@ -728,9 +675,12 @@ func clickByText(page *rod.Page, goRE string) bool {
 		return false
 	}`, jsRE)
 	if err != nil || res == nil {
+		logx.Debugf("bbb", "clickByText: eval re=%q: %v", jsRE, err)
 		return false
 	}
-	return res.Value.Bool()
+	clicked := res.Value.Bool()
+	logx.Debugf("bbb", "clickByText: re=%q clicked=%v", jsRE, clicked)
+	return clicked
 }
 
 // jsRegexp strips Go/PCRE inline flags — rod Eval runs in the browser.
@@ -739,5 +689,6 @@ func jsRegexp(goRE string) string {
 	s = strings.TrimPrefix(s, "(?i)")
 	s = strings.TrimPrefix(s, "(?m)")
 	s = strings.TrimPrefix(s, "(?s)")
+	logx.Debugf("bbb", "jsRegexp: in=%q out=%q", goRE, s)
 	return s
 }

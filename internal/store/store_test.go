@@ -39,7 +39,6 @@ func TestOpenTempDBAndUserUpsert(t *testing.T) {
 		Subgroup:      1,
 		Enabled:       true,
 		DisabledUntil: &until,
-		SOCKS5:        "user:pass@127.0.0.1:1080",
 		Onboarded:     true,
 	}
 	if err := st.UpsertUser(u); err != nil {
@@ -86,9 +85,6 @@ func TestOpenTempDBAndUserUpsert(t *testing.T) {
 	if err := st.SetSubgroup(u.TelegramID, 2); err != nil {
 		t.Fatalf("SetSubgroup: %v", err)
 	}
-	if err := st.SetSOCKS5(u.TelegramID, "socks://x"); err != nil {
-		t.Fatalf("SetSOCKS5: %v", err)
-	}
 	if err := st.SetDisabledUntil(u.TelegramID, nil); err != nil {
 		t.Fatalf("SetDisabledUntil nil: %v", err)
 	}
@@ -96,7 +92,7 @@ func TestOpenTempDBAndUserUpsert(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("GetUser after setters: (%v, %v)", got, err)
 	}
-	if got.Enabled || got.FIO != "Сидоров Сидор" || got.Subgroup != 2 || got.SOCKS5 != "socks://x" || got.DisabledUntil != nil {
+	if got.Enabled || got.FIO != "Сидоров Сидор" || got.Subgroup != 2 || got.DisabledUntil != nil {
 		t.Fatalf("setters: %+v", got)
 	}
 
@@ -473,5 +469,23 @@ func TestLecturePacksNumbering(t *testing.T) {
 	ok, err := st.AnyRecording()
 	if err != nil || !ok {
 		t.Fatalf("recording flag: %v %v", ok, err)
+	}
+}
+
+func TestTestJoinAndAdmin(t *testing.T) {
+	st := openTemp(t)
+	got, err := st.GetTestJoin()
+	if err != nil || got.GuestName() != "тест" {
+		t.Fatalf("empty: %+v %v", got, err)
+	}
+	got.URL = "https://bbb.ssau.ru/b/abc"
+	got.Want = model.TestWantDummy
+	got.Status = model.TestJoining
+	if err := st.PutTestJoin(got); err != nil {
+		t.Fatal(err)
+	}
+	back, err := st.GetTestJoin()
+	if err != nil || back.URL != got.URL || back.Want != model.TestWantDummy || back.Name != "тест" {
+		t.Fatalf("roundtrip: %+v %v", back, err)
 	}
 }

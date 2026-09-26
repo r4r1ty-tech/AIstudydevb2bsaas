@@ -5,10 +5,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
 func Diff(old, new []model.Lesson) string {
+	logx.Debugf("rasp", "Diff: old=%d new=%d", len(old), len(new))
 	oldSet := make(map[string]model.Lesson, len(old))
 	newSet := make(map[string]model.Lesson, len(new))
 	for _, l := range old {
@@ -31,13 +33,18 @@ func Diff(old, new []model.Lesson) string {
 	}
 	sort.Strings(removed)
 	sort.Strings(added)
+	logx.Debugf("rasp", "Diff: removed=%d added=%d", len(removed), len(added))
 	lines := make([]string, 0, len(removed)+len(added))
 	lines = append(lines, removed...)
 	lines = append(lines, added...)
-	return strings.Join(lines, "\n")
+	result := strings.Join(lines, "\n")
+	logx.Debugf("rasp", "Diff: result_bytes=%d", len(result))
+	return result
 }
 
 func formatLessonLine(l model.Lesson) string {
+	logx.Debugf("rasp", "formatLessonLine: date=%s start=%s discipline=%q subgroup=%d online=%v",
+		l.Date, l.Start, l.Discipline, l.Subgroup, l.Online)
 	place := l.Place
 	if place == "" {
 		place = "-"
@@ -47,6 +54,11 @@ func formatLessonLine(l model.Lesson) string {
 }
 
 func mergeLessons(weeks ...[]model.Lesson) []model.Lesson {
+	total := 0
+	for _, w := range weeks {
+		total += len(w)
+	}
+	logx.Debugf("rasp", "mergeLessons: weeks=%d input=%d", len(weeks), total)
 	seen := make(map[string]struct{})
 	var out []model.Lesson
 	for _, week := range weeks {
@@ -59,5 +71,6 @@ func mergeLessons(weeks ...[]model.Lesson) []model.Lesson {
 			out = append(out, l)
 		}
 	}
+	logx.Debugf("rasp", "mergeLessons: deduped=%d", len(out))
 	return out
 }

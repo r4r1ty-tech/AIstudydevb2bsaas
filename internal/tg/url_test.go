@@ -114,3 +114,16 @@ func TestPickLessonForBBB(t *testing.T) {
 		t.Fatalf("want last intent id=3, got %#v", got)
 	}
 }
+
+func TestPickLessonForBBBPreferCurrent(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	live := model.Lesson{ID: 10, Discipline: "Сейчас", Begin: now.Add(-30 * time.Minute), Finish: now.Add(time.Hour), Online: true}
+	next := model.Lesson{ID: 11, Discipline: "Дальше", Begin: now.Add(20 * time.Minute), Finish: now.Add(2 * time.Hour), Online: true}
+
+	none := func(int64) bool { return false }
+	got := pickLessonForBBB(now, 1, []model.Lesson{next, live}, none, nil)
+	if got == nil || got.ID != 10 {
+		t.Fatalf("want current lesson id=10, got %#v", got)
+	}
+}

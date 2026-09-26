@@ -26,6 +26,34 @@ need() {
   echo "$p"
 }
 
+set_env_vars() {
+  python3 - "$APP/.env" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+pairs = []
+for arg in sys.argv[2:]:
+    key, _, val = arg.partition("=")
+    if key and val:
+        pairs.append((key, val))
+if not pairs:
+    sys.exit(0)
+lines = path.read_text().splitlines() if path.exists() else []
+for key, val in pairs:
+    found = False
+    for i, line in enumerate(lines):
+        if line.startswith(key + "="):
+            lines[i] = key + "=" + val
+            found = True
+            break
+    if not found:
+        lines.append(key + "=" + val)
+path.write_text("\n".join(lines) + "\n")
+path.chmod(0o600)
+PY
+}
+
 tg=$(need tg)
 rasp=$(need rasp)
 panel=$(need panel)
@@ -153,6 +181,32 @@ grep -q '^LECTURE_PAUSE=' "$APP/.env" || echo 'LECTURE_PAUSE=1' >> "$APP/.env"
 grep -q '^CHROME_USER_DATA_DIR=' "$APP/.env" || echo 'CHROME_USER_DATA_DIR=/opt/ssau-bot/chrome' >> "$APP/.env"
 grep -q '^VOSK_MODEL=' "$APP/.env" || echo 'VOSK_MODEL=/opt/ssau-bot/vosk-model' >> "$APP/.env"
 grep -q '^VOSK_SCRIPT=' "$APP/.env" || echo 'VOSK_SCRIPT=/opt/ssau-bot/wake.py' >> "$APP/.env"
+grep -q '^LOG_LEVEL=' "$APP/.env" || echo 'LOG_LEVEL=info' >> "$APP/.env"
+grep -q '^LOG_FILE=' "$APP/.env" || echo 'LOG_FILE=/opt/ssau-bot/ssau.log' >> "$APP/.env"
+grep -q '^WEBAPP_URL_FILE=' "$APP/.env" || echo 'WEBAPP_URL_FILE=/opt/ssau-bot/webapp_url' >> "$APP/.env"
+
+set_env_vars \
+  "LLM_API_KEY=${LLM_API_KEY:-}" \
+  "LLM_API_URL=${LLM_API_URL:-}" \
+  "LLM_MODEL=${LLM_MODEL:-}"
+
+github_token="${LECTURES_TOKEN:-}"
+if [[ -z "$github_token" ]] && command -v gh >/dev/null 2>&1; then
+  github_token=$(gh auth token 2>/dev/null || true)
+fi
+set_env_vars \
+  "GITHUB_TOKEN=${github_token}" \
+  "GITHUB_OWNER=${LECTURES_OWNER:-r4r1ty-tech}" \
+  "GITHUB_REPO=${LECTURES_REPO:-LectionsSSAU}" \
+  "GITHUB_BRANCH=${LECTURES_BRANCH:-main}"
+
+if [[ -n "${AGENT_SSH_PUBKEY:-}" ]]; then
+  if [[ -f "$SRC/agent-ssh/setup.sh" ]]; then
+    bash "$SRC/agent-ssh/setup.sh" "$AGENT_SSH_PUBKEY" || echo "agent-ssh: setup не прошёл, продолжаю"
+  else
+    echo "agent-ssh: нет $SRC/agent-ssh/setup.sh"
+  fi
+fi
 
 bbb_was_active=0
 if systemctl is-active --quiet ssau-bbb.service; then
@@ -164,9 +218,9 @@ if [[ "$bbb_was_active" -eq 1 ]]; then
   systemctl restart ssau-bbb.service
 fi
 sleep 1
-systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service
+systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service || true
 if [[ "$bbb_was_active" -eq 1 ]]; then
-  systemctl --no-pager --full status ssau-bbb.service
+  systemctl --no-pager --full status ssau-bbb.service || true
 else
   echo "ssau-bbb был выключен — бинарник обновил, сервис не стартовал"
 fi
