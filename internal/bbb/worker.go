@@ -357,7 +357,9 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	}
 	w.mu.Lock()
 	w.sessions[key] = sess
-	delete(w.dropRetry, key)
+	// dropRetry не сбрасываем: иначе «второй вылет → стоп» не наступает
+	// никогда, и выкинутый модератором гость возвращается каждые 15 с.
+	// Сброс — leave (конец слота), joinFail и JoinYes в isBlocked.
 	if state == model.PresenceLobby {
 		w.lobbyAt[key] = now
 	}

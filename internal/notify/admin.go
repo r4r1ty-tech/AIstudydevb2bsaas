@@ -43,6 +43,20 @@ func botFor(token string) (*gotgbot.Bot, error) {
 	return b, nil
 }
 
+// SetTestAPI points every send at a fake Bot API (internal/tgtest) and
+// returns a func that restores the real one. Tests only.
+func SetTestAPI(opts *gotgbot.BotOpts) (restore func()) {
+	botMu.Lock()
+	oldOpts, oldInst, oldTok := botOpts, botInst, botTok
+	botOpts, botInst, botTok = opts, nil, ""
+	botMu.Unlock()
+	return func() {
+		botMu.Lock()
+		botOpts, botInst, botTok = oldOpts, oldInst, oldTok
+		botMu.Unlock()
+	}
+}
+
 func Admin(ctx context.Context, cfg *config.Config, text string) {
 	logx.Debugf("notify", "Admin: enter cfg_nil=%v text_len=%d", cfg == nil, len(text))
 	if cfg == nil {
