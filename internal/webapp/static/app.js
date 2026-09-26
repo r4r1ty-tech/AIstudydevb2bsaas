@@ -213,7 +213,6 @@
           "</div>" +
           '<label class="field">ФИО <input class="fio" value="' + esc(u.fio || "") + '"></label>' +
           '<label class="field">Подгруппа <input class="sub" type="number" min="0" max="4" value="' + esc(u.subgroup || 0) + '"></label>' +
-          '<label class="field">SOCKS5 <input class="socks" value="' + esc(u.socks5 || "") + '" placeholder="user:pass@host:port"></label>' +
           '<label class="field">Вейкворды <input class="words" value="' + esc((u.extra_words || []).join(", ")) + '" placeholder="лаба, зачёт"></label>' +
           '<div class="actions">' +
             '<button type="button" class="act save">Сохранить</button>' +
@@ -245,7 +244,6 @@
       patchPerson(id, {
         fio: card.querySelector(".fio").value,
         subgroup: Number(card.querySelector(".sub").value || 0),
-        socks5: card.querySelector(".socks").value,
         extra_words: card.querySelector(".words").value,
       }).then(function () { toast("сохранено"); }).catch(function (e) { toast(e.message); });
     } else if (ev.target.classList.contains("off-today")) {

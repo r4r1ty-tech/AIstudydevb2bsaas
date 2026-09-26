@@ -13,17 +13,6 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 )
 
-func TestParseSOCKS5(t *testing.T) {
-	host, user, pass, err := parseSOCKS5("user:secret@10.0.0.1:1080")
-	if err != nil || host != "10.0.0.1:1080" || user != "user" || pass != "secret" {
-		t.Fatalf("got %s %s %s %v", host, user, pass, err)
-	}
-	host, user, pass, err = parseSOCKS5("socks5://10.1.1.1:9050")
-	if err != nil || host != "10.1.1.1:9050" || user != "" {
-		t.Fatalf("noauth %s %s %v", host, user, err)
-	}
-}
-
 func TestFindChrome(t *testing.T) {
 	if p := FindChrome(""); p == "" {
 		t.Skip("no chromium on this machine")
@@ -88,9 +77,9 @@ func TestChromeGuestJoinLocalHTML(t *testing.T) {
 	if lobby {
 		t.Fatal("local meeting should not look like lobby")
 	}
-	in, err := sess.InMeeting(ctx)
-	if err != nil || !in {
-		t.Fatalf("expected in meeting: %v %v", in, err)
+	room, err := sess.InRoom(ctx)
+	if err != nil || !room {
+		t.Fatalf("expected in room: %v %v", room, err)
 	}
 	if err := sess.Greet(ctx); err != nil {
 		t.Fatal(err)
@@ -104,6 +93,50 @@ func TestChromeGuestJoinLocalHTML(t *testing.T) {
 	}
 	if err := sess.Greet(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestChromeWelcomeJoinRoom(t *testing.T) {
+	bin := FindChrome("")
+	if bin == "" {
+		t.Skip("no chromium")
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!doctype html><h1>You have been invited to join X</h1>
+<button data-test="joinButton" onclick="location.href='/form'">Join Room</button>`)
+	})
+	mux.HandleFunc("/form", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, `<!doctype html><form method="get" action="/room">
+<input id="join_name" name="join_name"><button type="submit">Join</button></form>`)
+	})
+	mux.HandleFunc("/room", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Query().Get("join_name")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!doctype html><div data-test="userListItem">%s</div>
+<button data-test="listenOnlyBtn">Listen only</button>`, name)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	j := NewChromeJoiner(bin)
+	t.Cleanup(func() { _ = j.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	sess, err := j.Join(ctx, JoinReq{URL: srv.URL + "/", FIO: "Иванов Иван"})
+	if err != nil {
+		t.Fatalf("join through welcome screen: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	room, err := sess.InRoom(ctx)
+	if err != nil || !room {
+		t.Fatalf("InRoom = %v, %v", room, err)
 	}
 }
 

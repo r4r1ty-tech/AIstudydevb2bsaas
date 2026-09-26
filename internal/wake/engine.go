@@ -3,6 +3,8 @@ package wake
 import (
 	"sync"
 	"time"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 type Hit struct {
@@ -25,19 +27,23 @@ type Engine struct {
 }
 
 func NewEngine() *Engine {
-	return &Engine{
+	e := &Engine{
 		Rec:      newDefaultRecognizer(),
 		Cooldown: 45 * time.Second,
 		Window:   2 * time.Second,
 		last:     make(map[string]time.Time),
 	}
+	logx.Debugf("wake", "NewEngine: rec=%T cooldown=%s window=%s", e.Rec, e.Cooldown, e.Window)
+	return e
 }
 
 func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 	if e == nil {
+		logx.Debugf("wake", "Feed: nil engine")
 		return nil
 	}
 	if sampleRate <= 0 {
+		logx.Debugf("wake", "Feed: sampleRate %d <= 0, using 16000", sampleRate)
 		sampleRate = 16000
 	}
 
@@ -52,6 +58,7 @@ func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 		maxBuf = 16000 * 2 * 4
 	}
 	if len(e.buf) > maxBuf {
+		logx.Debugf("wake", "Feed: trimming buf=%d to maxBuf=%d", len(e.buf), maxBuf)
 		e.buf = append([]byte(nil), e.buf[len(e.buf)-maxBuf:]...)
 	}
 	overlap := need / 4
@@ -86,6 +93,9 @@ func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 	for _, c := range chunks {
 		frags = append(frags, rec.Push(c, sampleRate)...)
 	}
+	if len(frags) > 0 {
+		logx.Debugf("wake", "Feed: chunks=%d frags=%d %v", len(chunks), len(frags), frags)
+	}
 
 	now := e.now()
 	cool := e.cool()
@@ -95,10 +105,12 @@ func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 	for _, frag := range frags {
 		for _, w := range Match(frag, vocab) {
 			if t, ok := e.last[w]; ok && now.Sub(t) < cool {
+				logx.Debugf("wake", "Feed: %q in cooldown %s", w, now.Sub(t))
 				continue
 			}
 			e.last[w] = now
 			hits = append(hits, Hit{Word: w})
+			logx.Infof("wake", "wake word hit: %q", w)
 		}
 	}
 	return hits

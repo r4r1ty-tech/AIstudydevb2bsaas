@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 type JoinDecision string
@@ -24,7 +26,6 @@ type User struct {
 	Subgroup      int        `json:"subgroup"`
 	Enabled       bool       `json:"enabled"`
 	DisabledUntil *time.Time `json:"disabled_until,omitempty"`
-	SOCKS5        string     `json:"socks5"`
 	ExtraWords    []string   `json:"extra_words"`
 	OnboardStage  int        `json:"onboard_stage"`
 	Onboarded     bool       `json:"onboarded"`
@@ -32,21 +33,30 @@ type User struct {
 }
 
 func (u User) Active(now time.Time) bool {
+	logx.Debugf("model", "User.Active: id=%d enabled=%v onboarded=%v fio=%q", u.TelegramID, u.Enabled, u.Onboarded, u.FIO)
 	if !u.Enabled {
+		logx.Debugf("model", "User.Active: id=%d -> false disabled", u.TelegramID)
 		return false
 	}
 	if u.DisabledUntil != nil && now.Before(*u.DisabledUntil) {
+		logx.Debugf("model", "User.Active: id=%d -> false disabled_until=%s", u.TelegramID, u.DisabledUntil.Format(time.RFC3339))
 		return false
 	}
-	return u.Onboarded && strings.TrimSpace(u.FIO) != ""
+	res := u.Onboarded && strings.TrimSpace(u.FIO) != ""
+	logx.Debugf("model", "User.Active: id=%d -> %v", u.TelegramID, res)
+	return res
 }
 
 func (u User) Surname() string {
+	logx.Debugf("model", "User.Surname: id=%d fio=%q", u.TelegramID, u.FIO)
 	f := strings.TrimSpace(u.FIO)
 	if f == "" {
+		logx.Debugf("model", "User.Surname: id=%d -> empty", u.TelegramID)
 		return ""
 	}
-	return strings.Fields(f)[0]
+	out := strings.Fields(f)[0]
+	logx.Debugf("model", "User.Surname: id=%d -> %q", u.TelegramID, out)
+	return out
 }
 
 const (
@@ -59,8 +69,10 @@ const (
 var CommonWakeWords = []string{"тест", "контрольная", "мудл", "moodle"}
 
 func ParseWakeWords(s string) []string {
+	logx.Debugf("model", "ParseWakeWords: raw=%q", s)
 	s = strings.TrimSpace(s)
 	if s == "" {
+		logx.Debugf("model", "ParseWakeWords: empty -> nil")
 		return nil
 	}
 	for _, sep := range []string{",", ";", "\n"} {
@@ -80,34 +92,47 @@ func ParseWakeWords(s string) []string {
 		seen[p] = struct{}{}
 		out = append(out, p)
 	}
+	logx.Debugf("model", "ParseWakeWords: raw=%q -> %v", s, out)
 	return out
 }
 
 func SkipWakeWords(s string) bool {
+	logx.Debugf("model", "SkipWakeWords: raw=%q", s)
 	s = strings.ToLower(strings.TrimSpace(s))
 	switch s {
 	case "", "-", "—", ".", "нет", "не надо", "пропуск", "skip", "/skip", "clear", "очистить":
+		logx.Debugf("model", "SkipWakeWords: %q -> true", s)
 		return true
 	default:
+		logx.Debugf("model", "SkipWakeWords: %q -> false", s)
 		return false
 	}
 }
 
 func FormatWakeWords(words []string) string {
-	return strings.Join(ParseWakeWords(strings.Join(words, " ")), ", ")
+	logx.Debugf("model", "FormatWakeWords: n=%d words=%v", len(words), words)
+	out := strings.Join(ParseWakeWords(strings.Join(words, " ")), ", ")
+	logx.Debugf("model", "FormatWakeWords: -> %q", out)
+	return out
 }
 
 func MergeWakeWords(old, add []string) []string {
-	return ParseWakeWords(strings.Join(append(append([]string{}, old...), add...), " "))
+	logx.Debugf("model", "MergeWakeWords: old=%v add=%v", old, add)
+	out := ParseWakeWords(strings.Join(append(append([]string{}, old...), add...), " "))
+	logx.Debugf("model", "MergeWakeWords: -> %v", out)
+	return out
 }
 
 func (u User) WakeList() []string {
+	logx.Debugf("model", "User.WakeList: id=%d extra=%v", u.TelegramID, u.ExtraWords)
 	add := append([]string{}, CommonWakeWords...)
 	if s := u.Surname(); s != "" {
 		add = append(add, s)
 	}
 	add = append(add, u.ExtraWords...)
-	return ParseWakeWords(strings.Join(add, " "))
+	out := ParseWakeWords(strings.Join(add, " "))
+	logx.Debugf("model", "User.WakeList: id=%d -> %v", u.TelegramID, out)
+	return out
 }
 
 type Lesson struct {
@@ -126,19 +151,27 @@ type Lesson struct {
 }
 
 func (l Lesson) MatchesSubgroup(n int) bool {
-	return l.Subgroup == 0 || l.Subgroup == n
+	logx.Debugf("model", "Lesson.MatchesSubgroup: lesson=%d subgroup=%d n=%d", l.ID, l.Subgroup, n)
+	res := l.Subgroup == 0 || l.Subgroup == n
+	logx.Debugf("model", "Lesson.MatchesSubgroup: lesson=%d -> %v", l.ID, res)
+	return res
 }
 
 func (l Lesson) SlotLabel() string {
-	return l.Start + "–" + l.End
+	logx.Debugf("model", "Lesson.SlotLabel: lesson=%d start=%s end=%s", l.ID, l.Start, l.End)
+	out := l.Start + "–" + l.End
+	logx.Debugf("model", "Lesson.SlotLabel: lesson=%d -> %q", l.ID, out)
+	return out
 }
 
 func (l Lesson) Identity() string {
+	logx.Debugf("model", "Lesson.Identity: lesson=%d date=%s start=%s disc=%q teacher=%q place=%q subgroup=%d online=%v",
+		l.ID, l.Date, l.Start, l.Discipline, l.Teacher, l.Place, l.Subgroup, l.Online)
 	on := "0"
 	if l.Online {
 		on = "1"
 	}
-	return strings.Join([]string{
+	out := strings.Join([]string{
 		l.Date,
 		l.Start,
 		l.Discipline,
@@ -147,6 +180,8 @@ func (l Lesson) Identity() string {
 		fmt.Sprintf("%d", l.Subgroup),
 		on,
 	}, "|")
+	logx.Debugf("model", "Lesson.Identity: lesson=%d -> %q", l.ID, out)
+	return out
 }
 
 type BBBLink struct {
@@ -156,37 +191,59 @@ type BBBLink struct {
 }
 
 func BBBKey(groupID int64, discipline, teacher string) string {
-	return fmt.Sprintf("%d|%s|%s", groupID, strings.TrimSpace(discipline), strings.TrimSpace(teacher))
+	logx.Debugf("model", "BBBKey: group=%d discipline=%q teacher=%q", groupID, discipline, teacher)
+	out := fmt.Sprintf("%d|%s|%s", groupID, strings.TrimSpace(discipline), strings.TrimSpace(teacher))
+	logx.Debugf("model", "BBBKey: -> %q", out)
+	return out
 }
 
 func BBBLessonKey(lessonID int64) string {
+	logx.Debugf("model", "BBBLessonKey: lesson=%d", lessonID)
 	if lessonID <= 0 {
+		logx.Debugf("model", "BBBLessonKey: lesson=%d -> empty", lessonID)
 		return ""
 	}
-	return fmt.Sprintf("lesson:%d", lessonID)
+	out := fmt.Sprintf("lesson:%d", lessonID)
+	logx.Debugf("model", "BBBLessonKey: lesson=%d -> %q", lessonID, out)
+	return out
 }
 
 func ParseBBBLessonID(key string) (int64, bool) {
+	logx.Debugf("model", "ParseBBBLessonID: key=%q", key)
 	key = strings.TrimSpace(key)
 	if !strings.HasPrefix(key, "lesson:") {
+		logx.Debugf("model", "ParseBBBLessonID: key=%q -> 0,false", key)
 		return 0, false
 	}
 	n, err := strconv.ParseInt(strings.TrimPrefix(key, "lesson:"), 10, 64)
 	if err != nil || n <= 0 {
+		if err != nil {
+			logx.Debugf("model", "ParseBBBLessonID: parse %q: %v", key, err)
+		}
+		logx.Debugf("model", "ParseBBBLessonID: key=%q -> 0,false", key)
 		return 0, false
 	}
+	logx.Debugf("model", "ParseBBBLessonID: key=%q -> %d,true", key, n)
 	return n, true
 }
 
 func ParseBBBKey(key string) (discipline, teacher string) {
+	logx.Debugf("model", "ParseBBBKey: key=%q", key)
 	parts := strings.Split(key, "|")
 	switch len(parts) {
 	case 0, 1:
-		return strings.TrimSpace(key), ""
+		d, t := strings.TrimSpace(key), ""
+		logx.Debugf("model", "ParseBBBKey: key=%q -> %q,%q", key, d, t)
+		return d, t
 	case 2:
-		return strings.TrimSpace(parts[1]), ""
+		d, t := strings.TrimSpace(parts[1]), ""
+		logx.Debugf("model", "ParseBBBKey: key=%q -> %q,%q", key, d, t)
+		return d, t
 	default:
-		return strings.TrimSpace(parts[1]), strings.TrimSpace(strings.Join(parts[2:], "|"))
+		d := strings.TrimSpace(parts[1])
+		t := strings.TrimSpace(strings.Join(parts[2:], "|"))
+		logx.Debugf("model", "ParseBBBKey: key=%q -> %q,%q", key, d, t)
+		return d, t
 	}
 }
 
@@ -217,26 +274,38 @@ type TestJoin struct {
 }
 
 func (t TestJoin) GuestName() string {
+	logx.Debugf("model", "TestJoin.GuestName: name=%q", t.Name)
 	if strings.TrimSpace(t.Name) != "" {
-		return strings.TrimSpace(t.Name)
+		out := strings.TrimSpace(t.Name)
+		logx.Debugf("model", "TestJoin.GuestName: -> %q", out)
+		return out
 	}
+	logx.Debugf("model", "TestJoin.GuestName: -> default %q", TestGuestName)
 	return TestGuestName
 }
 
 func BBBLabel(key string) string {
+	logx.Debugf("model", "BBBLabel: key=%q", key)
 	if id, ok := ParseBBBLessonID(key); ok {
-		return fmt.Sprintf("пара %d", id)
+		out := fmt.Sprintf("пара %d", id)
+		logx.Debugf("model", "BBBLabel: key=%q -> %q", key, out)
+		return out
 	}
 	d, t := ParseBBBKey(key)
 	d = strings.TrimSpace(d)
 	t = strings.TrimSpace(t)
 	if d == "" {
-		return strings.TrimSpace(key)
+		out := strings.TrimSpace(key)
+		logx.Debugf("model", "BBBLabel: key=%q -> %q", key, out)
+		return out
 	}
 	if t == "" {
+		logx.Debugf("model", "BBBLabel: key=%q -> %q", key, d)
 		return d
 	}
-	return d + " · " + t
+	out := d + " · " + t
+	logx.Debugf("model", "BBBLabel: key=%q -> %q", key, out)
+	return out
 }
 
 type Event struct {
@@ -252,7 +321,6 @@ const (
 	EventJoin    = "join"
 	EventLeave   = "leave"
 	EventLobby   = "lobby"
-	EventProxy   = "proxy"
 	EventReparse = "reparse"
 	EventWake    = "wake"
 	EventNoBBB   = "no_bbb"
@@ -266,8 +334,11 @@ const (
 )
 
 func IsLecture(typ string) bool {
+	logx.Debugf("model", "IsLecture: type=%q", typ)
 	t := strings.ToLower(strings.TrimSpace(typ))
-	return strings.Contains(t, "лекц") || strings.Contains(t, "lecture")
+	res := strings.Contains(t, "лекц") || strings.Contains(t, "lecture")
+	logx.Debugf("model", "IsLecture: type=%q -> %v", typ, res)
+	return res
 }
 
 const (
@@ -281,20 +352,23 @@ const (
 )
 
 type LecturePack struct {
-	ID         int64     `json:"id"`
-	LessonID   int64     `json:"lesson_id"`
-	Discipline string    `json:"discipline"`
-	Number     int       `json:"number"`
-	Date       string    `json:"date"`
-	Dir        string    `json:"dir"`
-	BBBURL     string    `json:"bbb_url"`
-	Status     string    `json:"status"`
-	Audio      string    `json:"audio"`
-	Transcript string    `json:"transcript"`
-	NotesPDF   string    `json:"notes_pdf"`
-	Err        string    `json:"err,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID            int64      `json:"id"`
+	LessonID      int64      `json:"lesson_id"`
+	Discipline    string     `json:"discipline"`
+	Number        int        `json:"number"`
+	Date          string     `json:"date"`
+	Dir           string     `json:"dir"`
+	BBBURL        string     `json:"bbb_url"`
+	Status        string     `json:"status"`
+	Audio         string     `json:"audio"`
+	Transcript    string     `json:"transcript"`
+	NotesPDF      string     `json:"notes_pdf"`
+	Err           string     `json:"err,omitempty"`
+	PublishStatus string     `json:"publish_status,omitempty"`
+	PublishedAt   *time.Time `json:"published_at,omitempty"`
+	CleanedAt     *time.Time `json:"cleaned_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 type ParseRun struct {

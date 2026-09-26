@@ -5,15 +5,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
 const bbbHostPath = "bbb.ssau.ru/b/"
 
 func extractBBBURL(text string) string {
+	logx.Debugf("tg", "extractBBBURL: len=%d", len(text))
 	lower := strings.ToLower(text)
 	idx := strings.Index(lower, bbbHostPath)
 	if idx < 0 {
+		logx.Debugf("tg", "extractBBBURL: host not found")
 		return ""
 	}
 	start := idx
@@ -28,22 +31,27 @@ func extractBBBURL(text string) string {
 	}
 	rest = strings.TrimRight(rest, ".,;)]»")
 	if rest == "" {
+		logx.Debugf("tg", "extractBBBURL: empty after trim")
 		return ""
 	}
 	low := strings.ToLower(rest)
 	if !strings.HasPrefix(low, "http://") && !strings.HasPrefix(low, "https://") {
 		rest = "https://" + rest
 	}
+	logx.Debugf("tg", "extractBBBURL: %s", rest)
 	return rest
 }
 
 func parseJoinCallback(data string) (yes bool, lessonID int64, ok bool) {
+	logx.Debugf("tg", "parseJoinCallback: data=%q", data)
 	parts := strings.Split(data, ":")
 	if len(parts) != 3 || parts[0] != "j" {
+		logx.Debugf("tg", "parseJoinCallback: malformed")
 		return false, 0, false
 	}
 	id, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil || id == 0 {
+		logx.Debugf("tg", "parseJoinCallback: bad id err=%v", err)
 		return false, 0, false
 	}
 	switch parts[1] {
@@ -52,11 +60,13 @@ func parseJoinCallback(data string) (yes bool, lessonID int64, ok bool) {
 	case "n":
 		return false, id, true
 	default:
+		logx.Debugf("tg", "parseJoinCallback: bad verb %q", parts[1])
 		return false, 0, false
 	}
 }
 
 func joinCallbackData(yes bool, lessonID int64) string {
+	logx.Debugf("tg", "joinCallbackData: yes=%v lesson=%d", yes, lessonID)
 	if yes {
 		return "j:y:" + strconv.FormatInt(lessonID, 10)
 	}
@@ -64,6 +74,7 @@ func joinCallbackData(yes bool, lessonID int64) string {
 }
 
 func parseSubgroup(text string) (n int, ok bool) {
+	logx.Debugf("tg", "parseSubgroup: text=%q", strings.TrimSpace(text))
 	s := strings.TrimSpace(text)
 	if s == "" || s == "-" || s == "—" || s == "." {
 		return 1, true
@@ -77,15 +88,41 @@ func parseSubgroup(text string) (n int, ok bool) {
 			return 2, true
 		}
 	}
+	logx.Debugf("tg", "parseSubgroup: no group in %q", s)
 	return 0, false
 }
 
 func isCommandText(text string) bool {
 	text = strings.TrimSpace(text)
-	return strings.HasPrefix(text, "/")
+	ok := strings.HasPrefix(text, "/")
+	logx.Debugf("tg", "isCommandText: %q -> %v", text, ok)
+	return ok
 }
 
 func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLink func(lessonID int64) bool, intents map[int64]time.Time) *model.Lesson {
+	logx.Debugf("tg", "pickLessonForBBB: now=%s sub=%d lessons=%d intents=%d", now.Format(time.RFC3339), subgroup, len(lessons), len(intents))
+	var live *model.Lesson
+	for i := range lessons {
+		l := lessons[i]
+		if !l.Online || !l.MatchesSubgroup(subgroup) {
+			continue
+		}
+		if l.Begin.IsZero() || l.Finish.IsZero() {
+			continue
+		}
+		if now.Before(l.Begin) || !now.Before(l.Finish) {
+			continue
+		}
+		if live == nil || l.Begin.After(live.Begin) {
+			cp := l
+			live = &cp
+		}
+	}
+	if live != nil {
+		logx.Debugf("tg", "pickLessonForBBB: live lesson=%d", live.ID)
+		return live
+	}
+
 	var nearest *model.Lesson
 	for i := range lessons {
 		l := lessons[i]
@@ -101,6 +138,7 @@ func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLi
 		}
 	}
 	if nearest != nil {
+		logx.Debugf("tg", "pickLessonForBBB: nearest lesson=%d", nearest.ID)
 		return nearest
 	}
 	var best *model.Lesson
@@ -115,6 +153,11 @@ func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLi
 			best = &cp
 			bestAt = at
 		}
+	}
+	if best != nil {
+		logx.Debugf("tg", "pickLessonForBBB: intent lesson=%d at=%s", best.ID, bestAt.Format(time.RFC3339))
+	} else {
+		logx.Debugf("tg", "pickLessonForBBB: no target")
 	}
 	return best
 }
