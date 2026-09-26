@@ -15,6 +15,9 @@ import (
 )
 
 var (
+	// botOpts is nil in production; tests point it at a fake Bot API.
+	botOpts *gotgbot.BotOpts
+
 	botMu   sync.Mutex
 	botTok  string
 	botInst *gotgbot.Bot
@@ -30,7 +33,7 @@ func botFor(token string) (*gotgbot.Bot, error) {
 		logx.Debugf("notify", "botFor: reuse cached bot")
 		return botInst, nil
 	}
-	b, err := gotgbot.NewBot(token, nil)
+	b, err := gotgbot.NewBot(token, botOpts)
 	if err != nil {
 		logx.Errorf("notify", "botFor: NewBot: %v", err)
 		return nil, fmt.Errorf("botFor: NewBot: %w", err)

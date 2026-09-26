@@ -200,6 +200,12 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 		logx.Debugf("tg", "onText: unknown command %q", text)
 		return b.sendMain(chatID, fallbackText)
 	}
+	// Тест BBB — админская штука, онбординг для неё не нужен: иначе админ-не-
+	// студент вводит имя гостя, а бот начинает спрашивать его ФИО.
+	if kind := b.peekAwait(from.Id); b.cfg.IsAdmin(from.Id) && (kind == awaitTestName || kind == awaitTestURL) && !isMenuLabel(text) {
+		logx.Debugf("tg", "onText: admin test await tg=%d kind=%d", from.Id, kind)
+		return b.handleAwait(&model.User{TelegramID: from.Id}, chatID, text, kind)
+	}
 
 	u, err := b.st.GetUser(from.Id)
 	if err != nil {

@@ -27,12 +27,16 @@ const (
 	awaitTestURL
 )
 
+// botOpts is nil in production; tests point it at a fake Bot API.
+var botOpts *gotgbot.BotOpts
+
 type Bot struct {
 	cfg     *config.Config
 	st      *store.Store
 	loc     *time.Location
 	api     *gotgbot.Bot
 	updater *ext.Updater
+	disp    *ext.Dispatcher
 
 	mu       sync.Mutex
 	t15Mu    sync.Mutex
@@ -62,7 +66,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 		}
 	}
 
-	api, err := gotgbot.NewBot(cfg.BotToken, nil)
+	api, err := gotgbot.NewBot(cfg.BotToken, botOpts)
 	if err != nil {
 		logx.Errorf("tg", "New: new bot: %v", err)
 		return nil, fmt.Errorf("tg: new bot: %w", err)
@@ -83,6 +87,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 		loc:      loc,
 		api:      api,
 		updater:  updater,
+		disp:     dispatcher,
 		lastT15:  make(map[int64]int64),
 		awaiting: make(map[int64]awaitKind),
 		live:     make(map[int64]liveSnap),
