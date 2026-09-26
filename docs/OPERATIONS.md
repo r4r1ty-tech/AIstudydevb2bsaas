@@ -22,7 +22,7 @@
 | `LECTURE_PAUSE` | `1` | Замораживать сторонние «тяжёлые» процессы на время пары |
 | `CHROME_BIN` / `CHROME_USER_DATA_DIR` | — | Путь к Chromium и его профилю |
 | `PROXY_FILE` | `/opt/ssau-bot/proxies.txt` | SOCKS5-список `login:password@ip:port`, по строке. Есть файл — каждая вкладка `bbb` идёт через свой прокси |
-| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | LLM для конспекта. Любой OpenAI-совместимый endpoint `chat/completions` (DeepSeek, Groq, OpenRouter, локальный и т.п.). URL можно и с `/v1`, и без; `LLM_MODEL` обязателен |
+| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | LLM для конспекта. Любой OpenAI-совместимый endpoint `chat/completions` (DeepSeek, Groq, OpenRouter, локальный и т.п.). URL можно и с `/v1`, и без; `LLM_MODEL` обязателен. Старые имена `DEEPSEEK_API_KEY/URL/MODEL` читаются как фолбэк (с WARN) — лучше переименовать |
 | `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Ключи STT/vision/конспектов |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH` | `r4r1ty-tech` / `LectionsSSAU` / `main` | Выгрузка конспектов в GitHub. Токен `remote.sh` берёт из `LECTURES_TOKEN` или `gh auth token` на сервере |
 | `VOSK_MODEL` / `VOSK_SCRIPT` | `/opt/ssau-bot/vosk-model`, `/opt/ssau-bot/wake.py` | Вейкворды |
@@ -126,6 +126,24 @@ ssh root@95.182.114.82 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 4. `join fail ... форма гостя` — не нашлась форма/кнопка входа; смотри `LOG_LEVEL=debug` и `pageHint` в логе.
 5. `не в комнате (unknown)` и в `pageHint` «You have been invited to join … / Join Room» — приглашёнческая страница BBB; бот сам жмёт «Join Room» (`clickWelcomeJoin` в `internal/bbb/seat.go`). Если повторяется — добавить селектор/текст в `welcomeJoinSels`.
 5. `лобби >2 мин` — модератор не пускает; алерт приходит админу.
+
+**Бот в комнате, а запись пустая / тихая**
+
+Запись идёт так: вкладка «со звуком» жмёт «Только слушать» → Chromium играет в
+null-sink `ssau_rec` → ffmpeg пишет `ssau_rec.monitor` в `audio-*.ogg` и отдаёт PCM вейкворду.
+
+```bash
+grep -aE 'audioOnce|audio joined|audio route|audio level|silent|ffmpeg|vosk|chromium:' /opt/ssau-bot/ssau.log | tail -40
+```
+
+1. `audioOnce: ... listen-only clicked` или `already in audio`, затем `audio joined :: audio=[...]` —
+   вкладка в аудио. `listen-only не нажалась` + список кнопок — BBB поменял вёрстку, смотри селекторы в `internal/bbb/seat.go`.
+2. `audio route audio-joined` / `first-minute`: в `inputs=[...]` должен быть поток на sink `ssau_rec`.
+   `inputs=[-]` — Chromium ничего не играет (аудио BBB не подключилось); строки `chromium: ...` рядом — ошибки pulse/WebRTC.
+3. `audio level ... peak=... dBFS` раз в минуту. 5 минут тишины подряд — WARN `silent` и сообщение админу.
+4. `ffmpeg: ...` — stderr ffmpeg; `Rec.Stop: ... size=N` — сколько записано в сегмент.
+   `vosk lags: dropped N chunks` — вейкворд не успевает, запись от этого не страдает.
+5. Сквозная проверка тракта без BBB — `SSAU_AUDIO_E2E=1` тест из [TESTING.md](TESTING.md#23-локальная-сборкатесты-без-комнаты) на отдельном PulseAudio.
 
 **Панель не открывается**
 
