@@ -626,7 +626,9 @@ func clickFirst(page *rod.Page, sels []string) bool {
 		if err != nil || !ok || el == nil {
 			continue
 		}
-		if err := el.Click(proto.InputMouseButtonLeft, 1); err == nil {
+		// Своя короткая пауза на rod-клик: WaitInteractable на перекрытой
+		// кнопке иначе съедает весь таймаут страницы, и DOM-фолбэк не успевает.
+		if err := el.Timeout(clickWait).Click(proto.InputMouseButtonLeft, 1); err == nil {
 			logx.Debugf("bbb", "clickFirst: clicked %s", sel)
 			return true
 		} else {
@@ -641,13 +643,18 @@ func clickFirst(page *rod.Page, sels []string) bool {
 	return false
 }
 
+// clickWait bounds rod's wait for a button to become clickable.
+const clickWait = 800 * time.Millisecond
+
 // clickJS clicks through the DOM directly, for elements rod deems unclickable
-// (e.g. a modal button that is present but not yet interactable).
+// (e.g. a modal button that is present but not yet interactable). It runs on
+// a fresh context: the caller's Timeout() page may already be expired by the
+// failed rod click, and then Eval would fail at once.
 func clickJS(page *rod.Page, sel string) bool {
 	if page == nil || sel == "" {
 		return false
 	}
-	res, err := page.Timeout(3*time.Second).Eval(`(sel) => {
+	res, err := page.Context(context.Background()).Timeout(3*time.Second).Eval(`(sel) => {
 		const n = document.querySelector(sel)
 		if (!n) return false
 		n.click()
