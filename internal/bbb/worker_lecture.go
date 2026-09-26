@@ -219,13 +219,19 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 				}
 				continue
 			}
-			w.buildNotes(ctx, p.ID)
+			if !w.buildNotes(ctx, p.ID) && w.noteAttemptsFor(p.ID) < maxNoteAttempts {
+				done = false
+			}
 			continue
 		}
 		if !archive.ShouldNotePack(p.Status) {
 			continue
 		}
-		w.buildNotes(ctx, p.ID)
+		// Упавший пак держит день открытым, пока есть попытки: иначе
+		// notes_done ставится сразу и ретраев с паузой не бывает.
+		if !w.buildNotes(ctx, p.ID) && w.noteAttemptsFor(p.ID) < maxNoteAttempts {
+			done = false
+		}
 	}
 	logx.Debugf("bbb", "buildNotesDay: day=%s done=%v", day, done)
 	return done
@@ -336,12 +342,13 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	notify.Admin(ctx, w.Cfg, "слайды сняты: "+archive.Rel(p.Discipline, p.Number))
 }
 
-func (w *Worker) buildNotes(ctx context.Context, id int64) {
+// buildNotes builds and publishes one pack; false means it failed.
+func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 	logx.Debugf("bbb", "buildNotes: pack=%d", id)
 	p, err := w.Store.PackByID(id)
 	if err != nil || p == nil {
 		logx.Errorf("bbb", "buildNotes: pack %d: %v", id, err)
-		return
+		return false
 	}
 	p.Status = model.PackNotes
 	if err := w.Store.SavePack(p); err != nil {
@@ -365,7 +372,7 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) {
 		}
 		logx.Warnf("bbb", "buildNotes: pack=%d failed attempt=%d: %v", p.ID, n, err)
 		notify.Admin(ctx, w.Cfg, "конспект не собрался: "+archive.Rel(p.Discipline, p.Number)+" — "+err.Error()+attempt)
-		return
+		return false
 	}
 	w.noteOK(p.ID)
 	p.Status = model.PackDone
@@ -384,6 +391,7 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) {
 	logx.Infof("bbb", "notes done pack=%s", p.Dir)
 	w.announceNotes(ctx, p)
 	w.publishPack(ctx, p)
+	return true
 }
 
 // githubAPI overrides the GitHub API base in tests; "" means the real one.
