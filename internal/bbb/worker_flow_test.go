@@ -127,7 +127,7 @@ func TestMissingBBBNotifiesOnce(t *testing.T) {
 	if n := len(h.sentTo(studentTG)); n != 1 {
 		t.Fatalf("user notified %d times, want once", n)
 	}
-	h.wantSent(studentTG, "нет ссылки")
+	h.wantSent(studentTG, "Нет ссылки на комнату «Сети»")
 	h.wantSent(adminTG, "нет ссылки BBB")
 	if p, _ := h.st.GetPresence(studentTG); p == nil || p.State != model.PresenceError {
 		t.Fatalf("presence = %+v", p)
@@ -177,7 +177,7 @@ func TestLobbyWaitAlertThenPromotion(t *testing.T) {
 	}
 }
 
-func TestDropDeadRetriesOnceThenBlocks(t *testing.T) {
+func TestDropDeadNeedsRepeatedProbeErrors(t *testing.T) {
 	h := newWorkerHarness(t)
 	u := h.user(studentTG, "Иванов Иван")
 	l := h.lesson("Сети", "Практика", time.Minute)
@@ -187,6 +187,12 @@ func TestDropDeadRetriesOnceThenBlocks(t *testing.T) {
 
 	h.w.ensureIn(context.Background(), u, l, url, key, now, false)
 	h.s.set(false, false, errBoom)
+	for i := 1; i < maxProbeErrs; i++ {
+		h.w.watchLobby(context.Background(), u, l, key, now)
+	}
+	if h.session(key) == nil {
+		t.Fatal("single slow probes must not drop the session")
+	}
 	h.w.watchLobby(context.Background(), u, l, key, now)
 	if h.session(key) != nil {
 		t.Fatal("dead session kept")
@@ -201,12 +207,66 @@ func TestDropDeadRetriesOnceThenBlocks(t *testing.T) {
 	h.s.set(false, true, nil)
 	h.w.ensureIn(context.Background(), u, l, url, key, now, false)
 	h.s.set(false, false, nil) // page is neither room nor lobby
-	h.w.watchLobby(context.Background(), u, l, key, now)
+	for i := 0; i < maxProbeErrs; i++ {
+		h.w.watchLobby(context.Background(), u, l, key, now)
+	}
 	if !h.w.isBlocked(key, nil) {
 		t.Fatal("second drop must block")
 	}
 	h.wantSent(studentTG, "Не зашёл на «Сети»")
 	h.w.dropDead(context.Background(), u, l, key, "x") // nothing live: no-op
+}
+
+// Выход по времени не должен давать перезахода с новым случайным leaveAt
+// и не снимает стоп после неудач.
+func TestTimeLeaveDoesNotRejoin(t *testing.T) {
+	h := newWorkerHarness(t)
+	h.user(studentTG, "Иванов Иван")
+	l := h.lesson("Сети", "Практика", 80*time.Minute) // идёт 80 мин из 90
+	h.yes(studentTG, l)
+	h.link(l)
+	key := sessionKey(studentTG, l.ID)
+	h.w.tick(context.Background())
+	h.w.WaitIdle()
+	if h.session(key) == nil {
+		t.Fatal("must join")
+	}
+	h.w.mu.Lock()
+	h.w.leaveAt[key] = time.Now().Add(-time.Second)
+	h.w.mu.Unlock()
+	for i := 0; i < 20; i++ {
+		h.w.tick(context.Background())
+		h.w.WaitIdle()
+	}
+	if n := len(h.j.requests()); n != 1 {
+		t.Fatalf("re-joined after time leave: %d joins", n)
+	}
+	if !h.w.isDone(key) {
+		t.Fatal("key must stay done until the lesson leaves the window")
+	}
+}
+
+func TestLobbyAlertOnceAndCountsFromLessonStart(t *testing.T) {
+	h := newWorkerHarness(t)
+	h.s.set(true, false, nil)
+	u := h.user(studentTG, "Иванов Иван")
+	l := h.lesson("Сети", "Практика", -10*time.Minute) // зашли за 10 мин до начала
+	key := sessionKey(u.TelegramID, l.ID)
+	now := time.Now()
+	h.w.ensureIn(context.Background(), u, l, h.link(l), key, now, false)
+	h.w.watchLobby(context.Background(), u, l, key, now.Add(5*time.Minute))
+	if len(h.sentTo(adminTG)) != 0 {
+		t.Fatal("lobby before the lesson start is normal")
+	}
+	for m := 13; m <= 30; m += 2 {
+		h.w.watchLobby(context.Background(), u, l, key, now.Add(time.Duration(m)*time.Minute))
+	}
+	if n := len(h.sentTo(studentTG)); n != 1 {
+		t.Fatalf("user lobby alerts = %d, want 1", n)
+	}
+	if n := len(h.sentTo(adminTG)); n != 1 {
+		t.Fatalf("admin lobby alerts = %d, want 1 per 20 min", n)
+	}
 }
 
 func TestEnsureInUnknownPageFails(t *testing.T) {
@@ -397,11 +457,11 @@ func TestLectureUsersFiltersIntent(t *testing.T) {
 
 func TestAttachRecorderGuards(t *testing.T) {
 	h := newWorkerHarness(t)
-	if got := h.w.attachRecorder(context.Background(), nil, model.Lesson{}, ""); got != nil {
+	if got, rec := h.w.attachRecorder(context.Background(), nil, model.Lesson{}, ""); got != nil || rec {
 		t.Fatal("nil session passes through")
 	}
 	var nilW *Worker
-	if got := nilW.attachRecorder(context.Background(), h.s, model.Lesson{}, ""); got != h.s {
+	if got, rec := nilW.attachRecorder(context.Background(), h.s, model.Lesson{}, ""); got != h.s || rec {
 		t.Fatal("nil worker passes the session through")
 	}
 	if archive.AudioFile("x") == "" {

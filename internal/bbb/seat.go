@@ -50,7 +50,12 @@ var formSels = []string{
 	"input[name='name']",
 	"input[autocomplete='name']",
 	"[data-test='nameInput']",
-	"input[type='text']",
+	// Не любой input[type='text']: на экране ожидания поле поиска/чата давало
+	// ложную «форму», и бот вписывал ФИО в чужое поле вместо ожидания.
+	"input[id*='name' i][type='text']",
+	"input[placeholder*='name' i]",
+	"input[placeholder*='имя' i]",
+	"input[placeholder*='фио' i]",
 }
 
 // Приглашёнческая страница BBB: сначала кнопка «Join Room», только потом форма/звук.
@@ -98,6 +103,14 @@ var lobbyElSels = []string{
 
 var lobbyTextMarks = []string{
 	"waiting for a moderator",
+	"wait for a moderator",
+	"wait for the moderator",
+	"moderator to approve",
+	"approve you",
+	"подождите, пока модератор",
+	"пока модератор",
+	"модератор одобрит",
+	"модератор не впустит",
 	"waiting for the moderator",
 	"waiting room",
 	"you'll join when",
@@ -192,7 +205,8 @@ func classifySeat(sig seatSignals) seat {
 		logx.Debugf("bbb", "classifySeat: form -> form")
 		return seatForm
 	}
-	low := strings.ToLower(sig.text)
+	// Типографский апостроф BBB (hasn’t) приводим к прямому, как в метках.
+	low := strings.NewReplacer("’", "'", "‘", "'", "ʼ", "'").Replace(strings.ToLower(sig.text))
 	for _, m := range lobbyTextMarks {
 		if strings.Contains(low, m) {
 			logx.Debugf("bbb", "classifySeat: text mark %q -> lobby", m)
@@ -340,12 +354,20 @@ func (s *chromeSession) waitSeated(ctx context.Context, req JoinReq) error {
 		last = classifySeat(sig)
 		if last == seatLobby || last == seatRoom {
 			logx.Debugf("bbb", "waitSeated: seated=%s", last)
-			audioOnce(s.page.Context(ctx), req.Role)
+			if last == seatRoom {
+				s.audioOK = audioOnce(s.page.Context(ctx), req.Role)
+			} else {
+				// В лобби аудио-модалки нет: 45 с ожидания тут впустую. Звук
+				// подключит EnsureAudio после перехода в комнату.
+				audioTry(s.page.Context(ctx), req.Role, 2*time.Second)
+			}
 			return nil
 		}
 		if sig.hasAudio {
+			// «Close» бывает и у баннеров Greenlight до комнаты — короткая попытка,
+			// иначе 45 с ожидания записи съедают дедлайн захода.
 			logx.Debugf("bbb", "waitSeated: audio modal, dismiss")
-			audioOnce(s.page.Context(ctx), req.Role)
+			audioTry(s.page.Context(ctx), req.Role, 3*time.Second)
 			continue
 		}
 		if last == seatForm && filled < 3 {
@@ -410,39 +432,50 @@ func clickablesHint(page *rod.Page) string {
 	return h
 }
 
-func audioOnce(page *rod.Page, role Role) {
-	if page == nil {
-		return
-	}
-	deadline := time.Now().Add(2 * time.Second)
+func audioOnce(page *rod.Page, role Role) bool {
+	wait := 2 * time.Second
 	if role == RoleRecord {
 		// Модалка выбора аудио появляется после входа в комнату с задержкой;
 		// записывающей вкладке нужно дождаться и нажать «Только слушать».
-		deadline = time.Now().Add(audioJoinWait)
+		wait = audioJoinWait
 	}
-	logx.Debugf("bbb", "audioOnce: role=%s wait=%s", role, time.Until(deadline).Round(time.Second))
+	return audioTry(page, role, wait)
+}
+
+// audioTry подключает аудио за wait. Для записи успех — только когда в навбаре
+// появилось «Выйти из аудио»: клик сам по себе ещё не значит, что звук пошёл.
+func audioTry(page *rod.Page, role Role, wait time.Duration) bool {
+	if page == nil {
+		return false
+	}
+	deadline := time.Now().Add(wait)
+	logx.Debugf("bbb", "audioTry: role=%s wait=%s", role, wait.Round(time.Second))
 	for time.Now().Before(deadline) {
 		p := page.Timeout(2 * time.Second)
+		// Уже в аудио — навбар не трогаем (и не кликаем текст «listen only» из чата).
+		if role == RoleRecord && hasAny(p, audioJoinedSels) {
+			logx.Infof("bbb", "audioTry: role=%s in audio", role)
+			logAudioJoined(page, role)
+			return true
+		}
 		if role == RolePresence {
 			if clickFirst(p, closeAudioSels) || clickByText(p, `(?i)close|закрыть|skip|пропуст`) {
-				logx.Debugf("bbb", "audioOnce: closed modal")
-				return
+				logx.Debugf("bbb", "audioTry: closed modal")
+				return true
 			}
 		}
 		if clickFirst(p, listenOnlySels) || clickByText(p, listenOnlyRE) {
-			logx.Infof("bbb", "audioOnce: role=%s listen-only clicked", role)
-			logAudioJoined(page, role)
-			return
-		}
-		// Уже в аудио (bbb_auto_join_audio сработал) — навбар не трогаем.
-		if role == RoleRecord && hasAny(p, audioJoinedSels) {
-			logx.Infof("bbb", "audioOnce: role=%s already in audio", role)
-			logAudioJoined(page, role)
-			return
+			logx.Infof("bbb", "audioTry: role=%s listen-only clicked", role)
+			if role != RoleRecord || waitAny(page, audioJoinedSels, minDur(10*time.Second, time.Until(deadline)+2*time.Second)) {
+				logAudioJoined(page, role)
+				return true
+			}
+			logx.Warnf("bbb", "audioTry: listen-only нажата, но аудио не подключилось — повторяю")
+			continue
 		}
 		// Аудио-модалки может не быть: открываем выбор аудио из навбара.
 		if clickFirst(p, joinAudioSels) || clickByText(p, joinAudioRE) {
-			logx.Debugf("bbb", "audioOnce: opened audio chooser")
+			logx.Debugf("bbb", "audioTry: opened audio chooser")
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
@@ -452,8 +485,27 @@ func audioOnce(page *rod.Page, role Role) {
 		logx.Warnf("bbb", "listen-only не нажалась — звук может быть пустым :: audio=[%s] :: %s",
 			audioProbeHint(page), clickablesHint(page))
 	} else {
-		logx.Debugf("bbb", "audioOnce: no audio control found")
+		logx.Debugf("bbb", "audioTry: no audio control found")
 	}
+	return false
+}
+
+func waitAny(page *rod.Page, sels []string, wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if hasAny(page.Timeout(2*time.Second), sels) {
+			return true
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	return false
+}
+
+func minDur(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // logAudioJoined records which audio controls exist and where PulseAudio

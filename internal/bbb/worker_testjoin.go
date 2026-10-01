@@ -2,6 +2,7 @@ package bbb
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -34,7 +35,17 @@ func (w *Worker) tickTest(ctx context.Context, now time.Time, wanted map[string]
 	w.ensureTest(ctx, tj, now)
 }
 
+const maxTestFails = 3
+
 func (w *Worker) ensureTest(ctx context.Context, tj model.TestJoin, now time.Time) {
+	w.mu.Lock()
+	_, live := w.sessions[testSessionKey]
+	wait := !live && time.Now().Before(w.testRetryAt)
+	w.mu.Unlock()
+	if wait {
+		logx.Debugf("bbb", "ensureTest: backoff")
+		return
+	}
 	if !w.beginJoin(testSessionKey) {
 		logx.Debugf("bbb", "ensureTest: join already in flight")
 		return
@@ -200,6 +211,7 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		state = model.TestLobby
 		msg = "лобби, жду модератора"
 	}
+	w.resetTestFails()
 	w.hogs().Hold()
 	w.mu.Lock()
 	w.sessions[testSessionKey] = sess
@@ -231,6 +243,9 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 // If the user pressed leave (or switched mode) while the join was in flight,
 // the fresh DB state wins and nothing is written or notified.
 func (w *Worker) testFailed(ctx context.Context, tj model.TestJoin, msg string) {
+	if ctx.Err() != nil {
+		return
+	}
 	latest, err := w.Store.GetTestJoin()
 	if err != nil {
 		logx.Errorf("bbb", "testFailed: reload: %v", err)
@@ -240,17 +255,40 @@ func (w *Worker) testFailed(ctx context.Context, tj model.TestJoin, msg string) 
 		logx.Infof("bbb", "testFailed: want changed latest=%q stale=%q — error not recorded", latest.Want, tj.Want)
 		return
 	}
-	if latest.Status == model.TestError && latest.Message == msg {
-		logx.Debugf("bbb", "testFailed: same error already reported, skip notify")
-		return
-	}
+	// Статус в БД перед попыткой всегда «захожу», поэтому дубли ловим в памяти.
+	w.mu.Lock()
+	w.testFailN++
+	n := w.testFailN
+	repeat := w.testLastFail == msg
+	w.testLastFail = msg
+	w.testRetryAt = time.Now().Add(joinRetryBase * time.Duration(1<<(min(n, 4)-1)))
+	w.mu.Unlock()
 	latest.Status = model.TestError
 	latest.Mode = ""
 	latest.Message = msg
+	stop := n >= maxTestFails
+	if stop {
+		latest.Want = model.TestWantOff
+		latest.Message = fmt.Sprintf("%d попытки не удались: %s", n, msg)
+	}
 	if perr := w.Store.PutTestJoin(latest); perr != nil {
 		logx.Errorf("bbb", "testFailed: put: %v", perr)
 	}
-	notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл — "+msg)
+	switch {
+	case stop:
+		w.resetTestFails()
+		notify.Admin(ctx, w.Cfg, fmt.Sprintf("тест BBB: %d попытки не удались, останавливаюсь — %s", n, msg))
+	case !repeat:
+		notify.Admin(ctx, w.Cfg, "тест BBB: не зашёл, пробую ещё — "+msg)
+	}
+}
+
+func (w *Worker) resetTestFails() {
+	w.mu.Lock()
+	w.testFailN = 0
+	w.testLastFail = ""
+	w.testRetryAt = time.Time{}
+	w.mu.Unlock()
 }
 
 func testInRoomText(tj model.TestJoin) string {
@@ -311,6 +349,15 @@ func (w *Worker) stopTest(ctx context.Context, reason string, ping bool) {
 			logx.Debugf("bbb", "stopTest: close: %v", err)
 		}
 		w.hogs().Release()
+	}
+	if !ok && reason != "off" {
+		// Нечего закрывать: не затираем статус (например, «идёт пара: Chrome занят»)
+		// и не пишем в БД каждый тик.
+		logx.Debugf("bbb", "stopTest: nothing live reason=%s", reason)
+		return
+	}
+	if reason == "off" {
+		w.resetTestFails()
 	}
 	tj, err := w.Store.GetTestJoin()
 	if err == nil {

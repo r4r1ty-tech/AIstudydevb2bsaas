@@ -1,6 +1,7 @@
 package proxyrelay
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -90,19 +91,23 @@ func TestPoolSkipsDead(t *testing.T) {
 	}
 }
 
-func TestPoolAllDeadGoesDirect(t *testing.T) {
+func TestPoolAllDeadReportsAndRevives(t *testing.T) {
 	pool := NewPool([]Proxy{{Host: "127.0.0.1", Port: "1"}})
 	defer func() { _ = pool.Close() }()
 	s, _ := pool.Next()
 	for i := 0; i < maxSlotFails; i++ {
 		s.Fail()
 	}
-	got, err := pool.Next()
-	if err != nil {
-		t.Fatalf("Next: %v", err)
+	// Все мертвы — не тихий прямой заход, а явная ошибка.
+	if got, err := pool.Next(); !errors.Is(err, ErrAllDead) || got != nil {
+		t.Fatalf("Next = %v %v, want ErrAllDead", got, err)
 	}
-	if got != nil {
-		t.Fatalf("expected nil (direct) when all dead, got %s", got.Redacted())
+	// Через reviveAfter прокси получает пробную попытку.
+	old := reviveAfter
+	reviveAfter = 0
+	defer func() { reviveAfter = old }()
+	if got, err := pool.Next(); err != nil || got == nil {
+		t.Fatalf("half-open: %v %v", got, err)
 	}
 }
 
@@ -114,5 +119,15 @@ func TestNilPoolNext(t *testing.T) {
 	}
 	if pool.Len() != 0 {
 		t.Fatalf("nil pool len")
+	}
+}
+
+func TestParseLinesSkipsBadLine(t *testing.T) {
+	got, err := ParseLines(strings.NewReader("u:p@1.2.3.4:1080\nкривая строка\nu:p@5.6.7.8:1080\n"))
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %v %v, want 2 proxies", got, err)
+	}
+	if _, err := ParseLines(strings.NewReader("кривая\n")); err == nil {
+		t.Fatal("all lines bad must be an error")
 	}
 }

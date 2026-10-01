@@ -198,8 +198,27 @@ func TestShotPresentationFallsBackToPage(t *testing.T) {
 	}
 	dir := filepath.Join(t.TempDir(), "s")
 	n, err := (&chromeSession{page: page}).GrabSlides(context.Background(), dir)
-	if err != nil || n != 1 {
-		t.Fatalf("page screenshot fallback: n=%d err=%v", n, err)
+	if err != nil || n != 0 {
+		t.Fatalf("no presentation must give no slides (not a page screenshot): n=%d err=%v", n, err)
+	}
+}
+
+// Последний слайд: кнопка «дальше» остаётся в DOM, но disabled — останавливаемся,
+// а не снимаем десятки дублей.
+func TestGrabSlidesStopsOnDisabledNext(t *testing.T) {
+	page := openLocal(t, `<!doctype html><body style="margin:0">
+<div data-test="presentationInner" id="p" style="width:320px;height:200px;background:#c00">1</div>
+<button data-test="nextSlide" id="n" onclick="
+  const p = document.getElementById('p'); const i = +p.textContent + 1; p.textContent = i;
+  p.style.background = ['#c00','#0c0'][i-1]; if (i >= 2) this.disabled = true">next</button></body>`)
+	dir := filepath.Join(t.TempDir(), "slides")
+	start := time.Now()
+	n, err := (&chromeSession{page: page}).GrabSlides(context.Background(), dir)
+	if err != nil || n != 2 {
+		t.Fatalf("slides = %d %v, want 2", n, err)
+	}
+	if time.Since(start) > 15*time.Second {
+		t.Fatalf("took %s — kept clicking a disabled button", time.Since(start))
 	}
 }
 

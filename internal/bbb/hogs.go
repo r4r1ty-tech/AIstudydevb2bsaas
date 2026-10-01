@@ -35,7 +35,32 @@ type procHogs struct {
 
 func newProcHogs() *procHogs {
 	logx.Debugf("bbb", "newProcHogs: procDir=/proc")
+	// Список замороженных PID жил только в памяти прошлого процесса: если bbb
+	// убили во время пары (OOM, SIGKILL), Cursor так и остался в SIGSTOP.
+	if n := thawHogs(stoppedHogs("/proc", os.Getpid(), os.Getppid())); n > 0 {
+		logx.Warnf("bbb", "lecture pause: разморозил %d процессов, оставшихся от прошлого запуска", n)
+	}
 	return &procHogs{procDir: "/proc"}
+}
+
+// stoppedHogs — hog-процессы в состоянии T (stopped).
+func stoppedHogs(procDir string, self, ppid int) []int {
+	var out []int
+	for _, pid := range listHogPIDs(procDir, self, ppid) {
+		raw, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "stat"))
+		if err != nil {
+			continue
+		}
+		// pid (comm) S ... — comm может содержать скобки и пробелы, режем по последней ')'.
+		i := bytes.LastIndexByte(raw, ')')
+		if i < 0 || i+2 >= len(raw) {
+			continue
+		}
+		if raw[i+2] == 'T' {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 func (g *procHogs) Hold() {

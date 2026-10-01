@@ -134,3 +134,43 @@ func TestChromeAudioLine(t *testing.T) {
 		}
 	}
 }
+
+// Прод 17–18.09: `fillGuestName: join click: context deadline exceeded`. Первым
+// в DOM стоял скрытый submit формы логина Greenlight; rod ждал, когда он станет
+// кликабельным, до дедлайна. Кнопка гостевой формы так и не нажималась.
+func TestFillGuestNameSkipsHiddenSubmit(t *testing.T) {
+	page := openLocal(t, `<!doctype html><body>
+<form id="login" style="display:none"><input name="email"><button type="submit" onclick="document.body.dataset.login='1'">Sign in</button></form>
+<form id="guest" onsubmit="event.preventDefault(); document.body.dataset.joined=document.getElementById('join_name').value">
+<input id="join_name" type="text"><label><input type="checkbox" id="agree" checked> согласен</label>
+<button type="submit">Join Room</button></form></body>`)
+	start := time.Now()
+	if err := fillGuestName(page, "Иванов Иван"); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) > 6*time.Second {
+		t.Fatalf("join took %s — waited on a hidden button", time.Since(start))
+	}
+	if got := dataset(t, page, "joined"); got != "Иванов Иван" {
+		t.Fatalf("guest form not submitted: %q", got)
+	}
+	if dataset(t, page, "login") != "" {
+		t.Fatal("clicked the hidden login submit")
+	}
+	res, err := page.Eval(`() => document.getElementById('agree').checked`)
+	if err != nil || !res.Value.Bool() {
+		t.Fatal("checked consent box must stay checked")
+	}
+}
+
+// Кнопки нет вовсе (React-форма без submit) — форма уходит через requestSubmit.
+func TestFillGuestNameSubmitsFormWithoutButton(t *testing.T) {
+	page := openLocal(t, `<!doctype html><body>
+<form onsubmit="event.preventDefault(); document.body.dataset.joined='1'"><input id="join_name" type="text"></form></body>`)
+	if err := fillGuestName(page, "Иванов Иван"); err != nil {
+		t.Fatal(err)
+	}
+	if dataset(t, page, "joined") != "1" {
+		t.Fatal("form without a button was not submitted")
+	}
+}

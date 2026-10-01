@@ -38,40 +38,17 @@ func (w *Worker) recRoot() string {
 	return config.DefaultRecordings
 }
 
-func (w *Worker) pickRecorder(users []model.User, lesson model.Lesson, now time.Time) int64 {
-	if w == nil || w.Store == nil {
-		return 0
-	}
-	var id int64
-	for _, u := range users {
-		if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
-			continue
-		}
-		intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)
-		if err != nil {
-			logx.Debugf("bbb", "pickRecorder: intent tg=%d lesson=%d: %v", u.TelegramID, lesson.ID, err)
-			continue
-		}
-		if !WantsJoin(intent) {
-			continue
-		}
-		if id == 0 || u.TelegramID < id {
-			id = u.TelegramID
-		}
-	}
-	logx.Debugf("bbb", "pickRecorder: lesson=%d -> tg=%d", lesson.ID, id)
-	return id
-}
-
-func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.Lesson, url string) Session {
+// attachRecorder вешает запись на вкладку; recording=false — запись не стартовала,
+// вкладка остаётся просто присутствием.
+func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.Lesson, url string) (Session, bool) {
 	if w == nil || w.Store == nil || sess == nil {
-		return sess
+		return sess, false
 	}
 	logx.Debugf("bbb", "attachRecorder: lesson=%d discipline=%q url=%s", lesson.ID, lesson.Discipline, redactURL(url))
 	pack, err := w.Store.EnsurePack(lesson, url, w.recRoot())
 	if err != nil || pack == nil {
 		logx.Errorf("bbb", "pack: %v", err)
-		return sess
+		return sess, false
 	}
 	abs := filepath.Join(w.recRoot(), pack.Dir)
 	seg := capture.SegmentPath(abs, time.Now().UnixNano())
@@ -79,7 +56,7 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 	if err != nil {
 		logx.Errorf("bbb", "ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"» не стартовала: "+err.Error())
-		return sess
+		return sess, false
 	}
 	logx.Infof("bbb", "rec segment %s", filepath.Base(seg))
 	logx.Infof("bbb", "recording started pack=%d dir=%s", pack.Number, pack.Dir)
@@ -119,7 +96,7 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 		if err := st.SavePack(p); err != nil {
 			logx.Errorf("bbb", "attachRecorder: save recorded pack=%s: %v", p.Dir, err)
 		}
-	}}
+	}}, true
 }
 
 func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
@@ -304,7 +281,7 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	fio := "архив"
 	if users, err := w.Store.ListUsers(); err == nil {
 		for _, u := range users {
-			if u.FIO != "" {
+			if u.FIO != "" && u.Active(time.Now()) {
 				fio = u.FIO
 				break
 			}
@@ -324,9 +301,18 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 		}
 		w.hogs().Release()
 	}()
+	// Join считает успехом и лобби / «встреча не началась» — слайдов там нет.
+	if room, err := sess.InRoom(ctx); err != nil || !room {
+		logx.Warnf("bbb", "slides %s/%d: не в комнате (err=%v) — пропускаю", p.Discipline, p.Number, err)
+		return
+	}
 	n, err := sess.GrabSlides(ctx, archive.SlidesDir(filepath.Join(w.recRoot(), p.Dir)))
 	if err != nil {
 		logx.Warnf("bbb", "slides grab %s/%d: %v", p.Discipline, p.Number, err)
+	}
+	if n == 0 {
+		logx.Warnf("bbb", "slides %s/%d: презентации нет — статус не меняю", p.Discipline, p.Number)
+		return
 	}
 	p.Status = model.PackSlides
 	if err := w.Store.SavePack(p); err != nil {
@@ -339,7 +325,7 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 		logx.Debugf("bbb", "harvestSlides: add event: %v", err)
 	}
 	logx.Infof("bbb", "slides %s/%d n=%d", p.Discipline, p.Number, n)
-	notify.Admin(ctx, w.Cfg, "слайды сняты: "+archive.Rel(p.Discipline, p.Number))
+	notify.Admin(ctx, w.Cfg, fmt.Sprintf("слайды сняты: %s (%d)", archive.Rel(p.Discipline, p.Number), n))
 }
 
 // buildNotes builds and publishes one pack; false means it failed.
@@ -599,8 +585,10 @@ func (w *Worker) beginJob(needQuiet bool) bool {
 		logx.Debugf("bbb", "beginJob: busy")
 		return false
 	}
-	if needQuiet && len(w.sessions) > 0 {
-		logx.Debugf("bbb", "beginJob: quiet but sessions=%d", len(w.sessions))
+	// Заходы идут в горутинах и попадают в sessions не сразу — учитываем и их,
+	// и пары, которые этот тик решил посетить: LLM/STT на старте пары кладут VDS.
+	if needQuiet && (len(w.sessions) > 0 || len(w.joining) > 0 || w.lectureNow) {
+		logx.Debugf("bbb", "beginJob: quiet but sessions=%d joining=%d lecture=%v", len(w.sessions), len(w.joining), w.lectureNow)
 		return false
 	}
 	w.busy = true

@@ -25,3 +25,15 @@ func TestClassifySeat(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifySeatModernLobbyTexts(t *testing.T) {
+	for _, txt := range []string{
+		"Please wait for a moderator to approve you joining the meeting",
+		"The meeting hasn’t started yet",
+		"Подождите, пока модератор одобрит ваш вход",
+	} {
+		if got := classifySeat(seatSignals{text: txt}); got != seatLobby {
+			t.Errorf("%q -> %s, want lobby", txt, got)
+		}
+	}
+}

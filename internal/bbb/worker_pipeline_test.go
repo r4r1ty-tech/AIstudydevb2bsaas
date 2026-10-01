@@ -305,7 +305,7 @@ func TestTestJoinWatchAndFail(t *testing.T) {
 	}
 
 	h.w.testFailed(context.Background(), tj, "форма гостя")
-	h.wantSent(adminTG, "тест BBB: не зашёл — форма гостя")
+	h.wantSent(adminTG, "тест BBB: не зашёл, пробую ещё — форма гостя")
 	n := len(h.sentTo(adminTG))
 	latest, _ := h.st.GetTestJoin()
 	h.w.testFailed(context.Background(), latest, "форма гостя")
@@ -381,5 +381,26 @@ func TestNotesDayStaysOpenUntilAttemptsRunOut(t *testing.T) {
 	}
 	if done := h.w.buildNotesDay(context.Background(), p.Date); !done {
 		t.Fatal("day must close once attempts are spent")
+	}
+}
+
+// Перед каждой попыткой статус в БД «захожу» — дубли и лимит считаются в памяти.
+func TestTestJoinStopsAfterRepeatedFails(t *testing.T) {
+	h := newWorkerHarness(t)
+	tj, _ := h.st.GetTestJoin()
+	tj.URL, tj.Want = "https://bbb.ssau.ru/b/t", model.TestWantDummy
+	for i := 0; i < maxTestFails; i++ {
+		tj.Status, tj.Message = model.TestJoining, "захожу"
+		if err := h.st.PutTestJoin(tj); err != nil {
+			t.Fatal(err)
+		}
+		h.w.testFailed(context.Background(), tj, "форма гостя")
+	}
+	if n := len(h.sentTo(adminTG)); n != 2 {
+		t.Fatalf("admin messages = %d, want first fail + stop", n)
+	}
+	h.wantSent(adminTG, "останавливаюсь")
+	if got, _ := h.st.GetTestJoin(); got.Want != model.TestWantOff || got.Status != model.TestError {
+		t.Fatalf("test join = %+v", got)
 	}
 }
