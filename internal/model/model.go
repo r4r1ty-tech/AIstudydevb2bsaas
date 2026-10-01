@@ -197,6 +197,11 @@ func BBBKey(groupID int64, discipline, teacher string) string {
 	return out
 }
 
+// BBBRoomKey — комната предмета у препода, переживает смену id пар между неделями.
+func BBBRoomKey(discipline, teacher string) string {
+	return "room|" + strings.TrimSpace(discipline) + "|" + strings.TrimSpace(teacher)
+}
+
 func BBBLessonKey(lessonID int64) string {
 	logx.Debugf("model", "BBBLessonKey: lesson=%d", lessonID)
 	if lessonID <= 0 {

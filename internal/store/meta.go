@@ -22,9 +22,11 @@ func (s *Store) GetLessonBBB(lessonID int64) string {
 		logx.Warnf("store", "GetLessonBBB: get bbb lesson_id=%d: %v", lessonID, err)
 		return ""
 	}
-	if b == nil {
-		logx.Debugf("store", "GetLessonBBB: no link lesson_id=%d", lessonID)
-		return ""
+	if b == nil || strings.TrimSpace(b.URL) == "" {
+		// id пары меняется каждую неделю: берём комнату того же предмета и препода.
+		out := s.roomBBB(lessonID)
+		logx.Debugf("store", "GetLessonBBB: room fallback lesson_id=%d present=%v", lessonID, out != "")
+		return out
 	}
 	out := strings.TrimSpace(b.URL)
 	logx.Debugf("store", "GetLessonBBB: out lesson_id=%d present=%v", lessonID, out != "")
@@ -42,8 +44,42 @@ func (s *Store) SetLessonBBB(lessonID int64, url string) error {
 		logx.Errorf("store", "SetLessonBBB: set bbb lesson_id=%d: %v", lessonID, err)
 		return err
 	}
+	l, err := s.LessonByID(lessonID)
+	if err != nil {
+		logx.Warnf("store", "SetLessonBBB: lesson_id=%d: %v", lessonID, err)
+	} else if l != nil {
+		if err := s.SetBBB(model.BBBRoomKey(l.Discipline, l.Teacher), strings.TrimSpace(url)); err != nil {
+			logx.Errorf("store", "SetLessonBBB: set room lesson_id=%d: %v", lessonID, err)
+			return err
+		}
+	}
 	logx.Debugf("store", "SetLessonBBB: done lesson_id=%d", lessonID)
 	return nil
+}
+
+// roomBBB ищет ссылку по предмету и преподу пары: ключ из SetLessonBBB
+// ("room|предмет|препод") или из панели ("<group>|предмет|препод").
+func (s *Store) roomBBB(lessonID int64) string {
+	l, err := s.LessonByID(lessonID)
+	if err != nil || l == nil {
+		logx.Debugf("store", "roomBBB: lesson_id=%d missing err=%v", lessonID, err)
+		return ""
+	}
+	suffix := "|" + strings.TrimSpace(l.Discipline) + "|" + strings.TrimSpace(l.Teacher)
+	var url string
+	err = s.db.QueryRow(
+		`SELECT url FROM bbb_links WHERE substr(key, -length(?)) = ? AND trim(url) <> ''
+		 ORDER BY updated_at DESC, rowid DESC LIMIT 1`,
+		suffix, suffix,
+	).Scan(&url)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	if err != nil {
+		logx.Warnf("store", "roomBBB: lesson_id=%d: %v", lessonID, err)
+		return ""
+	}
+	return strings.TrimSpace(url)
 }
 
 func (s *Store) GetBBB(key string) (*model.BBBLink, error) {

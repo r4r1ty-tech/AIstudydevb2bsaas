@@ -210,3 +210,49 @@ func TestUseAfterCloseIsAnError(t *testing.T) {
 		t.Fatal("GetTestJoin after Close must fail")
 	}
 }
+
+func TestLessonBBBCarriesToNextWeek(t *testing.T) {
+	s := openTemp(t)
+	mk := func(date string) model.Lesson {
+		begin, _ := time.Parse(time.RFC3339, date+"T09:45:00+04:00")
+		return model.Lesson{Date: date, Start: "09:45", End: "11:20", Begin: begin, Finish: begin.Add(95 * time.Minute),
+			Discipline: "Статистический анализ данных", Teacher: "Колоденкова А.Е.", Place: "online", Type: "Практика", Online: true}
+	}
+	if err := s.ReplaceLessons([]model.Lesson{mk("2026-09-28")}); err != nil {
+		t.Fatal(err)
+	}
+	ls, _ := s.ListLessons()
+	if err := s.SetLessonBBB(ls[0].ID, "https://bbb.ssau.ru/b/kol-abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceLessons([]model.Lesson{mk("2026-10-05")}); err != nil {
+		t.Fatal(err)
+	}
+	ls, _ = s.ListLessons()
+	if len(ls) != 1 || ls[0].Date != "2026-10-05" {
+		t.Fatalf("lessons = %+v", ls)
+	}
+	if got := s.GetLessonBBB(ls[0].ID); got != "https://bbb.ssau.ru/b/kol-abc" {
+		t.Fatalf("next week link = %q", got)
+	}
+
+	// Ключ из панели «группа|предмет|препод» тоже подхватывается и свежий побеждает.
+	if err := s.SetBBB(model.BBBKey(531023229, "Статистический анализ данных", "Колоденкова А.Е."), "https://bbb.ssau.ru/b/panel"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.GetLessonBBB(ls[0].ID); got != "https://bbb.ssau.ru/b/panel" {
+		t.Fatalf("panel link = %q", got)
+	}
+	other := mk("2026-10-05")
+	other.Teacher = "Иванов И.И."
+	other.Start = "11:30"
+	if err := s.ReplaceLessons([]model.Lesson{mk("2026-10-05"), other}); err != nil {
+		t.Fatal(err)
+	}
+	ls, _ = s.ListLessons()
+	for _, l := range ls {
+		if l.Teacher == "Иванов И.И." && s.GetLessonBBB(l.ID) != "" {
+			t.Fatal("other teacher must not reuse the room")
+		}
+	}
+}
