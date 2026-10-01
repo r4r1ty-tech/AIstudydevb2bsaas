@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+
+# Закрытая грамматика «подгоняет» шум и чужую речь под слова словаря: финальный
+# результат берём только по словам с уверенностью не ниже порога, partial —
+# только если слово держится в двух partial подряд.
+MIN_CONF = float(os.environ.get("WAKE_MIN_CONF", "0.7"))
 
 
 def emit(text: str) -> None:
@@ -12,6 +18,15 @@ def emit(text: str) -> None:
     if text:
         sys.stdout.write(text + "\n")
         sys.stdout.flush()
+
+
+def confident(res: dict) -> str:
+    out = []
+    for w in res.get("result") or []:
+        word = str(w.get("word", ""))
+        if word and word != "[unk]" and float(w.get("conf", 0)) >= MIN_CONF:
+            out.append(word)
+    return " ".join(out)
 
 
 def main() -> int:
@@ -43,23 +58,27 @@ def main() -> int:
 
     grammar = json.dumps(words + ["[unk]"], ensure_ascii=False)
     rec = KaldiRecognizer(Model(args.model), args.rate, grammar)
+    rec.SetWords(True)
 
     buf = sys.stdin.buffer
-    last = ""
+    prev: set[str] = set()
+    sent: set[str] = set()
     while True:
         data = buf.read(4000)
         if not data:
-            tail = json.loads(rec.FinalResult()).get("text") or ""
-            emit(tail)
+            emit(confident(json.loads(rec.FinalResult())))
             break
         if rec.AcceptWaveform(data):
-            emit(json.loads(rec.Result()).get("text") or "")
-            last = ""
+            emit(confident(json.loads(rec.Result())))
+            prev, sent = set(), set()
             continue
-        partial = (json.loads(rec.PartialResult()).get("partial") or "").strip()
-        if partial and partial != last:
-            last = partial
-            emit(partial)
+        partial = (json.loads(rec.PartialResult()).get("partial") or "").split()
+        words = {w for w in partial if w != "[unk]"}
+        stable = (words & prev) - sent
+        if stable:
+            sent |= stable
+            emit(" ".join(sorted(stable)))
+        prev = words
     return 0
 
 

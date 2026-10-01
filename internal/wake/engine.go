@@ -61,13 +61,9 @@ func (e *Engine) Feed(pcm []byte, sampleRate int, vocab []string) []Hit {
 		logx.Debugf("wake", "Feed: trimming buf=%d to maxBuf=%d", len(e.buf), maxBuf)
 		e.buf = append([]byte(nil), e.buf[len(e.buf)-maxBuf:]...)
 	}
-	overlap := need / 4
-	if overlap%2 != 0 {
-		overlap--
-	}
-	if overlap < 2 {
-		overlap = 0
-	}
+	// wake.py — один непрерывный поток KaldiRecognizer: перекрытие окон дало бы
+	// ему 4/3 реального времени и повторы кусков. Режем без перекрытия.
+	overlap := 0
 	var chunks [][]byte
 	for len(e.buf) >= need {
 		chunk := make([]byte, need)

@@ -450,6 +450,8 @@ func notesStatus(st string) string {
 		return "собираю PDF"
 	case model.PackError:
 		return "не собрался"
+	case model.PackEmpty:
+		return "записи нет — конспекта не будет"
 	default:
 		return st
 	}

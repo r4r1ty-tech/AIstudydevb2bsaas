@@ -3,6 +3,7 @@ package bbb
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -392,6 +393,9 @@ func (w *Worker) attachTestRecorder(ctx context.Context, sess Session) Session {
 	}
 	logx.Debugf("bbb", "attachTestRecorder: enter")
 	dir := filepath.Join(w.recRoot(), "test")
+	// Мастер прошлого теста не нужен: иначе каждый тест дописывает к нему свой
+	// сегмент и файл растёт месяцами.
+	_ = os.Remove(filepath.Join(dir, "audio.ogg"))
 	seg := capture.SegmentPath(dir, time.Now().UnixNano())
 	rec, err := startRecorder(ctx, seg)
 	if err != nil {

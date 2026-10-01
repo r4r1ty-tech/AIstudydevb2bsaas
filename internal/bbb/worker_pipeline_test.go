@@ -134,12 +134,17 @@ func TestBuildNotesDayRetriesErrorsAndPromotesStuck(t *testing.T) {
 		t.Fatalf("stuck recording should be promoted and attempted, status=%s", got.Status)
 	}
 
+	// Нет звука — пак закрывается как empty один раз, день не держит.
 	small := h.pack(h.lesson("Матан", "Лекция", 4*time.Hour), model.PackRecording)
 	h.write(small.Audio, "tiny")
-	if h.w.promoteStuckRecording(small) {
-		t.Fatal("tiny audio is not a recording")
+	if r := h.w.promoteStuckRecording(context.Background(), small); r != stuckEmpty {
+		t.Fatalf("tiny audio: %v, want empty", r)
 	}
-	if h.w.promoteStuckRecording(nil) {
+	if got, _ := h.st.PackByID(small.ID); got.Status != model.PackEmpty {
+		t.Fatalf("status = %s", got.Status)
+	}
+	h.wantSent(adminTG, "записи нет")
+	if r := h.w.promoteStuckRecording(context.Background(), nil); r != stuckWait {
 		t.Fatal("nil pack")
 	}
 }
