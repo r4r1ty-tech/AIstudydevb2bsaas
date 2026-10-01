@@ -44,7 +44,7 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 | `join_intents` | `(telegram_id, lesson_id)` | решение по T-15: `pending/yes/no`, `asked_at`, `decided_at` |
 | `presence` | `telegram_id` | текущее состояние в BBB: `none/lobby/room/error` + сообщение |
 | `events` | `id` | лента для вкладки «Логи»: join/leave/lobby/wake/reparse/error/… |
-| `bbb_links` | `key` | ссылка комнаты. Ключ `lesson:<id>` (старые ключи «предмет+препод» не читаются воркером) |
+| `bbb_links` | `key` | ссылка комнаты. `SetLessonBBB` пишет `lesson:<id>` и `room|предмет|препод`; `GetLessonBBB` без `lesson:<id>` берёт самый свежий ключ `*|предмет|препод` (id пар меняются каждую неделю) |
 | `lecture_packs` | `lesson_id` | запись/слайды/конспект: статус, пути, ошибка |
 | `parse_runs` | `id` | последний прогон парсера: время, ок/статус, счётчики, дифф |
 | `settings` | `key` | `test_join`, `group_id`, `rasp_refresh`, `admin_id`, `slides_done:*`, `notes_done:*` |
