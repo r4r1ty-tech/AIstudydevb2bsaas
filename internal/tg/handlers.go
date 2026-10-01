@@ -567,8 +567,11 @@ func (b *Bot) formatLinkReply(u *model.User) (string, error) {
 			break
 		}
 		mark := "нет ссылки"
-		if url := b.lookupBBB(l.ID); url != "" {
+		if url, own, err := b.st.LessonBBB(l.ID); err == nil && url != "" {
 			mark = "ссылка есть"
+			if !own {
+				mark = "ссылка с прошлой недели"
+			}
 		}
 		upcoming = append(upcoming, fmt.Sprintf("• %s · %s — %s", l.Discipline, l.SlotLabel(), mark))
 	}
@@ -598,7 +601,7 @@ func (b *Bot) handleBBBURL(userID, chatID int64, url string) error {
 		}
 		return b.send(chatID, noBBBTarget, nil)
 	}
-	// Только lesson:{id}. Старые ключи «предмет на семестр» воркер больше не читает.
+	// lesson:{id} плюс комната предмета у препода этого типа — на следующих неделях подставится сама.
 	if err := b.st.SetLessonBBB(lesson.ID, url); err != nil {
 		logx.Errorf("tg", "handleBBBURL: set lesson bbb lesson=%d: %v", lesson.ID, err)
 		return err
@@ -644,8 +647,11 @@ func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
 			return l
 		}
 	}
+	// Только своя ссылка пары: унаследованная от комнаты предмета не мешает
+	// привязать присланный URL к ближайшей паре.
 	hasLink := func(lessonID int64) bool {
-		return strings.TrimSpace(b.lookupBBB(lessonID)) != ""
+		url, own, err := b.st.LessonBBB(lessonID)
+		return err == nil && own && strings.TrimSpace(url) != ""
 	}
 	intents := make(map[int64]time.Time)
 	for _, l := range lessons {

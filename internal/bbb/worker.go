@@ -131,17 +131,29 @@ func (w *Worker) tick(ctx context.Context) {
 	var joins []pending
 	needLecture := false
 	validLessons := make(map[int64]struct{})
+	// dbErr: тик видел неполную картину — живые сессии не трогаем, иначе
+	// один сбой SQLite выкинет всех из комнат и оборвёт запись.
+	dbErr := false
 
 	lessons, err := w.Store.LessonsInJoinWindow(now, JoinEarlyYes)
 	if err != nil {
 		logx.Errorf("bbb", "lessons: %v", err)
+		dbErr = true
 	} else if users, err := w.Store.ListUsers(); err != nil {
 		logx.Errorf("bbb", "users: %v", err)
+		dbErr = true
 	} else {
 		logx.Debugf("bbb", "tick: lessons=%d users=%d", len(lessons), len(users))
 		for _, lesson := range lessons {
 			validLessons[lesson.ID] = struct{}{}
-			url := strings.TrimSpace(w.Store.GetLessonBBB(lesson.ID))
+			url, _, err := w.Store.LessonBBB(lesson.ID)
+			if err != nil {
+				// Сбой БД — не «нет ссылки»: не шлём ложное «пришли ссылку».
+				logx.Errorf("bbb", "tick: lesson bbb lesson=%d: %v", lesson.ID, err)
+				dbErr = true
+				continue
+			}
+			url = strings.TrimSpace(url)
 			recID := int64(0)
 			if url != "" && model.IsLecture(lesson.Type) {
 				recID = w.pickRecorder(users, lesson, now)
@@ -154,7 +166,8 @@ func (w *Worker) tick(ctx context.Context) {
 				}
 				intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)
 				if err != nil {
-					logx.Debugf("bbb", "tick: intent tg=%d lesson=%d: %v", u.TelegramID, lesson.ID, err)
+					logx.Errorf("bbb", "tick: intent tg=%d lesson=%d: %v", u.TelegramID, lesson.ID, err)
+					dbErr = true
 					continue
 				}
 				if !WantsJoin(intent) {
@@ -200,6 +213,11 @@ func (w *Worker) tick(ctx context.Context) {
 			defer w.joinWG.Done()
 			w.ensureIn(ctx, j.u, j.lesson, j.url, j.key, now, j.record)
 		}()
+	}
+
+	if dbErr {
+		logx.Warnf("bbb", "tick: db error, keep live sessions as is")
+		return
 	}
 
 	w.mu.Lock()

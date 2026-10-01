@@ -288,26 +288,21 @@ func (s *Server) handleLessons(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store error")
 		return
 	}
-	byKey := make(map[string]string, len(bbb))
-	for _, b := range bbb {
-		byKey[b.Key] = b.URL
-	}
 	out := make([]lessonDTO, 0, len(lessons))
 	for _, l := range lessons {
 		dto := lessonDTO{Lesson: l}
-		if u, ok := byKey[model.BBBLessonKey(l.ID)]; ok {
-			dto.BBBURL = u
-		}
+		dto.BBBURL, _ = model.ResolveBBB(l, bbb)
 		out = append(out, dto)
 	}
 	if bbb == nil {
 		bbb = []model.BBBLink{}
 	}
-	logx.Debugf("webapp", "handleLessons: lessons=%d bbb=%d recordings=%d", len(out), len(bbb), len(s.listPackRecordings()))
+	recs := s.listPackRecordings()
+	logx.Debugf("webapp", "handleLessons: lessons=%d bbb=%d recordings=%d", len(out), len(bbb), len(recs))
 	writeJSON(w, lessonsResponse{
 		Lessons:    out,
 		BBB:        bbb,
-		Recordings: s.listPackRecordings(),
+		Recordings: recs,
 		GroupID:    s.cfg.GroupID,
 	})
 }
@@ -328,7 +323,25 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(req.Key)
 	if req.LessonID > 0 {
-		key = model.BBBLessonKey(req.LessonID)
+		l, err := s.st.LessonByID(req.LessonID)
+		if err != nil {
+			logx.Errorf("webapp", "handleBBB: LessonByID %d: %v", req.LessonID, err)
+			writeStoreErr(w, err)
+			return
+		}
+		if l == nil {
+			writeErr(w, http.StatusNotFound, "lesson not found")
+			return
+		}
+		// Как в боте: пара + комната предмета у препода этого типа.
+		if err := s.st.SetLessonBBB(l.ID, req.URL); err != nil {
+			logx.Errorf("webapp", "handleBBB: SetLessonBBB %d: %v", l.ID, err)
+			writeStoreErr(w, err)
+			return
+		}
+		key = model.BBBLessonKey(l.ID)
+		writeJSON(w, model.BBBLink{Key: key, URL: req.URL, UpdatedAt: time.Now()})
+		return
 	}
 	if key == "" {
 		if strings.TrimSpace(req.Discipline) == "" && strings.TrimSpace(req.Teacher) == "" {

@@ -255,3 +255,34 @@ func jsonInt(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
 }
+
+func TestHandleLessonsShowsInheritedRoom(t *testing.T) {
+	s, st := newServer(t, nil)
+	lesson := seedLesson(t, st, true)
+	if err := st.SetBBB(model.BBBRoomKey(lesson.Discipline, lesson.Teacher, lesson.Type), "https://bbb.ssau.ru/b/room"); err != nil {
+		t.Fatal(err)
+	}
+	rec := call(t, s, http.MethodGet, "/api/lessons", "")
+	var resp lessonsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Lessons) != 1 || resp.Lessons[0].BBBURL != "https://bbb.ssau.ru/b/room" {
+		t.Fatalf("lessons = %+v", resp.Lessons)
+	}
+
+	rec = call(t, s, http.MethodPost, "/api/bbb", `{"lesson_id":99999,"url":"https://bbb.ssau.ru/b/x"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown lesson: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := st.SetLessonBBB(lesson.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec = call(t, s, http.MethodPost, "/api/bbb", `{"lesson_id":`+jsonInt(lesson.ID)+`,"url":"https://bbb.ssau.ru/b/new"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set: %d", rec.Code)
+	}
+	if b, _ := st.GetBBB(model.BBBRoomKey(lesson.Discipline, lesson.Teacher, lesson.Type)); b == nil || b.URL != "https://bbb.ssau.ru/b/new" {
+		t.Fatalf("room not updated from panel: %+v", b)
+	}
+}

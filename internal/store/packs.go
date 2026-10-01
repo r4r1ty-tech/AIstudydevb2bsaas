@@ -220,7 +220,7 @@ func scanPack(sc scanner) (*model.LecturePack, error) {
 		&p.ID, &p.LessonID, &disc, &p.Number, &date, &dir, &url, &status,
 		&audio, &tr, &pdf, &errMsg, &pubStatus, &pubAt, &cleaned, &created, &updated,
 	); err != nil {
-		logx.Errorf("store", "scanPack: scan: %v", err)
+		logScanErr("scanPack", err)
 		return nil, err
 	}
 	p.Discipline = nullStr(disc)

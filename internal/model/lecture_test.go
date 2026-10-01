@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestIsLecture(t *testing.T) {
 	t.Parallel()
@@ -49,5 +52,32 @@ func TestLessonIdentity(t *testing.T) {
 	b.Place = "ауд. 1"
 	if a.Identity() == b.Identity() {
 		t.Fatal("place should change identity")
+	}
+}
+func TestResolveBBB(t *testing.T) {
+	l := Lesson{ID: 7, Discipline: "Матан", Teacher: "Иванов", Type: "Лекция"}
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	links := []BBBLink{
+		{Key: BBBKey(1, "Матан", "Иванов"), URL: "panel-old", UpdatedAt: t0},
+		{Key: BBBKey(2, "Матан", "Иванов"), URL: "panel-new", UpdatedAt: t0.Add(time.Hour)},
+		{Key: BBBKey(1, "Матан", "Петров"), URL: "other", UpdatedAt: t0.Add(2 * time.Hour)},
+	}
+	if u, own := ResolveBBB(l, links); u != "panel-new" || own {
+		t.Fatalf("panel = %q %v", u, own)
+	}
+	links = append(links, BBBLink{Key: BBBRoomKey("Матан", "Иванов", "Практика"), URL: "prac"})
+	if u, _ := ResolveBBB(l, links); u != "panel-new" {
+		t.Fatalf("practice room must not apply to lecture: %q", u)
+	}
+	links = append(links, BBBLink{Key: BBBRoomKey("Матан", "Иванов", "Лекция"), URL: "room"})
+	if u, own := ResolveBBB(l, links); u != "room" || own {
+		t.Fatalf("room = %q %v", u, own)
+	}
+	links = append(links, BBBLink{Key: BBBLessonKey(7), URL: ""})
+	if u, own := ResolveBBB(l, links); u != "" || !own {
+		t.Fatalf("cleared own link must win: %q %v", u, own)
+	}
+	if got := BBBLabel(BBBRoomKey("Матан", "Иванов", "Лекция")); got != "Матан · Иванов · Лекция" {
+		t.Fatalf("label = %q", got)
 	}
 }

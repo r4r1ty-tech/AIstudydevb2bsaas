@@ -197,9 +197,48 @@ func BBBKey(groupID int64, discipline, teacher string) string {
 	return out
 }
 
-// BBBRoomKey — комната предмета у препода, переживает смену id пар между неделями.
-func BBBRoomKey(discipline, teacher string) string {
-	return "room|" + strings.TrimSpace(discipline) + "|" + strings.TrimSpace(teacher)
+// BBBRoomKey — комната предмета у препода для этого типа пары (лекция и лаба
+// одного препода бывают в разных комнатах). Переживает смену id пар между неделями.
+func BBBRoomKey(discipline, teacher, typ string) string {
+	return "room|" + strings.TrimSpace(discipline) + "|" + strings.TrimSpace(teacher) + "|" + strings.TrimSpace(typ)
+}
+
+// ResolveBBB выбирает ссылку пары: своя lesson:<id> (пустая — снята явно, без
+// подстановки), иначе комната room|предмет|препод|тип, иначе самый свежий ключ
+// панели <group>|предмет|препод. own=true — ссылка привязана именно к этой паре.
+func ResolveBBB(l Lesson, links []BBBLink) (url string, own bool) {
+	byKey := make(map[string]BBBLink, len(links))
+	for _, b := range links {
+		byKey[b.Key] = b
+	}
+	if b, ok := byKey[BBBLessonKey(l.ID)]; ok && l.ID > 0 {
+		return strings.TrimSpace(b.URL), true
+	}
+	if b, ok := byKey[BBBRoomKey(l.Discipline, l.Teacher, l.Type)]; ok && strings.TrimSpace(b.URL) != "" {
+		return strings.TrimSpace(b.URL), false
+	}
+	disc, teacher := strings.TrimSpace(l.Discipline), strings.TrimSpace(l.Teacher)
+	var best *BBBLink
+	for i := range links {
+		b := links[i]
+		if strings.HasPrefix(b.Key, "lesson:") || strings.HasPrefix(b.Key, "room|") || strings.TrimSpace(b.URL) == "" {
+			continue
+		}
+		if !strings.Contains(b.Key, "|") {
+			continue
+		}
+		d, t := ParseBBBKey(b.Key)
+		if d != disc || t != teacher {
+			continue
+		}
+		if best == nil || b.UpdatedAt.After(best.UpdatedAt) {
+			best = &links[i]
+		}
+	}
+	if best != nil {
+		return strings.TrimSpace(best.URL), false
+	}
+	return "", false
 }
 
 func BBBLessonKey(lessonID int64) string {
@@ -293,6 +332,12 @@ func BBBLabel(key string) string {
 	logx.Debugf("model", "BBBLabel: key=%q", key)
 	if id, ok := ParseBBBLessonID(key); ok {
 		out := fmt.Sprintf("пара %d", id)
+		logx.Debugf("model", "BBBLabel: key=%q -> %q", key, out)
+		return out
+	}
+	if rest, ok := strings.CutPrefix(key, "room|"); ok {
+		parts := strings.Split(rest, "|")
+		out := strings.Join(nonEmpty(parts), " · ")
 		logx.Debugf("model", "BBBLabel: key=%q -> %q", key, out)
 		return out
 	}
@@ -424,4 +469,14 @@ type Presence struct {
 	State      string    `json:"state"`
 	Message    string    `json:"message"`
 	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func nonEmpty(parts []string) []string {
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
