@@ -84,20 +84,34 @@ func TestJoinFailBlocksUntilYes(t *testing.T) {
 	w := NewWorker(&config.Config{BBBDryRun: true}, st, time.UTC)
 	w.Joiner = j
 
+	// Первая неудача — пауза и новая попытка, не стоп до конца пары.
 	w.ensureIn(context.Background(), *u, lesson, "https://bbb.ssau.ru/b/x", key, now, false)
-	if j.n != 1 {
-		t.Fatalf("joins %d", j.n)
-	}
 	intent, _ := st.GetIntent(1, lesson.ID)
 	if !w.isBlocked(key, intent) {
-		t.Fatal("should block after fail")
+		t.Fatal("backoff right after a fail")
 	}
-
+	if _, stop := w.blockedAt[key]; stop {
+		t.Fatal("one fail must not stop for the whole lesson")
+	}
+	w.retryAt[key] = time.Now().Add(-time.Second)
+	if w.isBlocked(key, intent) {
+		t.Fatal("backoff over: retry allowed")
+	}
+	for i := 2; i <= maxJoinFails; i++ {
+		w.ensureIn(context.Background(), *u, lesson, "https://bbb.ssau.ru/b/x", key, now, false)
+	}
+	if j.n != maxJoinFails {
+		t.Fatalf("joins %d", j.n)
+	}
+	if _, stop := w.blockedAt[key]; !stop || !w.isBlocked(key, intent) {
+		t.Fatal("should stop after maxJoinFails")
+	}
 	w.ensureIn(context.Background(), *u, lesson, "https://bbb.ssau.ru/b/x", key, now.Add(time.Minute), false)
-	if j.n != 1 {
+	if j.n != maxJoinFails {
 		t.Fatalf("blocked still joined %d", j.n)
 	}
 
+	time.Sleep(10 * time.Millisecond)
 	if err := st.SetIntentDecision(1, lesson.ID, model.JoinYes); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +122,7 @@ func TestJoinFailBlocksUntilYes(t *testing.T) {
 		t.Fatal("JoinYes after block should clear")
 	}
 	w.ensureIn(context.Background(), *u, lesson, "https://bbb.ssau.ru/b/x", key, now.Add(3*time.Minute), false)
-	if j.n != 2 {
+	if j.n != maxJoinFails+1 {
 		t.Fatalf("rearm joins %d", j.n)
 	}
 }

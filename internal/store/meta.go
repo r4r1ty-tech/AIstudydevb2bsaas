@@ -349,6 +349,26 @@ func (s *Store) ClearPresence(telegramID int64) error {
 	return nil
 }
 
+// ClearPresenceFor снимает presence, только если она про эту пару: выход из
+// одной пары не стирает состояние соседней.
+func (s *Store) ClearPresenceFor(telegramID, lessonID int64) error {
+	if _, err := s.db.Exec(`DELETE FROM presence WHERE telegram_id = ? AND lesson_id = ?`, telegramID, lessonID); err != nil {
+		logx.Errorf("store", "ClearPresenceFor: tg=%d lesson=%d: %v", telegramID, lessonID, err)
+		return fmt.Errorf("store: clear presence: %w", err)
+	}
+	return nil
+}
+
+// ClearAllPresence — на старте и остановке bbb: живых сессий нет, старые
+// «в комнате» после рестарта или краша врут.
+func (s *Store) ClearAllPresence() error {
+	if _, err := s.db.Exec(`DELETE FROM presence`); err != nil {
+		logx.Errorf("store", "ClearAllPresence: %v", err)
+		return fmt.Errorf("store: clear all presence: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetPresence(telegramID int64) (*model.Presence, error) {
 	logx.Debugf("store", "GetPresence: enter telegram_id=%d", telegramID)
 	if telegramID == 0 {

@@ -39,9 +39,12 @@ func (p Proxy) valid() bool {
 }
 
 // ParseLines reads login:password@ip:port per line; blank lines and #comments skipped.
+// Кривая строка пропускается с ошибкой в логе — остальные прокси работают.
+// Ошибка — только если кривые все строки.
 func ParseLines(r io.Reader) ([]Proxy, error) {
 	logx.Debugf("proxyrelay", "ParseLines: enter")
 	out := make([]Proxy, 0)
+	var firstErr error
 	sc := bufio.NewScanner(r)
 	line := 0
 	for sc.Scan() {
@@ -52,10 +55,16 @@ func ParseLines(r io.Reader) ([]Proxy, error) {
 		}
 		p, err := ParseEntry(raw)
 		if err != nil {
-			logx.Errorf("proxyrelay", "ParseLines: line=%d: %v", line, err)
-			return nil, fmt.Errorf("proxyrelay: строка %d: %w", line, err)
+			logx.Errorf("proxyrelay", "ParseLines: line=%d пропущена: %v", line, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("proxyrelay: строка %d: %w", line, err)
+			}
+			continue
 		}
 		out = append(out, p)
+	}
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
 	}
 	if err := sc.Err(); err != nil {
 		logx.Errorf("proxyrelay", "ParseLines: scan: %v", err)

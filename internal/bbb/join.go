@@ -53,6 +53,12 @@ type Session interface {
 	GrabSlides(ctx context.Context, dir string) (int, error)
 }
 
+// AudioChecker — у пишущей вкладки: в аудио ли она; если нет, одна короткая
+// попытка подключить «Только слушать». Иначе запись идёт, а в ней тишина.
+type AudioChecker interface {
+	EnsureAudio(ctx context.Context) bool
+}
+
 type Joiner interface {
 	Join(ctx context.Context, req JoinReq) (Session, error)
 }
@@ -90,6 +96,13 @@ func (DryJoiner) Join(_ context.Context, req JoinReq) (Session, error) {
 type closeHook struct {
 	Session
 	fn func()
+}
+
+func (c *closeHook) EnsureAudio(ctx context.Context) bool {
+	if ac, ok := c.Session.(AudioChecker); ok {
+		return ac.EnsureAudio(ctx)
+	}
+	return true
 }
 
 func (c *closeHook) Close() error {

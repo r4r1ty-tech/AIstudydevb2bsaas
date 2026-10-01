@@ -6,8 +6,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -101,12 +103,20 @@ func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if quality && c.recBrowser != nil {
-		logx.Debugf("bbb", "ensure: reuse recBrowser")
-		return c.recBrowser, nil
+		if browserAlive(c.recBrowser) {
+			logx.Debugf("bbb", "ensure: reuse recBrowser")
+			return c.recBrowser, nil
+		}
+		logx.Warnf("bbb", "ensure: chromium-rec не отвечает — перезапускаю")
+		c.dropLocked(true)
 	}
 	if !quality && c.browser != nil {
-		logx.Debugf("bbb", "ensure: reuse browser")
-		return c.browser, nil
+		if browserAlive(c.browser) {
+			logx.Debugf("bbb", "ensure: reuse browser")
+			return c.browser, nil
+		}
+		logx.Warnf("bbb", "ensure: chromium не отвечает — перезапускаю")
+		c.dropLocked(false)
 	}
 	bin := c.Bin
 	if bin == "" {
@@ -128,6 +138,7 @@ func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		logx.Debugf("bbb", "ensure: mkdir %s: %v", dir, err)
 	}
+	clearStaleLock(dir)
 
 	l := launcher.New().
 		Bin(bin).
@@ -202,10 +213,75 @@ func (c *ChromeJoiner) ensure(quality bool) (*rod.Browser, error) {
 	return b, nil
 }
 
+// browserAlive: процесс Chromium жив и отвечает по CDP (после OOM-kill кэш
+// иначе отдаёт мёртвый браузер, и все заходы падают до рестарта сервиса).
+func browserAlive(b *rod.Browser) bool {
+	if b == nil {
+		return false
+	}
+	_, err := proto.BrowserGetVersion{}.Call(b.Context(context.Background()).Timeout(3 * time.Second))
+	return err == nil
+}
+
+// reset забывает браузер нужного качества: следующий ensure запустит новый.
+func (c *ChromeJoiner) reset(quality bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if quality && c.recBrowser != nil && !browserAlive(c.recBrowser) {
+		c.dropLocked(true)
+	}
+	if !quality && c.browser != nil && !browserAlive(c.browser) {
+		c.dropLocked(false)
+	}
+}
+
+func (c *ChromeJoiner) dropLocked(quality bool) {
+	if quality {
+		if c.recLauncher != nil {
+			c.recLauncher.Kill()
+		}
+		c.recBrowser, c.recLauncher = nil, nil
+		return
+	}
+	if c.launcher != nil {
+		c.launcher.Kill()
+	}
+	c.browser, c.launcher = nil, nil
+}
+
+// clearStaleLock убирает SingletonLock профиля, если процесс-владелец мёртв
+// (Chromium пережил SIGKILL bbb или упал): иначе новый запуск не стартует.
+func clearStaleLock(dir string) {
+	lock := filepath.Join(dir, "SingletonLock")
+	target, err := os.Readlink(lock)
+	if err != nil {
+		return
+	}
+	i := strings.LastIndex(target, "-")
+	if i < 0 {
+		return
+	}
+	pid, err := strconv.Atoi(target[i+1:])
+	if err != nil || pid <= 0 {
+		return
+	}
+	if syscall.Kill(pid, 0) == nil {
+		return // жив — не трогаем
+	}
+	for _, f := range []string{"SingletonLock", "SingletonSocket", "SingletonCookie"} {
+		_ = os.Remove(filepath.Join(dir, f))
+	}
+	logx.Warnf("bbb", "clearStaleLock: снят протухший lock профиля %s (pid %d)", dir, pid)
+}
+
 type chromeSession struct {
 	page *rod.Page
 
 	ctxBrowser *rod.Browser
+	role       Role
+
+	audioMu sync.Mutex
+	audioOK bool
 
 	greetMu sync.Mutex
 	greeted bool
@@ -247,18 +323,39 @@ func (s *chromeSession) Greet(ctx context.Context) error {
 	return nil
 }
 
+// EnsureAudio для записывающей вкладки: проверяет, что она в аудио, и если
+// нет — короткая попытка нажать «Только слушать» (после лобби, после сбоя WebRTC).
+func (s *chromeSession) EnsureAudio(ctx context.Context) bool {
+	if s == nil || s.page == nil || s.role != RoleRecord {
+		return true
+	}
+	if !s.audioMu.TryLock() {
+		return true // проверка уже идёт с прошлого тика
+	}
+	defer s.audioMu.Unlock()
+	p := s.page.Context(ctx)
+	if hasAny(p.Timeout(2*time.Second), audioJoinedSels) {
+		s.audioOK = true
+		return true
+	}
+	s.audioOK = audioTry(p, s.role, 8*time.Second)
+	return s.audioOK
+}
+
 func (s *chromeSession) Close() error {
 	if s == nil {
 		return nil
 	}
 	logx.Debugf("bbb", "chromeSession.Close: page=%v ctx=%v", s.page != nil, s.ctxBrowser != nil)
+	// Свежий контекст с таймаутом: контекст захода мог быть отменён (shutdown),
+	// а зависший Chromium без таймаута подвесит тик воркера.
 	if s.page != nil {
-		if err := s.page.Close(); err != nil {
+		if err := s.page.Context(context.Background()).Timeout(5 * time.Second).Close(); err != nil {
 			logx.Debugf("bbb", "chromeSession.Close: page close: %v", err)
 		}
 	}
 	if s.ctxBrowser != nil {
-		if err := s.ctxBrowser.Close(); err != nil {
+		if err := s.ctxBrowser.Context(context.Background()).Timeout(5 * time.Second).Close(); err != nil {
 			logx.Debugf("bbb", "chromeSession.Close: context dispose: %v", err)
 		} else {
 			logx.Debugf("bbb", "chromeSession.Close: context disposed")
@@ -309,11 +406,19 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		var slot *proxyrelay.Slot
 		if c.Proxies.Len() > 0 {
 			s, perr := c.Proxies.Next()
 			if perr != nil {
-				logx.Warnf("bbb", "ChromeJoiner.Join: proxy: %v — иду напрямую", perr)
+				// Прокси настроены, но все мертвы: напрямую с IP сервера не идём молча.
+				logx.Errorf("bbb", "ChromeJoiner.Join: %v", perr)
+				if lastErr != nil {
+					return nil, fmt.Errorf("%w (последняя ошибка: %v)", perr, lastErr)
+				}
+				return nil, perr
 			}
 			slot = s
 		}
@@ -323,9 +428,21 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 			return sess, nil
 		}
 		lastErr = err
+		if ctx.Err() != nil {
+			// Остановка/пауза — не вина прокси.
+			return nil, err
+		}
+		if isBrowserGone(err) {
+			c.reset(req.Role != RolePresence)
+		}
 		if slot == nil {
-			// direct attempt failed, or every proxy is dead — не повторяем
 			logx.Errorf("bbb", "ChromeJoiner.Join: attempt=%d direct failed: %v", attempt, err)
+			return nil, err
+		}
+		if !isProxyErr(err) {
+			// Форма, лобби, «встреча не началась» — смена прокси не поможет,
+			// а штраф убил бы рабочий прокси. Повтор — бэкофф воркера.
+			logx.Warnf("bbb", "ChromeJoiner.Join: attempt=%d proxy=%s: %v — не сетевая ошибка, прокси не виноват", attempt, slot.Redacted(), err)
 			return nil, err
 		}
 		slot.Fail()
@@ -333,6 +450,30 @@ func (c *ChromeJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	}
 	logx.Errorf("bbb", "ChromeJoiner.Join: все %d попытки провалились: %v", attempts, lastErr)
 	return nil, lastErr
+}
+
+// isProxyErr: сбой сети/прокси (вкладка не открылась, страница не загрузилась),
+// а не поведение BBB-страницы.
+func isProxyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, m := range []string{"proxy context", "navigate:", "ERR_PROXY", "ERR_TUNNEL", "ERR_SOCKS", "ERR_CONNECTION", "ERR_TIMED_OUT", "ERR_EMPTY_RESPONSE", "ERR_NAME_NOT_RESOLVED", "ERR_ADDRESS_UNREACHABLE"} {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// isBrowserGone: процесс Chromium умер или CDP-сокет закрыт — кэш браузера пуст.
+func isBrowserGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "tab:") || strings.Contains(msg, "websocket") || strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, "connection refused")
 }
 
 // attemptJoin performs one join through an optional proxy slot, in its own
@@ -344,14 +485,16 @@ func (c *ChromeJoiner) attemptJoin(ctx context.Context, root *rod.Browser, req J
 	if slot != nil {
 		res, cerr := proto.TargetCreateBrowserContext{ProxyServer: slot.LocalURL()}.Call(root)
 		if cerr != nil {
-			logx.Warnf("bbb", "attemptJoin: proxy context %s: %v — иду напрямую", slot.Redacted(), cerr)
-		} else {
-			sub := *root
-			sub.BrowserContextID = res.BrowserContextID
-			browser = &sub
-			ctxBrowser = &sub
-			proxyLabel = slot.Redacted()
+			// Раньше тут шли напрямую и засчитывали прокси успех — заход с IP сервера
+			// и скрытый сломанный прокси.
+			logx.Warnf("bbb", "attemptJoin: proxy context %s: %v", slot.Redacted(), cerr)
+			return nil, fmt.Errorf("proxy context: %w", cerr)
 		}
+		sub := *root
+		sub.BrowserContextID = res.BrowserContextID
+		browser = &sub
+		ctxBrowser = &sub
+		proxyLabel = slot.Redacted()
 	}
 	logx.Infof("bbb", "attemptJoin: proxy=%s url=%s role=%s", proxyLabel, redactURL(req.URL), req.Role)
 
@@ -367,7 +510,7 @@ func (c *ChromeJoiner) attemptJoin(ctx context.Context, root *rod.Browser, req J
 	}
 	page = page.Context(ctx)
 
-	sess := &chromeSession{page: page, ctxBrowser: ctxBrowser}
+	sess := &chromeSession{page: page, ctxBrowser: ctxBrowser, role: req.Role}
 
 	target := req.URL
 	if req.Role == RoleRecord {
@@ -408,7 +551,10 @@ func fillGuestName(page *rod.Page, fio string) error {
 		Element("input[name='join_name']").
 		Element("input[name='name']").
 		Element("input[autocomplete='name']").
-		Element("input[id*='name'][type='text']").
+		Element("input[id*='name' i][type='text']").
+		Element("input[placeholder*='name' i]").
+		Element("input[placeholder*='имя' i]").
+		Element("input[placeholder*='фио' i]").
 		Do()
 	if err != nil {
 		logx.Errorf("bbb", "fillGuestName: name field: %v", err)
@@ -421,32 +567,103 @@ func fillGuestName(page *rod.Page, fio string) error {
 		logx.Errorf("bbb", "fillGuestName: input: %v", err)
 		return fmt.Errorf("fillGuestName: input: %w", err)
 	}
-	if ok, box, err := page.Has("input[type='checkbox']"); err != nil {
-		logx.Debugf("bbb", "fillGuestName: checkbox has: %v", err)
-	} else if ok && box != nil {
-		if err := box.Click(proto.InputMouseButtonLeft, 1); err != nil {
-			logx.Debugf("bbb", "fillGuestName: checkbox click: %v", err)
-		}
+	// Чекбокс согласия — только видимый и ещё не отмеченный: ретраи waitSeated
+	// иначе переключают его вкл → выкл → вкл.
+	if res, err := el.Eval(guestCheckboxJS); err != nil {
+		logx.Debugf("bbb", "fillGuestName: checkbox: %v", err)
+	} else if res != nil && res.Value.Bool() {
+		logx.Debugf("bbb", "fillGuestName: checkbox ticked")
 	}
-	btn, err := page.Timeout(8 * time.Second).Race().
-		Element("button[type='submit']").
-		Element("[data-test='joinButton']").
-		Element("[data-test='sessionJoinButton']").
-		Do()
-	if err != nil {
-		if !clickByText(page.Timeout(4*time.Second), joinNameRE) {
-			logx.Errorf("bbb", "fillGuestName: join button: %v", err)
-			return fmt.Errorf("fillGuestName: join button: %w", err)
-		}
-	} else if err := btn.Click(proto.InputMouseButtonLeft, 1); err != nil {
-		logx.Errorf("bbb", "fillGuestName: join click: %v", err)
-		return fmt.Errorf("fillGuestName: join click: %w", err)
+	if err := submitGuestForm(page, el); err != nil {
+		logx.Errorf("bbb", "fillGuestName: %v", err)
+		return fmt.Errorf("fillGuestName: %w", err)
 	}
 	if err := page.Timeout(8 * time.Second).WaitLoad(); err != nil {
 		logx.Debugf("bbb", "fillGuestName: waitload: %v", err)
 	}
 	logx.Debugf("bbb", "fillGuestName: done")
 	return nil
+}
+
+var joinButtonSels = []string{
+	"[data-test='joinButton']",
+	"[data-test='sessionJoinButton']",
+	"button[type='submit']",
+	"input[type='submit']",
+}
+
+// guestCheckboxJS отмечает видимый неотмеченный чекбокс формы поля имени.
+const guestCheckboxJS = `function () {
+	const root = this.form || document
+	const vis = (n) => { const r = n.getBoundingClientRect(); const s = getComputedStyle(n); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' }
+	const box = [...root.querySelectorAll("input[type='checkbox']")].find((b) => vis(b) && !b.disabled && !b.checked)
+	if (!box) return false
+	box.click()
+	return true
+}`
+
+// guestSubmitJS: видимая активная кнопка join в форме поля имени (потом по
+// странице) → click(); нет кнопки → form.requestSubmit(). Скрытые submit чужих
+// форм (логин Greenlight) не трогаем — на них rod ждал WaitInteractable до дедлайна.
+const guestSubmitJS = `function (sels) {
+	const vis = (n) => { const r = n.getBoundingClientRect(); const s = getComputedStyle(n); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !n.disabled && n.getAttribute('aria-disabled') !== 'true' }
+	const pick = (root) => { for (const sel of sels) { const b = [...root.querySelectorAll(sel)].find(vis); if (b) return b } return null }
+	const f = this.form
+	const b = (f && pick(f)) || pick(document)
+	if (b) { b.click(); return 'click ' + (b.getAttribute('data-test') || b.tagName.toLowerCase()) }
+	if (f) { if (f.requestSubmit) f.requestSubmit(); else f.submit(); return 'submit' }
+	return ''
+}`
+
+// submitGuestForm жмёт join для поля имени el: rod-клик по видимой кнопке
+// своей формы, затем DOM-клик/requestSubmit, в крайнем случае Enter в поле.
+func submitGuestForm(page *rod.Page, el *rod.Element) error {
+	for _, sel := range joinButtonSels {
+		btns, err := page.Elements(sel)
+		if err != nil {
+			continue
+		}
+		for _, b := range btns {
+			if !sameForm(el, b) {
+				continue
+			}
+			if vis, err := b.Visible(); err != nil || !vis {
+				continue
+			}
+			if dis, err := b.Property("disabled"); err == nil && dis.Bool() {
+				continue
+			}
+			if err := b.Timeout(clickWait).Click(proto.InputMouseButtonLeft, 1); err == nil {
+				logx.Debugf("bbb", "submitGuestForm: clicked %s", sel)
+				return nil
+			} else {
+				logx.Debugf("bbb", "submitGuestForm: click %s: %v", sel, err)
+			}
+		}
+	}
+	res, err := el.Context(context.Background()).Timeout(3*time.Second).Eval(guestSubmitJS, joinButtonSels)
+	if err == nil && res != nil && res.Value.Str() != "" {
+		logx.Debugf("bbb", "submitGuestForm: js %s", res.Value.Str())
+		return nil
+	}
+	logx.Debugf("bbb", "submitGuestForm: js: %v", err)
+	if clickByText(page.Timeout(4*time.Second), joinNameRE) {
+		return nil
+	}
+	if err := el.Context(context.Background()).Timeout(3 * time.Second).Type(input.Enter); err != nil {
+		return fmt.Errorf("join button: нет кнопки, Enter: %w", err)
+	}
+	logx.Debugf("bbb", "submitGuestForm: enter")
+	return nil
+}
+
+// sameForm: кнопка в той же форме, что и поле имени (или у поля нет формы).
+func sameForm(field, btn *rod.Element) bool {
+	res, err := field.Eval(`function (b) { return !this.form || this.form === b.form || this.form.contains(b) }`, btn.Object)
+	if err != nil || res == nil {
+		return true
+	}
+	return res.Value.Bool()
 }
 
 var listenOnlySels = []string{

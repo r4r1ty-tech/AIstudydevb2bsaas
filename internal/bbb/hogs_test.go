@@ -64,3 +64,22 @@ func TestHogsRefcountNoop(t *testing.T) {
 	h.Release()
 	h.Reset()
 }
+
+func TestStoppedHogsFindsFrozenCursor(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(pid, cmd, stat string) {
+		d := filepath.Join(dir, pid)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(filepath.Join(d, "cmdline"), []byte(cmd), 0o644)
+		_ = os.WriteFile(filepath.Join(d, "stat"), []byte(stat), 0o644)
+	}
+	mk("100", "/home/u/.cursor-server/bin/node\x00x", "100 (node (a)) T 1 1")
+	mk("101", "/home/u/.cursor-server/bin/node\x00y", "101 (node) S 1 1")
+	mk("102", "/usr/bin/vim", "102 (vim) T 1 1")
+	got := stoppedHogs(dir, 1, 1)
+	if len(got) != 1 || got[0] != 100 {
+		t.Fatalf("stopped hogs = %v, want [100]", got)
+	}
+}

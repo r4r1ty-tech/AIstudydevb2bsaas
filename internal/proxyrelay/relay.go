@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	xproxy "golang.org/x/net/proxy"
 
@@ -17,6 +18,14 @@ import (
 
 // maxSlotFails is how many consecutive join failures mark a proxy as dead.
 const maxSlotFails = 3
+
+// reviveAfter: мёртвый прокси через это время получает одну пробную попытку
+// (half-open) — иначе после трёх неудач он мёртв до рестарта процесса.
+var reviveAfter = 10 * time.Minute
+
+// ErrAllDead — прокси настроены, но живых нет. Идти напрямую с IP сервера
+// молча нельзя: вызывающий решает сам и громко.
+var ErrAllDead = errors.New("proxyrelay: все прокси недоступны")
 
 // Pool hands out proxies round-robin, one per browser tab/session.
 type Pool struct {
@@ -41,7 +50,7 @@ func (pool *Pool) Len() int {
 }
 
 // Next returns the next live proxy in rotation, starting its relay on demand.
-// Dead slots are skipped; if every slot is dead it returns nil (go direct).
+// Dead slots are skipped; if every slot is dead it returns ErrAllDead.
 func (pool *Pool) Next() (*Slot, error) {
 	if pool == nil || len(pool.slots) == 0 {
 		logx.Debugf("proxyrelay", "Next: no proxies")
@@ -61,8 +70,8 @@ func (pool *Pool) Next() (*Slot, error) {
 		}
 		return s, nil
 	}
-	logx.Warnf("proxyrelay", "Next: все прокси мертвы (%d) — иду напрямую", total)
-	return nil, nil
+	logx.Warnf("proxyrelay", "Next: все прокси мертвы (%d)", total)
+	return nil, ErrAllDead
 }
 
 func (pool *Pool) Close() error {
@@ -81,8 +90,9 @@ func (pool *Pool) Close() error {
 
 // Slot is one upstream proxy plus its local no-auth SOCKS5 relay.
 type Slot struct {
-	p     Proxy
-	fails atomic.Int32
+	p        Proxy
+	fails    atomic.Int32
+	lastFail atomic.Int64 // unix nano последней неудачи
 
 	mu   sync.Mutex
 	ln   net.Listener
@@ -98,6 +108,7 @@ func (s *Slot) Fail() {
 		return
 	}
 	n := s.fails.Add(1)
+	s.lastFail.Store(time.Now().UnixNano())
 	logx.Warnf("proxyrelay", "proxy %s fail #%d", s.p.Redacted(), n)
 }
 
@@ -118,8 +129,12 @@ func (s *Slot) Fails() int {
 	return int(s.fails.Load())
 }
 
+// Dead: maxSlotFails неудач подряд и с последней прошло меньше reviveAfter.
 func (s *Slot) Dead() bool {
-	return s != nil && s.fails.Load() >= maxSlotFails
+	if s == nil || s.fails.Load() < maxSlotFails {
+		return false
+	}
+	return time.Since(time.Unix(0, s.lastFail.Load())) < reviveAfter
 }
 
 // Reset revives a dead slot (used when the operator refreshes the list).
@@ -151,7 +166,7 @@ func (s *Slot) start() error {
 	if s.err != nil {
 		return s.err
 	}
-	dial, err := xproxy.SOCKS5("tcp", s.p.Addr(), &xproxy.Auth{User: s.p.User, Password: s.p.Pass}, xproxy.Direct)
+	dial, err := xproxy.SOCKS5("tcp", s.p.Addr(), &xproxy.Auth{User: s.p.User, Password: s.p.Pass}, deadlineDialer{d: net.Dialer{Timeout: 15 * time.Second}})
 	if err != nil {
 		s.err = err
 		logx.Errorf("proxyrelay", "start upstream=%s: dialer: %v", s.p.Redacted(), err)
@@ -201,14 +216,43 @@ func serve(ln net.Listener, dial xproxy.Dialer, upstream string) {
 	}
 }
 
+// dialUp: TCP-коннект и SOCKS-рукопожатие с внешним прокси ограничены
+// дедлайном на сокете (deadlineDialer), после успеха дедлайн снимается.
+// DialContext не берём: он отдаёт обёртку без CloseWrite, и pipe не закрывает
+// полусоединение.
+func dialUp(dial xproxy.Dialer, target string) (net.Conn, error) {
+	up, err := dial.Dial("tcp", target)
+	if err != nil {
+		return nil, err
+	}
+	_ = up.SetDeadline(time.Time{})
+	return up, nil
+}
+
+// deadlineDialer — forward-дилер для xproxy.SOCKS5: сокет к прокси сразу с
+// дедлайном на рукопожатие.
+type deadlineDialer struct{ d net.Dialer }
+
+func (dd deadlineDialer) Dial(network, addr string) (net.Conn, error) {
+	c, err := dd.d.Dial(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	_ = c.SetDeadline(time.Now().Add(20 * time.Second))
+	return c, nil
+}
+
 func handle(c net.Conn, dial xproxy.Dialer, upstream string) {
 	defer c.Close()
+	// Рукопожатие с Chrome локальное — 10 с с запасом; без дедлайна зависший
+	// клиент держит горутину и сокет вечно.
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 	target, err := socks5Accept(c)
 	if err != nil {
 		logx.Warnf("proxyrelay", "handle %s: handshake from %s: %v", upstream, c.RemoteAddr(), err)
 		return
 	}
-	up, err := dial.Dial("tcp", target)
+	up, err := dialUp(dial, target)
 	if err != nil {
 		logx.Warnf("proxyrelay", "handle %s: dial %s: %v", upstream, target, err)
 		socks5Reply(c, 0x05)
@@ -219,6 +263,7 @@ func handle(c net.Conn, dial xproxy.Dialer, upstream string) {
 		logx.Debugf("proxyrelay", "handle %s: reply: %v", upstream, err)
 		return
 	}
+	_ = c.SetDeadline(time.Time{})
 	logx.Debugf("proxyrelay", "handle %s: connected %s", upstream, target)
 	pipe(c, up)
 }
