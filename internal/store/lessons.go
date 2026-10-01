@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
@@ -30,7 +31,9 @@ func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 		logx.Errorf("store", "ReplaceLessons: query old: %v", err)
 		return fmt.Errorf("store: replace lessons list: %w", err)
 	}
-	oldByIdent := make(map[string]int64)
+	// Несколько старых строк с одной Identity (дубли прошлых версий) — раздаём по одной.
+	oldByIdent := make(map[string][]int64)
+	oldByID := make(map[int64]model.Lesson)
 	for rows.Next() {
 		l, err := scanLesson(rows)
 		if err != nil {
@@ -38,7 +41,8 @@ func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 			logx.Errorf("store", "ReplaceLessons: scan old: %v", err)
 			return fmt.Errorf("store: replace lessons scan: %w", err)
 		}
-		oldByIdent[l.Identity()] = l.ID
+		oldByIdent[l.Identity()] = append(oldByIdent[l.Identity()], l.ID)
+		oldByID[l.ID] = *l
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -69,7 +73,9 @@ func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 			l.Date, l.Start, l.End, timeArg(l.Begin), timeArg(l.Finish),
 			l.Discipline, l.Teacher, l.Place, l.Subgroup, l.Type, btoi(l.Online),
 		}
-		if id, ok := oldByIdent[l.Identity()]; ok {
+		if ids := oldByIdent[l.Identity()]; len(ids) > 0 {
+			id := ids[0]
+			oldByIdent[l.Identity()] = ids[1:]
 			if _, err := upd.Exec(append(args, id)...); err != nil {
 				logx.Errorf("store", "ReplaceLessons: update row %d id=%d: %v", i, id, err)
 				return fmt.Errorf("store: replace lessons update row: %w", err)
@@ -86,22 +92,27 @@ func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 	}
 
 	pruned := 0
-	for _, id := range oldByIdent {
+	for id, old := range oldByID {
 		if _, ok := keep[id]; ok {
 			continue
 		}
-		if _, err := tx.Exec(`DELETE FROM lessons WHERE id = ?`, id); err != nil {
+		if err := pruneLesson(tx, old); err != nil {
 			logx.Errorf("store", "ReplaceLessons: prune id=%d: %v", id, err)
 			return fmt.Errorf("store: replace lessons prune: %w", err)
 		}
 		pruned++
+	}
+	orphans, err := dropOrphans(tx)
+	if err != nil {
+		logx.Errorf("store", "ReplaceLessons: orphans: %v", err)
+		return fmt.Errorf("store: replace lessons orphans: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		logx.Errorf("store", "ReplaceLessons: commit: %v", err)
 		return fmt.Errorf("store: replace lessons commit: %w", err)
 	}
-	logx.Infof("store", "ReplaceLessons: committed total=%d updated=%d inserted=%d pruned=%d", len(lessons), updated, inserted, pruned)
+	logx.Infof("store", "ReplaceLessons: committed total=%d updated=%d inserted=%d pruned=%d orphans=%d", len(lessons), updated, inserted, pruned, orphans)
 	return nil
 }
 
@@ -251,4 +262,78 @@ func (s *Store) LastParseRun() (*model.ParseRun, error) {
 	}
 	logx.Debugf("store", "LastParseRun: out id=%d ok=%v lessons=%d", r.ID, r.OK, r.LessonCount)
 	return r, nil
+}
+
+// pruneLesson удаляет пару, которой больше нет на сайте. Её ссылка переезжает в
+// комнату предмета (если там пусто), согласия и presence уходят вместе с ней.
+// Паки лекций — история записей, их не трогаем.
+func pruneLesson(tx *sql.Tx, l model.Lesson) error {
+	var url sql.NullString
+	err := tx.QueryRow(`SELECT url FROM bbb_links WHERE key = ?`, model.BBBLessonKey(l.ID)).Scan(&url)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("link: %w", err)
+	}
+	if strings.TrimSpace(url.String) != "" {
+		if _, err := tx.Exec(`INSERT INTO bbb_links (key, url, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO NOTHING`,
+			model.BBBRoomKey(l.Discipline, l.Teacher, l.Type), strings.TrimSpace(url.String), timeArg(time.Now())); err != nil {
+			return fmt.Errorf("room: %w", err)
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM bbb_links WHERE key = ?`, model.BBBLessonKey(l.ID)); err != nil {
+		return err
+	}
+	for _, q := range []string{
+		`DELETE FROM join_intents WHERE lesson_id = ?`,
+		`DELETE FROM presence WHERE lesson_id = ?`,
+		`DELETE FROM lessons WHERE id = ?`,
+	} {
+		if _, err := tx.Exec(q, l.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// dropOrphans подчищает хвосты пар, удалённых старыми версиями без pruneLesson.
+// Ссылки lesson:<id> без пары перенести уже некуда — URL остаётся в логе.
+func dropOrphans(tx *sql.Tx) (int64, error) {
+	rows, err := tx.Query(`SELECT key, url FROM bbb_links WHERE key LIKE 'lesson:%'
+		AND CAST(substr(key, 8) AS INTEGER) NOT IN (SELECT id FROM lessons)`)
+	if err != nil {
+		return 0, err
+	}
+	var keys []string
+	for rows.Next() {
+		var key string
+		var url sql.NullString
+		if err := rows.Scan(&key, &url); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		logx.Infof("store", "dropOrphans: link %s без пары, url=%s", key, url.String)
+		keys = append(keys, key)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, k := range keys {
+		if _, err := tx.Exec(`DELETE FROM bbb_links WHERE key = ?`, k); err != nil {
+			return total, err
+		}
+		total++
+	}
+	for _, q := range []string{
+		`DELETE FROM join_intents WHERE lesson_id NOT IN (SELECT id FROM lessons)`,
+		`DELETE FROM presence WHERE lesson_id IS NOT NULL AND lesson_id <> 0 AND lesson_id NOT IN (SELECT id FROM lessons)`,
+	} {
+		res, err := tx.Exec(q)
+		if err != nil {
+			return total, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	return total, nil
 }

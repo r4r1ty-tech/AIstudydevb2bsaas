@@ -50,8 +50,17 @@ func TestLessonIdentity(t *testing.T) {
 		t.Fatal("type should not change identity")
 	}
 	b.Place = "ауд. 1"
+	b.Teacher = "Другой"
+	b.Online = false
+	if a.Identity() != b.Identity() {
+		t.Fatal("place/teacher/online change must keep identity")
+	}
+	if a.DetailKey() == b.DetailKey() {
+		t.Fatal("details must differ")
+	}
+	b.Subgroup = 2
 	if a.Identity() == b.Identity() {
-		t.Fatal("place should change identity")
+		t.Fatal("subgroup changes identity")
 	}
 }
 func TestResolveBBB(t *testing.T) {

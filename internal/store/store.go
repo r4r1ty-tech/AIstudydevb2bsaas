@@ -27,7 +27,9 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("store: mkdir %s: %w", dir, err)
 	}
 	logx.Debugf("store", "Open: dir ready dir=%s", dir)
-	dsn := "file:" + path + "?_pragma=busy_timeout(8000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	// _txlock=immediate: транзакция «прочитал → пишу» берёт блокировку сразу и ждёт
+	// busy_timeout; с deferred четыре процесса ловят мгновенный SQLITE_BUSY_SNAPSHOT.
+	dsn := "file:" + path + "?_pragma=busy_timeout(8000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		logx.Errorf("store", "Open: open sqlite path=%s: %v", path, err)

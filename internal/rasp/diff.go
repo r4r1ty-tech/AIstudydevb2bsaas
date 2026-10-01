@@ -20,10 +20,15 @@ func Diff(old, new []model.Lesson) string {
 		newSet[l.Identity()] = l
 	}
 
-	var removed, added []string
+	var removed, added, changed []string
 	for id, l := range oldSet {
-		if _, ok := newSet[id]; !ok {
+		n, ok := newSet[id]
+		if !ok {
 			removed = append(removed, "- "+formatLessonLine(l))
+			continue
+		}
+		if n.DetailKey() != l.DetailKey() {
+			changed = append(changed, "~ "+formatLessonLine(l)+" → "+formatLessonLine(n))
 		}
 	}
 	for id, l := range newSet {
@@ -49,8 +54,8 @@ func formatLessonLine(l model.Lesson) string {
 	if place == "" {
 		place = "-"
 	}
-	return fmt.Sprintf("%s %s %s (%s, %s, подгруппа %d)",
-		l.Date, l.Start, l.Discipline, l.Teacher, place, l.Subgroup)
+	return fmt.Sprintf("%s %s %s %s (%s, %s, подгруппа %d)",
+		l.Date, l.Start, l.Discipline, l.Type, l.Teacher, place, l.Subgroup)
 }
 
 func mergeLessons(weeks ...[]model.Lesson) []model.Lesson {
@@ -63,7 +68,7 @@ func mergeLessons(weeks ...[]model.Lesson) []model.Lesson {
 	var out []model.Lesson
 	for _, week := range weeks {
 		for _, l := range week {
-			id := l.Identity()
+			id := l.DetailKey()
 			if _, ok := seen[id]; ok {
 				continue
 			}

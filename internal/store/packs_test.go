@@ -282,3 +282,77 @@ func TestLessonBBBCarriesToNextWeek(t *testing.T) {
 		t.Fatalf("cleared = %q %v", url, own)
 	}
 }
+
+func TestReplaceLessonsKeepsIdentityAndCleansOrphans(t *testing.T) {
+	s := openTemp(t)
+	begin, _ := time.Parse(time.RFC3339, "2026-10-05T09:45:00+04:00")
+	base := model.Lesson{Date: "2026-10-05", Start: "09:45", End: "11:20", Begin: begin, Finish: begin.Add(95 * time.Minute),
+		Discipline: "Сети", Teacher: "Еленев", Place: "online", Type: "Лекция", Online: true}
+	if err := s.ReplaceLessons([]model.Lesson{base}); err != nil {
+		t.Fatal(err)
+	}
+	ls, _ := s.ListLessons()
+	id := ls[0].ID
+	now := time.Now()
+	if err := s.PutIntent(model.JoinIntent{TelegramID: 1, LessonID: id, Decision: model.JoinNo, AskedAt: now, DecidedAt: &now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLessonBBB(id, "https://bbb.ssau.ru/b/net"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Перенесли в аудиторию — та же пара: id, «Не сегодня» и ссылка на месте.
+	moved := base
+	moved.Place, moved.Online = "311 - 15", false
+	if err := s.ReplaceLessons([]model.Lesson{moved}); err != nil {
+		t.Fatal(err)
+	}
+	ls, _ = s.ListLessons()
+	if len(ls) != 1 || ls[0].ID != id || ls[0].Place != "311 - 15" || ls[0].Online {
+		t.Fatalf("moved = %+v", ls)
+	}
+	if in, _ := s.GetIntent(1, id); in == nil || in.Decision != model.JoinNo {
+		t.Fatalf("intent lost: %+v", in)
+	}
+
+	// Две пары с одной Identity в одном прогоне — две строки, а не одна.
+	twin := moved
+	twin.Teacher = "Второй"
+	if err := s.ReplaceLessons([]model.Lesson{moved, twin}); err != nil {
+		t.Fatal(err)
+	}
+	if ls, _ = s.ListLessons(); len(ls) != 2 {
+		t.Fatalf("twins collapsed: %+v", ls)
+	}
+
+	// Пару убрали с сайта: ссылка переехала в комнату, согласие ушло.
+	if err := s.SetBBB(model.BBBLessonKey(9999), "https://bbb.ssau.ru/b/ghost"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutIntent(model.JoinIntent{TelegramID: 2, LessonID: 9999, Decision: model.JoinYes, AskedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceLessons(nil); err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := s.GetIntent(1, id); in != nil {
+		t.Fatalf("intent of pruned lesson kept: %+v", in)
+	}
+	if in, _ := s.GetIntent(2, 9999); in != nil {
+		t.Fatalf("orphan intent kept: %+v", in)
+	}
+	links, _ := s.ListBBB()
+	keys := map[string]string{}
+	for _, b := range links {
+		keys[b.Key] = b.URL
+	}
+	if _, ok := keys[model.BBBLessonKey(id)]; ok {
+		t.Fatalf("lesson link kept: %v", keys)
+	}
+	if _, ok := keys[model.BBBLessonKey(9999)]; ok {
+		t.Fatalf("orphan link kept: %v", keys)
+	}
+	if keys[model.BBBRoomKey("Сети", "Еленев", "Лекция")] != "https://bbb.ssau.ru/b/net" {
+		t.Fatalf("room lost: %v", keys)
+	}
+}
