@@ -213,46 +213,72 @@ func TestUseAfterCloseIsAnError(t *testing.T) {
 
 func TestLessonBBBCarriesToNextWeek(t *testing.T) {
 	s := openTemp(t)
-	mk := func(date string) model.Lesson {
-		begin, _ := time.Parse(time.RFC3339, date+"T09:45:00+04:00")
-		return model.Lesson{Date: date, Start: "09:45", End: "11:20", Begin: begin, Finish: begin.Add(95 * time.Minute),
-			Discipline: "Статистический анализ данных", Teacher: "Колоденкова А.Е.", Place: "online", Type: "Практика", Online: true}
+	mk := func(date, start, typ, teacher string) model.Lesson {
+		begin, _ := time.Parse(time.RFC3339, date+"T"+start+":00+04:00")
+		return model.Lesson{Date: date, Start: start, End: begin.Add(95 * time.Minute).Format("15:04"), Begin: begin, Finish: begin.Add(95 * time.Minute),
+			Discipline: "Статистический анализ данных", Teacher: teacher, Place: "online", Type: typ, Online: true}
 	}
-	if err := s.ReplaceLessons([]model.Lesson{mk("2026-09-28")}); err != nil {
+	idOf := func(date, start string) int64 {
+		ls, _ := s.ListLessons()
+		for _, l := range ls {
+			if l.Date == date && l.Start == start {
+				return l.ID
+			}
+		}
+		t.Fatalf("no lesson %s %s", date, start)
+		return 0
+	}
+	week1 := []model.Lesson{
+		mk("2026-09-28", "09:45", "Практика", "Колоденкова А.Е."),
+		mk("2026-09-29", "17:00", "Лекция", "Колоденкова А.Е."),
+	}
+	if err := s.ReplaceLessons(week1); err != nil {
 		t.Fatal(err)
 	}
-	ls, _ := s.ListLessons()
-	if err := s.SetLessonBBB(ls[0].ID, "https://bbb.ssau.ru/b/kol-abc"); err != nil {
+	if err := s.SetLessonBBB(idOf("2026-09-28", "09:45"), "https://bbb.ssau.ru/b/kol-prac"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceLessons([]model.Lesson{mk("2026-10-05")}); err != nil {
-		t.Fatal(err)
-	}
-	ls, _ = s.ListLessons()
-	if len(ls) != 1 || ls[0].Date != "2026-10-05" {
-		t.Fatalf("lessons = %+v", ls)
-	}
-	if got := s.GetLessonBBB(ls[0].ID); got != "https://bbb.ssau.ru/b/kol-abc" {
-		t.Fatalf("next week link = %q", got)
+	// Лекция того же препода — другой тип, ссылку практики не наследует.
+	if got := s.GetLessonBBB(idOf("2026-09-29", "17:00")); got != "" {
+		t.Fatalf("lecture must not reuse practice room: %q", got)
 	}
 
-	// Ключ из панели «группа|предмет|препод» тоже подхватывается и свежий побеждает.
+	week2 := []model.Lesson{
+		mk("2026-10-05", "09:45", "Практика", "Колоденкова А.Е."),
+		mk("2026-10-06", "17:00", "Лекция", "Колоденкова А.Е."),
+		mk("2026-10-07", "11:30", "Практика", "Иванов И.И."),
+	}
+	if err := s.ReplaceLessons(week2); err != nil {
+		t.Fatal(err)
+	}
+	next := idOf("2026-10-05", "09:45")
+	url, own, err := s.LessonBBB(next)
+	if err != nil || url != "https://bbb.ssau.ru/b/kol-prac" || own {
+		t.Fatalf("next week = %q own=%v err=%v", url, own, err)
+	}
+	if got := s.GetLessonBBB(idOf("2026-10-07", "11:30")); got != "" {
+		t.Fatalf("other teacher must not reuse the room: %q", got)
+	}
+
+	// Ключ панели «группа|предмет|препод» подхватывается, если нет комнаты по типу.
+	lect := idOf("2026-10-06", "17:00")
 	if err := s.SetBBB(model.BBBKey(531023229, "Статистический анализ данных", "Колоденкова А.Е."), "https://bbb.ssau.ru/b/panel"); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.GetLessonBBB(ls[0].ID); got != "https://bbb.ssau.ru/b/panel" {
+	if got := s.GetLessonBBB(lect); got != "https://bbb.ssau.ru/b/panel" {
 		t.Fatalf("panel link = %q", got)
 	}
-	other := mk("2026-10-05")
-	other.Teacher = "Иванов И.И."
-	other.Start = "11:30"
-	if err := s.ReplaceLessons([]model.Lesson{mk("2026-10-05"), other}); err != nil {
+	// Своя ссылка пары главнее унаследованной, пустая — снята явно.
+	if err := s.SetLessonBBB(next, "https://bbb.ssau.ru/b/own"); err != nil {
 		t.Fatal(err)
 	}
-	ls, _ = s.ListLessons()
-	for _, l := range ls {
-		if l.Teacher == "Иванов И.И." && s.GetLessonBBB(l.ID) != "" {
-			t.Fatal("other teacher must not reuse the room")
-		}
+	if url, own, _ := s.LessonBBB(next); url != "https://bbb.ssau.ru/b/own" || !own {
+		t.Fatalf("own = %q %v", url, own)
+	}
+	if err := s.SetLessonBBB(next, ""); err != nil {
+		t.Fatal(err)
+	}
+	if url, own, _ := s.LessonBBB(next); url != "" || !own {
+		t.Fatalf("cleared = %q %v", url, own)
 	}
 }

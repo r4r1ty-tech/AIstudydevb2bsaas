@@ -282,6 +282,25 @@ func TestBBBLinkAttachesToUpcomingLesson(t *testing.T) {
 	h.wantText(studentID, "Компьютерные сети")
 }
 
+func TestBBBLinkInBreakGoesToNearestEvenWithInheritedRoom(t *testing.T) {
+	h := newHarness(t)
+	h.onboarded(studentID, "Имя", 1)
+	near := h.lesson("Компьютерные сети", "Лекция", 20*time.Minute, true, 0)
+	later := h.lesson("Теория информации", "Лекция", 3*time.Hour, true, 0)
+	// Комната «Сетей» запомнена с прошлой недели — пара всё равно ближайшая цель.
+	if err := h.st.SetBBB(model.BBBRoomKey(near.Discipline, near.Teacher, near.Type), "https://bbb.ssau.ru/b/old-room"); err != nil {
+		t.Fatal(err)
+	}
+	h.text(studentID, "https://bbb.ssau.ru/b/new-room")
+	if url, own, _ := h.st.LessonBBB(near.ID); url != "https://bbb.ssau.ru/b/new-room" || !own {
+		t.Fatalf("near = %q own=%v", url, own)
+	}
+	if url, own, _ := h.st.LessonBBB(later.ID); url != "" || own {
+		t.Fatalf("later must stay without link: %q own=%v", url, own)
+	}
+	h.wantText(studentID, "Компьютерные сети")
+}
+
 func TestBBBLinkWithoutLesson(t *testing.T) {
 	h := newHarness(t)
 	h.onboarded(studentID, "Имя", 1)

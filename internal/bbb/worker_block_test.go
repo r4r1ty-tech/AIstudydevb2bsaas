@@ -221,3 +221,18 @@ func TestDropDeadOneSilentRetry(t *testing.T) {
 		t.Fatal("second drop must block")
 	}
 }
+
+func TestTickKeepsSessionsOnDBError(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(&config.Config{BBBDryRun: true}, st, time.UTC)
+	key := sessionKey(1, 42)
+	w.sessions[key] = stubSess{room: true}
+	_ = st.Close() // любой запрос теперь падает
+	w.tick(context.Background())
+	if _, live := w.sessions[key]; !live {
+		t.Fatal("db error must not kick live sessions")
+	}
+}

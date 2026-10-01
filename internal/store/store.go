@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -343,7 +344,7 @@ func scanUser(sc scanner) (*model.User, error) {
 		&wakeWords,
 		&onboardStage,
 	); err != nil {
-		logx.Errorf("store", "scanUser: scan: %v", err)
+		logScanErr("scanUser", err)
 		return nil, err
 	}
 	u.Username = nullStr(username)
@@ -396,7 +397,7 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 		&typ,
 		&online,
 	); err != nil {
-		logx.Errorf("store", "scanLesson: scan: %v", err)
+		logScanErr("scanLesson", err)
 		return nil, err
 	}
 	l.Date = nullStr(date)
@@ -436,7 +437,7 @@ func scanParseRun(sc scanner) (*model.ParseRun, error) {
 	var at, status, diff sql.NullString
 	var ok, lessonCount, onlineCount sql.NullInt64
 	if err := sc.Scan(&r.ID, &at, &ok, &status, &lessonCount, &onlineCount, &diff); err != nil {
-		logx.Errorf("store", "scanParseRun: scan: %v", err)
+		logScanErr("scanParseRun", err)
 		return nil, err
 	}
 	if at.Valid && at.String != "" {
@@ -465,7 +466,7 @@ func scanBBB(sc scanner) (*model.BBBLink, error) {
 	var b model.BBBLink
 	var key, url, updated sql.NullString
 	if err := sc.Scan(&key, &url, &updated); err != nil {
-		logx.Errorf("store", "scanBBB: scan: %v", err)
+		logScanErr("scanBBB", err)
 		return nil, err
 	}
 	b.Key = nullStr(key)
@@ -488,7 +489,7 @@ func scanEvent(sc scanner) (*model.Event, error) {
 	var at, typ, message sql.NullString
 	var telegramID, lessonID sql.NullInt64
 	if err := sc.Scan(&e.ID, &at, &typ, &telegramID, &lessonID, &message); err != nil {
-		logx.Errorf("store", "scanEvent: scan: %v", err)
+		logScanErr("scanEvent", err)
 		return nil, err
 	}
 	if at.Valid && at.String != "" {
@@ -516,7 +517,7 @@ func scanIntent(sc scanner) (*model.JoinIntent, error) {
 	var i model.JoinIntent
 	var decision, askedAt, decidedAt sql.NullString
 	if err := sc.Scan(&i.TelegramID, &i.LessonID, &decision, &askedAt, &decidedAt); err != nil {
-		logx.Errorf("store", "scanIntent: scan: %v", err)
+		logScanErr("scanIntent", err)
 		return nil, err
 	}
 	i.Decision = model.JoinDecision(nullStr(decision))
@@ -536,4 +537,13 @@ func scanIntent(sc scanner) (*model.JoinIntent, error) {
 	i.DecidedAt = until
 	logx.Debugf("store", "scanIntent: out telegram_id=%d lesson_id=%d decision=%s", i.TelegramID, i.LessonID, i.Decision)
 	return &i, nil
+}
+
+// logScanErr: «строки нет» — штатный ответ, его разбирают вызывающие; ERROR только на настоящие сбои.
+func logScanErr(fn string, err error) {
+	if errors.Is(err, sql.ErrNoRows) {
+		logx.Debugf("store", "%s: no rows", fn)
+		return
+	}
+	logx.Errorf("store", "%s: scan: %v", fn, err)
 }
