@@ -164,24 +164,27 @@ func (l Lesson) SlotLabel() string {
 	return out
 }
 
+// Identity — «та же пара» между прогонами парсера: день, начало, предмет,
+// подгруппа. Смена аудитории, препода, типа или online обновляет строку на месте,
+// id не меняется — согласие, presence, пак и ссылка остаются при паре.
 func (l Lesson) Identity() string {
-	logx.Debugf("model", "Lesson.Identity: lesson=%d date=%s start=%s disc=%q teacher=%q place=%q subgroup=%d online=%v",
-		l.ID, l.Date, l.Start, l.Discipline, l.Teacher, l.Place, l.Subgroup, l.Online)
+	out := strings.Join([]string{
+		l.Date,
+		l.Start,
+		strings.TrimSpace(l.Discipline),
+		fmt.Sprintf("%d", l.Subgroup),
+	}, "|")
+	logx.Debugf("model", "Lesson.Identity: lesson=%d -> %q", l.ID, out)
+	return out
+}
+
+// DetailKey — Identity плюс всё, что видно студенту; для diff и дедупа недель.
+func (l Lesson) DetailKey() string {
 	on := "0"
 	if l.Online {
 		on = "1"
 	}
-	out := strings.Join([]string{
-		l.Date,
-		l.Start,
-		l.Discipline,
-		l.Teacher,
-		l.Place,
-		fmt.Sprintf("%d", l.Subgroup),
-		on,
-	}, "|")
-	logx.Debugf("model", "Lesson.Identity: lesson=%d -> %q", l.ID, out)
-	return out
+	return strings.Join([]string{l.Identity(), strings.TrimSpace(l.Teacher), strings.TrimSpace(l.Place), strings.TrimSpace(l.Type), on}, "|")
 }
 
 type BBBLink struct {
