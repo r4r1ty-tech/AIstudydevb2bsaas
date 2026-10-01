@@ -52,11 +52,28 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 	}
 	abs := filepath.Join(w.recRoot(), pack.Dir)
 	seg := capture.SegmentPath(abs, time.Now().UnixNano())
-	rec, err := startRecorder(ctx, seg)
+	first, err := startRecorder(ctx, seg)
 	if err != nil {
 		logx.Errorf("bbb", "ffmpeg: %v", err)
 		notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"» не стартовала: "+err.Error())
 		return sess, false
+	}
+	rec := &restartRec{
+		cur: first,
+		start: func() (recorder, error) {
+			next := capture.SegmentPath(abs, time.Now().UnixNano())
+			logx.Infof("bbb", "rec segment %s (restart)", filepath.Base(next))
+			return startRecorder(ctx, next)
+		},
+		onDied: func(err error, restarted bool) {
+			if restarted {
+				logx.Warnf("bbb", "ffmpeg %s умер: %v — перезапустил запись", pack.Dir, err)
+				go notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s»: ffmpeg упал (%v), перезапустил — в записи может быть короткая дырка", lesson.Discipline, err))
+				return
+			}
+			logx.Errorf("bbb", "ffmpeg %s умер: %v — запись остановлена", pack.Dir, err)
+			go notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s» остановилась: %v", lesson.Discipline, err))
+		},
 	}
 	logx.Infof("bbb", "rec segment %s", filepath.Base(seg))
 	logx.Infof("bbb", "recording started pack=%d dir=%s", pack.Number, pack.Dir)
@@ -70,8 +87,9 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 	}); err != nil {
 		logx.Debugf("bbb", "attachRecorder: add event: %v", err)
 	}
-	users := w.lectureUsers(lesson, time.Now())
-	go w.startSpotter(ctx, rec, lesson, users)
+	// Словарь — по всей подгруппе: Vosk не перезапускается, а «Зайти» могут
+	// нажать уже после старта записи. Адресатов onWake считает на момент хита.
+	go w.startSpotter(ctx, rec, lesson, w.subgroupUsers(lesson, time.Now()))
 	st := w.Store
 	return &closeHook{Session: sess, fn: func() {
 		logx.Infof("bbb", "recording stopped pack=%d dir=%s", pack.Number, pack.Dir)
@@ -181,9 +199,12 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 	for i := range packs {
 		p := packs[i]
 		if p.Status == model.PackRecording {
-			if w.promoteStuckRecording(&p) {
+			switch w.promoteStuckRecording(ctx, &p) {
+			case stuckRecorded:
 				p.Status = model.PackRecorded
-			} else {
+			case stuckEmpty:
+				continue
+			default:
 				done = false
 				continue
 			}
@@ -247,26 +268,60 @@ func (w *Worker) noteOK(id int64) {
 	logx.Debugf("bbb", "noteOK: pack=%d", id)
 }
 
-func (w *Worker) promoteStuckRecording(p *model.LecturePack) bool {
+type stuckResult int
+
+const (
+	stuckWait     stuckResult = iota // ещё пишется — день не закрываем
+	stuckRecorded                    // пересклеили, есть звук
+	stuckEmpty                       // звука нет — пак закрыт как empty
+)
+
+// promoteStuckRecording: пак вчерашнего дня всё ещё «recording» — процесс
+// убили посреди лекции или склейка упала. Пересклеиваем сегменты; есть звук —
+// recorded, нет — empty (с сообщением админу), а не WARN каждые 15 с весь день.
+func (w *Worker) promoteStuckRecording(ctx context.Context, p *model.LecturePack) stuckResult {
 	if p == nil || w.Store == nil {
-		return false
+		return stuckWait
 	}
+	w.mu.Lock()
+	recKey := w.recorder[p.LessonID]
+	_, live := w.sessions[recKey]
+	w.mu.Unlock()
+	if recKey != "" && live {
+		return stuckWait
+	}
+	dir := filepath.Join(w.recRoot(), p.Dir)
 	audio := filepath.Join(w.recRoot(), p.Audio)
+	if p.Audio == "" {
+		audio = archive.AudioFile(dir)
+	}
+	if n, err := capture.MergeSegments(ctx, dir, audio); err != nil {
+		logx.Debugf("bbb", "promoteStuckRecording: merge %s: %v", p.Dir, err)
+	} else if n > 0 {
+		logx.Infof("bbb", "promoteStuckRecording: склеил %d сегментов %s", n, p.Dir)
+	}
 	st, err := os.Stat(audio)
 	if err != nil || st.Size() < minRecordedBytes {
 		size := int64(0)
 		if st != nil {
 			size = st.Size()
 		}
-		logx.Warnf("bbb", "pack %s: audio too small (%d b) — не считаю записанной", p.Dir, size)
-		return false
+		logx.Warnf("bbb", "pack %s: записи нет (%d b) — закрываю как empty", p.Dir, size)
+		p.Status = model.PackEmpty
+		p.Err = fmt.Sprintf("записи нет (%d байт)", size)
+		if err := w.Store.SavePack(p); err != nil {
+			logx.Errorf("bbb", "promoteStuckRecording: save empty pack=%s: %v", p.Dir, err)
+			return stuckWait
+		}
+		notify.Admin(ctx, w.Cfg, fmt.Sprintf("лекция «%s» %s: записи нет — конспекта не будет", p.Discipline, p.Date))
+		return stuckEmpty
 	}
 	p.Status = model.PackRecorded
 	if err := w.Store.SavePack(p); err != nil {
 		logx.Errorf("bbb", "promoteStuckRecording: save pack=%s: %v", p.Dir, err)
 	}
 	logx.Infof("bbb", "promoted stuck recording pack=%s", p.Dir)
-	return true
+	return stuckRecorded
 }
 
 func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {

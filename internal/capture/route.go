@@ -2,14 +2,14 @@ package capture
 
 import (
 	"os"
-	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
 func pactlOut(args ...string) string {
-	cmd := exec.Command("pactl", args...)
+	cmd := shortCmd(3*time.Second, "pactl", args...)
 	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	s := strings.Join(strings.Fields(string(out)), " ")

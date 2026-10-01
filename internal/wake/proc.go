@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
@@ -171,7 +172,16 @@ func (p *ProcRecognizer) Close() error {
 	}
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
+		// Python, зависший в нативном коде (загрузка модели), SIGTERM игнорирует —
+		// без Kill горутина спотера висит в Wait навсегда.
+		waited := make(chan struct{})
+		go func() { _ = cmd.Wait(); close(waited) }()
+		select {
+		case <-waited:
+		case <-time.After(3 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waited
+		}
 	}
 	logx.Infof("wake", "vosk closed dropped=%d", dropped)
 	return nil

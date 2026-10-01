@@ -60,9 +60,15 @@ func TestBuildNotesDaySkipsLiveRecording(t *testing.T) {
 	if err := st.SavePack(p); err != nil {
 		t.Fatal(err)
 	}
-	w := &Worker{Store: st, Cfg: &config.Config{RecordingsDir: root}}
+	w := NewWorker(&config.Config{BBBDryRun: true, RecordingsDir: root}, st, time.UTC)
+	key := sessionKey(5, lesson.ID)
+	w.sessions[key] = drySession{}
+	w.recorder[lesson.ID] = key
 	if w.buildNotesDay(context.Background(), "2026-09-13") {
 		t.Fatal("live recording must wait")
+	}
+	if got, _ := st.PackByID(p.ID); got.Status != model.PackRecording {
+		t.Fatalf("live pack touched: %s", got.Status)
 	}
 }
 

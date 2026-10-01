@@ -32,7 +32,7 @@ func NotesDay(now time.Time) string {
 
 func ShouldNotePack(status string) bool {
 	switch status {
-	case model.PackDone, model.PackRecording, model.PackError:
+	case model.PackDone, model.PackRecording, model.PackError, model.PackEmpty:
 		logx.Debugf("archive", "ShouldNotePack: status=%s -> false", status)
 		return false
 	default:

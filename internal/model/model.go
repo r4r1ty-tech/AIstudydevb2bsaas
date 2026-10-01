@@ -402,6 +402,7 @@ const (
 	PackNotes      = "notes"
 	PackDone       = "done"
 	PackError      = "error"
+	PackEmpty      = "empty" // записи нет (ffmpeg не писал / одни пустые сегменты) — конспект не собрать
 )
 
 type LecturePack struct {

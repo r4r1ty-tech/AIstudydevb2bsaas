@@ -32,19 +32,29 @@ type Rec struct {
 	mu     sync.Mutex
 }
 
+// shortCmd — pulseaudio/pactl с таймаутом: зависший PulseAudio не должен
+// навсегда подвешивать горутину захода на пару (она держит per-key guard).
+func shortCmd(d time.Duration, name string, args ...string) *exec.Cmd {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	cmd := exec.CommandContext(ctx, name, args...)
+	// cancel освобождаем по таймеру: Cmd сам держит ctx до Wait.
+	time.AfterFunc(d+time.Second, cancel)
+	return cmd
+}
+
 func EnsurePulse() {
 	logx.Debugf("capture", "EnsurePulse: enter")
 	if _, err := exec.LookPath("pulseaudio"); err != nil {
 		logx.Debugf("capture", "EnsurePulse: pulseaudio not found: %v", err)
 		return
 	}
-	if err := exec.Command("pulseaudio", "--check").Run(); err == nil {
+	if err := shortCmd(5*time.Second, "pulseaudio", "--check").Run(); err == nil {
 		logx.Debugf("capture", "EnsurePulse: pulseaudio already running")
 		return
 	} else {
 		logx.Debugf("capture", "EnsurePulse: check failed: %v", err)
 	}
-	if out, err := exec.Command("pulseaudio", "--start", "--exit-idle-time=-1", "--disallow-exit").CombinedOutput(); err != nil {
+	if out, err := shortCmd(10*time.Second, "pulseaudio", "--start", "--exit-idle-time=-1", "--disallow-exit").CombinedOutput(); err != nil {
 		logx.Errorf("capture", "EnsurePulse: start pulseaudio: %v: %s", err, strings.TrimSpace(string(out)))
 	} else {
 		logx.Infof("capture", "pulseaudio started")
@@ -58,7 +68,7 @@ func EnsureSink() error {
 		logx.Errorf("capture", "EnsureSink: pactl not found: %v", err)
 		return fmt.Errorf("pactl не найден")
 	}
-	out, err := exec.Command("pactl", "list", "short", "sinks").Output()
+	out, err := shortCmd(5*time.Second, "pactl", "list", "short", "sinks").Output()
 	if err != nil {
 		logx.Warnf("capture", "EnsureSink: list sinks: %v", err)
 	}
@@ -66,7 +76,7 @@ func EnsureSink() error {
 		logx.Debugf("capture", "EnsureSink: sink %s already present", SinkName)
 		return nil
 	}
-	cmd := exec.Command("pactl", "load-module", "module-null-sink",
+	cmd := shortCmd(5*time.Second, "pactl", "load-module", "module-null-sink",
 		"sink_name="+SinkName,
 		"sink_properties=device.description=SSAU")
 	b, err := cmd.CombinedOutput()
@@ -86,7 +96,7 @@ func EnsureDefaultSink() error {
 		logx.Errorf("capture", "EnsureDefaultSink: pactl not found: %v", err)
 		return fmt.Errorf("pactl не найден")
 	}
-	out, err := exec.Command("pactl", "set-default-sink", SinkName).CombinedOutput()
+	out, err := shortCmd(5*time.Second, "pactl", "set-default-sink", SinkName).CombinedOutput()
 	if err != nil {
 		logx.Errorf("capture", "EnsureDefaultSink: set-default-sink %s: %s: %v", SinkName, strings.TrimSpace(string(out)), err)
 		return fmt.Errorf("set-default-sink: %s: %w", strings.TrimSpace(string(out)), err)
@@ -98,6 +108,8 @@ func EnsureDefaultSink() error {
 func FFmpegArgs(outPath string) []string {
 	args := []string{
 		"-hide_banner", "-nostdin", "-loglevel", "error",
+		// thread_queue_size: короткая задержка читателя PCM не роняет вход pulse.
+		"-thread_queue_size", "1024",
 		"-f", "pulse", "-i", SinkName + ".monitor",
 		"-filter_complex", "[0:a]asplit=2[rec][wake]",
 		"-map", "[rec]", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "32k", "-y", outPath,

@@ -3,6 +3,7 @@ package bbb
 import (
 	"context"
 	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -369,20 +370,74 @@ func TestOnLevelAlertsOnSilenceAndRecovery(t *testing.T) {
 	h := newWorkerHarness(t)
 	l := model.Lesson{Discipline: "Сети"}
 	m := &capture.Meter{WindowBytes: 4, AlertAfter: 2}
-	for _, pcm := range [][]byte{pcmLevel(0, 2), pcmLevel(0, 2)} {
-		h.w.onLevel(context.Background(), l, m, m.Feed(pcm))
+	feed := func(pcm []byte) {
+		ev := m.Feed(pcm)
+		peak, silent, windows := m.Last()
+		h.w.onLevel(context.Background(), l, ev, peak, silent, windows)
 	}
+	feed(pcmLevel(0, 2))
+	feed(pcmLevel(0, 2))
 	h.wantSent(adminTG, "запись «Сети»: 2 мин тишины")
-	h.w.onLevel(context.Background(), l, m, m.Feed(pcmLevel(9000, 2)))
+	feed(pcmLevel(9000, 2))
 	h.wantSent(adminTG, "звук появился")
 	before := len(h.sentTo(adminTG))
-	h.w.onLevel(context.Background(), l, m, m.Feed(pcmLevel(9000, 2)))
-	h.w.onLevel(context.Background(), l, m, capture.LevelNone)
-	h.w.onLevel(context.Background(), l, nil, capture.LevelSilent)
+	feed(pcmLevel(9000, 2))
+	h.w.onLevel(context.Background(), l, capture.LevelNone, 0, 0, 0)
 	if len(h.sentTo(adminTG)) != before {
 		t.Fatal("ticks must not notify")
 	}
 }
+
+// ffmpeg умер посреди лекции: запись поднимается на новом сегменте, админ знает.
+func TestRestartRecSurvivesFFmpegDeath(t *testing.T) {
+	first := &pcmRec{data: []byte{1, 2}}
+	second := &pcmRec{data: []byte{3, 4, 5}}
+	var died []bool
+	r := &restartRec{cur: first, start: func() (recorder, error) { return second, nil },
+		onDied: func(_ error, restarted bool) { died = append(died, restarted) }}
+	got := make([]byte, 0, 8)
+	buf := make([]byte, 8)
+	for {
+		n, err := r.Read(buf)
+		got = append(got, buf[:n]...)
+		if err != nil {
+			break
+		}
+	}
+	if string(got) != string([]byte{1, 2, 3, 4, 5}) {
+		t.Fatalf("data = %v", got)
+	}
+	if len(died) < 1 || !died[0] {
+		t.Fatalf("restart not reported: %v", died)
+	}
+	if err := r.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	// После Stop новых перезапусков нет.
+	stopped := &restartRec{cur: &pcmRec{}, stopped: true, start: func() (recorder, error) {
+		t.Fatal("must not restart after Stop")
+		return nil, nil
+	}}
+	if _, err := stopped.Read(buf); err == nil {
+		t.Fatal("stopped rec must return the error")
+	}
+}
+
+type pcmRec struct {
+	data  []byte
+	stops int
+}
+
+func (f *pcmRec) Read(p []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+func (f *pcmRec) Stop() error { f.stops++; return nil }
 
 func TestOnWakeNotifiesListeners(t *testing.T) {
 	h := newWorkerHarness(t)
