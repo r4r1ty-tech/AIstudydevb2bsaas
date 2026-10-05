@@ -92,6 +92,7 @@ func transcribeGroq(ctx context.Context, cfg *config.Config, audioPath string) (
 	b, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	if err != nil {
 		logx.Errorf("notes", "transcribeGroq: read body: %v", err)
+		return "", fmt.Errorf("groq stt: ответ оборвался: %w", err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		logx.Errorf("notes", "transcribeGroq: HTTP %d: %s", res.StatusCode, truncate(string(b), 400))

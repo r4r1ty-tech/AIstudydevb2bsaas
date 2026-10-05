@@ -41,6 +41,11 @@ func TestChooseRecorderKeepsLiveAndPicksMinID(t *testing.T) {
 	if i := w.chooseRecorder(lesson, here, now.Add(3*time.Minute)); i != 1 {
 		t.Fatalf("after gap: got %d", i)
 	}
+	// Запись не стартует раз за разом — больше не перезаходим, пара без записи.
+	w.recFailN[7] = maxRecFails
+	if i := w.chooseRecorder(lesson, here, now.Add(time.Hour)); i != -1 {
+		t.Fatalf("после %d неудач рекордера не выбираем: got %d", maxRecFails, i)
+	}
 }
 
 func TestBuildNotesDaySkipsLiveRecording(t *testing.T) {

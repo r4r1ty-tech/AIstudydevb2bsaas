@@ -300,7 +300,8 @@ func pageHint(page *rod.Page) string {
 	}
 	res, err := page.Timeout(3 * time.Second).Eval(`() => {
 		const title = document.title || ''
-		const href = location.href || ''
+		// Без query: в нём sessionToken живой сессии BBB, а лог читают и хранят.
+		const href = (location.origin || '') + (location.pathname || '')
 		const t = (document.body && (document.body.innerText || '') || '').replace(/\s+/g, ' ').trim().slice(0, 180)
 		return title + ' | ' + href + ' | ' + t
 	}`)

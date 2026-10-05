@@ -133,6 +133,17 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 		logx.Debugf("rasp", "Refresher.Refresh: keepFuture total=%d", len(lessons))
 	}
 
+	// Сайт отдал страницу без пар (шаблон ошибки, сбой вёрстки): замена стёрла бы
+	// все пары вместе с решениями и присутствием. Пустую неделю от сбоя не
+	// отличить, поэтому расписание оставляем как было и ждём следующего прогона.
+	if len(lessons) == 0 && len(old) > 0 {
+		run.OK = false
+		run.Status = "пустое расписание — оставил прежнее"
+		logx.Warnf("rasp", "Refresher.Refresh: распарсено 0 пар при %d в базе — не заменяю", len(old))
+		r.persistFail(run)
+		return run, nil
+	}
+
 	diff := Diff(old, lessons)
 	logx.Debugf("rasp", "Refresher.Refresh: diff_bytes=%d", len(diff))
 	if err := r.Store.ReplaceLessons(lessons); err != nil {
