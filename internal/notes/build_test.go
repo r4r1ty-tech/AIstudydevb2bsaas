@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
@@ -145,5 +146,29 @@ func TestMarkdownHTMLRenders(t *testing.T) {
 	}
 	if strings.Contains(h, "<script>") || strings.Contains(h, "##") || strings.Contains(h, "**") {
 		t.Errorf("сырой markdown/html просочился: %s", h)
+	}
+}
+
+// Chrome на CI печатал PDF и не завершался: готовый файл важнее кода возврата.
+func TestWritePDFHungBrowserWithFile(t *testing.T) {
+	old := pdfTimeout
+	pdfTimeout = time.Second
+	t.Cleanup(func() { pdfTimeout = old })
+	dir := t.TempDir()
+	pdf := filepath.Join(dir, "a.pdf")
+	fake := filepath.Join(dir, "fake-chrome")
+	script := "#!/bin/sh\nhead -c 200 /dev/zero > '" + pdf + "'\nexec sleep 60\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePDF(&config.Config{ChromeBin: fake}, "t", "md", pdf); err != nil {
+		t.Fatalf("записанный pdf должен приниматься: %v", err)
+	}
+	hung := filepath.Join(dir, "hung-chrome")
+	if err := os.WriteFile(hung, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WritePDF(&config.Config{ChromeBin: hung}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "таймаут") {
+		t.Fatalf("зависший браузер без файла: %v", err)
 	}
 }
