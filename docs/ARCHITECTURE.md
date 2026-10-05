@@ -28,8 +28,8 @@ internal/rasp             Fetch (HTTP+UA+cookie), Parse (goquery), Diff, Refresh
 internal/tg               Bot: роутинг, онбординг, T-15, live-карточки, тестовая карточка
 internal/bbb              воркер захода: Chrome (rod), seat, lobby, запись, spotter
 internal/capture          PulseAudio null-sink + ffmpeg (ogg + PCM для споттера)
-internal/wake             keyword spotting: grammar/Vosk через wake.py
-internal/notes            после пары: STT (Fish/Groq), vision (Groq/Grok), PDF
+internal/wake             вейкворды: Vosk через wake.py (свободное распознавание) + поиск слов и их форм
+internal/notes            после пары: STT (AssemblyAI/Fish/Groq), vision (Groq/Grok), PDF
 internal/archive          имена файлов и путей записей, слайдов, конспектов
 internal/notify           отправка сообщений в Telegram без зависимости от tg-процесса
 internal/webapp           Mini App: статика + JSON API + password-gate
@@ -47,7 +47,7 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 | `bbb_links` | `key` | ссылка комнаты. `SetLessonBBB` пишет `lesson:<id>` и `room|предмет|препод|тип`; `model.ResolveBBB` (воркер, tg, панель): своя `lesson:<id>` (пустая — снята), иначе `room|…` по типу пары, иначе свежий ключ панели `<group>|предмет|препод`. Привязка новой ссылки в tg смотрит только на свои ссылки пар |
 | `lecture_packs` | `lesson_id` | запись/слайды/конспект: статус, пути, ошибка |
 | `parse_runs` | `id` | последний прогон парсера: время, ок/статус, счётчики, дифф |
-| `settings` | `key` | `test_join`, `group_id`, `rasp_refresh`, `admin_id`, `slides_done:*`, `notes_done:*` |
+| `settings` | `key` | `test_join`, `group_id`, `rasp_refresh`, `admin_id`, `slides_done:*`, `notes_done:*`, `notes_attempts:*` |
 
 ## Ключевые сценарии
 
@@ -100,6 +100,10 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 ### После пары
 
 `maybeHarvest` (слайды скриншотами) и `maybeNotes` (STT + vision + PDF) запускаются фоновыми джобами `beginJob/endJob`. Notes ждут, пока нет живых вкладок. Готовый PDF уходит кнопкой в Telegram.
+
+Перед расшифровкой `notes.Build` проверяет запись (`capture.Probe`): короче минуты, тишина (пик ниже −50 dBFS) или расшифровка в пару фраз на всю пару — пак закрывается как `empty`, во внешние сервисы и в рассылку ничего не уходит. Ошибка STT/LLM оставляет пак в `error`: три повтора через 10 минут, дальше раз в 2 часа, всего 10 попыток; счётчик лежит в `settings` (`notes_attempts:<pack>`) и переживает рестарт. `maybeNotes` догоняет не только вчерашний день, но и дни за последнюю неделю, у которых `notes_done` ещё не стоит.
+
+Вейкворды: `wake.py` распознаёт всю речь без закрытого словаря (с грамматикой из нескольких слов Vosk подгонял под них любую фразу) и отдаёт законченные фразы; `wake.Match` ищет в них слова пользователей вместе с формами («контрольная» → «контрольную»), но не однокоренные («тест» не ловит «тестирование»).
 
 ### Telegram UX
 

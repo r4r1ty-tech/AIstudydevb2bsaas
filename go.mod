@@ -6,6 +6,7 @@ require (
 	github.com/PaulSonOfLars/gotgbot/v2 v2.0.0-rc.36
 	github.com/PuerkitoBio/goquery v1.13.0
 	github.com/go-rod/rod v0.116.2
+	github.com/yuin/goldmark v1.8.6
 	golang.org/x/net v0.58.0
 	modernc.org/sqlite v1.38.2
 )

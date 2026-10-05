@@ -49,6 +49,8 @@ type Config struct {
 	LLMAPIKey        string
 	LLMAPIURL        string
 	LLMModel         string
+	AssemblyAPIKey   string
+	AssemblyAPIURL   string
 	FishStudioAPIKey string
 	FishStudioAPIURL string
 	GrokAPIKey       string
@@ -91,6 +93,8 @@ func Load() (*Config, error) {
 		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
 		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
 		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
+		AssemblyAPIKey:   strEnv("ASSEMBLYAI_API_KEY", ""),
+		AssemblyAPIURL:   strEnv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com"),
 		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),
 		FishStudioAPIURL: strEnv("FISH_STUDIO_API_URL", "https://api.fish.audio"),
 		GrokAPIKey:       strEnv("GROK_API_KEY", ""),
@@ -125,8 +129,8 @@ func Load() (*Config, error) {
 	logx.Debugf("config", "Load: whitelist=%d bot_token_present=%v admin=%d group=%d db=%s webapp_url=%q webapp_url_file=%q listen=%s tz=%s recordings=%s",
 		len(c.Whitelist), strings.TrimSpace(c.BotToken) != "", c.AdminID, c.GroupID,
 		c.DBPath, c.WebAppURL, c.WebAppURLFile, c.ListenAddr, c.Timezone, c.RecordingsDir)
-	logx.Debugf("config", "Load: key_lengths llm=%d grok=%d groq=%d fish=%d github=%d panel=%d",
-		len(c.LLMAPIKey), len(c.GrokAPIKey), len(c.GroqAPIKey), len(c.FishStudioAPIKey), len(c.GitHubToken), len(c.PanelPassword))
+	logx.Debugf("config", "Load: key_lengths llm=%d grok=%d groq=%d fish=%d assembly=%d github=%d panel=%d",
+		len(c.LLMAPIKey), len(c.GrokAPIKey), len(c.GroqAPIKey), len(c.FishStudioAPIKey), len(c.AssemblyAPIKey), len(c.GitHubToken), len(c.PanelPassword))
 	logx.Infof("config", "Load: ok whitelist=%d group=%d db=%s", len(c.Whitelist), c.GroupID, c.DBPath)
 	return c, nil
 }

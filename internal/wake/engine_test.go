@@ -112,3 +112,34 @@ func TestProcRecognizerFakeScript(t *testing.T) {
 func modelUser(id int64, fio string) model.User {
 	return model.User{TelegramID: id, FIO: fio, Enabled: true, Onboarded: true}
 }
+
+func TestMatchWordForms(t *testing.T) {
+	t.Parallel()
+	vocab := []string{"тест", "контрольная", "алексей", "амелин"}
+	for text, want := range map[string]string{
+		"на следующей неделе пишем контрольную": "контрольная",
+		"после контрольной работы":              "контрольная",
+		"будет два теста":                       "тест",
+		"результаты тестов выложу":              "тест",
+		"спросим алексея":                       "алексей",
+		"амелина сегодня нет":                   "амелин",
+	} {
+		if got := Match(text, vocab); len(got) != 1 || got[0] != want {
+			t.Errorf("%q: got %v, want [%s]", text, got, want)
+		}
+	}
+	// Ровно те слова, на которых ложно срабатывала закрытая грамматика 05.10.
+	for _, text := range []string{
+		"модульное тестирование потом интеграционное тестирование",
+		"у тебя вот этот контроллер будет принимать купюры",
+		"тестовый стенд и контроль качества",
+		"александр ответит",
+	} {
+		if got := Match(text, vocab); len(got) != 0 {
+			t.Errorf("%q: ложное срабатывание %v", text, got)
+		}
+	}
+	if got := Match("тест тесты контрольная контрольную", vocab); len(got) != 2 {
+		t.Errorf("формы одного слова должны давать одно срабатывание: %v", got)
+	}
+}

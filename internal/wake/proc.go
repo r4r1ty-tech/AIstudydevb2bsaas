@@ -2,7 +2,6 @@ package wake
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -49,8 +48,9 @@ func Open(model, script string, vocab []string) (Recognizer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("python3: %w", err)
 	}
-	raw, _ := json.Marshal(vocab)
-	cmd := exec.Command(py, script, "--model", model, "--vocab", string(raw), "--rate", "16000")
+	// Словарь в wake.py не уходит: он распознаёт всю речь, а слова ищет Match.
+	// Заодно фамилии из словаря не светятся в argv.
+	cmd := exec.Command(py, script, "--model", model, "--rate", "16000")
 	return startCmd(cmd)
 }
 
@@ -77,6 +77,11 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 	go scanLines(stdout, ch)
 	if cmd.Process != nil {
 		logx.Infof("wake", "vosk pid=%d", cmd.Process.Pid)
+		// Свободное распознавание ест около половины ядра: запись (ffmpeg) и
+		// Chromium важнее, вейкворды подождут.
+		if err := syscall.Setpriority(syscall.PRIO_PROCESS, cmd.Process.Pid, 10); err != nil {
+			logx.Debugf("wake", "startCmd: nice pid=%d: %v", cmd.Process.Pid, err)
+		}
 	}
 	p := &ProcRecognizer{
 		cmd: cmd, stdin: stdin, out: ch,

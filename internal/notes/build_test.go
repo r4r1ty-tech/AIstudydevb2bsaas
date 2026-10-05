@@ -2,6 +2,7 @@ package notes
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -79,8 +80,8 @@ func TestBuildFailsWithoutAnyInput(t *testing.T) {
 	root := t.TempDir()
 	p := model.LecturePack{Discipline: "Сети", Number: 1, Dir: "Сети/лекция-1"}
 	err := Build(nil, &config.Config{}, root, p) //nolint:staticcheck // nil ctx is handled
-	if err == nil || !strings.Contains(err.Error(), "нет ни расшифровки, ни слайдов") {
-		t.Fatalf("Build = %v", err)
+	if !errors.Is(err, ErrEmptyAudio) {
+		t.Fatalf("Build = %v, want ErrEmptyAudio", err)
 	}
 }
 
@@ -116,5 +117,33 @@ func TestWritePDFErrors(t *testing.T) {
 	}
 	if err := WritePDF(&config.Config{ChromeBin: fake}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "не записался") {
 		t.Fatalf("browser that writes nothing: %v", err)
+	}
+}
+
+// RECORDINGS_DIR на VDS относительный: file://recordings/... Chromium не открывал.
+func TestWritePDFRelativePath(t *testing.T) {
+	bin := chromeForPDF(t)
+	t.Chdir(t.TempDir())
+	if err := os.MkdirAll("recordings/x", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pdf := filepath.Join("recordings", "x", "notes.pdf")
+	if err := WritePDF(&config.Config{ChromeBin: bin}, "Тема", "## Раздел\n\nтекст", pdf); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(pdf); err != nil || st.Size() < 100 {
+		t.Fatalf("pdf: %v", err)
+	}
+}
+
+func TestMarkdownHTMLRenders(t *testing.T) {
+	h := markdownHTML("Тема", "## Раздел\n\n**важно** и <script>x</script>\n\n| а | б |\n|---|---|\n| 1 | 2 |\n")
+	for _, want := range []string{"<h2", "<strong>важно</strong>", "<table>", "<td>1</td>"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("нет %q в html", want)
+		}
+	}
+	if strings.Contains(h, "<script>") || strings.Contains(h, "##") || strings.Contains(h, "**") {
+		t.Errorf("сырой markdown/html просочился: %s", h)
 	}
 }

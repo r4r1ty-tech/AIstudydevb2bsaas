@@ -90,24 +90,41 @@ func TestBuildNotesFailureRetriesThenGivesUp(t *testing.T) {
 	h := newWorkerHarness(t)
 	l := h.lesson("Сети", "Лекция", 3*time.Hour)
 	p := h.pack(l, model.PackRecorded)
+	h.write(p.Audio, strings.Repeat("a", minRecordedBytes+1))
 
 	h.w.buildNotes(context.Background(), p.ID) // no STT/LLM keys, no slides → error
 	got, _ := h.st.PackByID(p.ID)
 	if got.Status != model.PackError || got.Err == "" {
 		t.Fatalf("pack = %+v", got)
 	}
-	h.wantSent(adminTG, "(попытка 1/3)")
+	h.wantSent(adminTG, "(попытка 1/10")
 	if h.w.noteRetryReady(got, time.Now()) {
 		t.Fatal("retry must wait")
 	}
 	if !h.w.noteRetryReady(got, time.Now().Add(noteRetryEvery+time.Minute)) {
 		t.Fatal("retry should be ready after the pause")
 	}
-	h.w.buildNotes(context.Background(), p.ID)
-	h.w.buildNotes(context.Background(), p.ID)
-	h.wantSent(adminTG, "попыток больше не будет: 3")
+	for i := 1; i < noteQuickRetries; i++ {
+		h.w.buildNotes(context.Background(), p.ID)
+	}
+	// После быстрых попыток пауза длинная: сбой провайдера на полдня переживаем.
 	got, _ = h.st.PackByID(p.ID)
-	if h.w.noteRetryReady(got, time.Now().Add(time.Hour)) {
+	if h.w.noteRetryReady(got, time.Now().Add(noteRetryEvery+time.Minute)) {
+		t.Fatal("после быстрых попыток пауза должна быть длинной")
+	}
+	if !h.w.noteRetryReady(got, time.Now().Add(noteRetrySlow+time.Minute)) {
+		t.Fatal("медленный повтор должен наступить")
+	}
+	before := len(h.sentTo(adminTG))
+	for h.w.noteAttemptsFor(p.ID) < maxNoteAttempts {
+		h.w.buildNotes(context.Background(), p.ID)
+	}
+	h.wantSent(adminTG, "попыток больше не будет: 10")
+	if n := len(h.sentTo(adminTG)) - before; n != 1 {
+		t.Fatalf("медленные повторы не должны спамить админу: %d сообщений", n)
+	}
+	got, _ = h.st.PackByID(p.ID)
+	if h.w.noteRetryReady(got, time.Now().Add(24*time.Hour)) {
 		t.Fatal("no retries after the limit")
 	}
 	if h.w.noteRetryReady(nil, time.Now()) {
@@ -118,6 +135,24 @@ func TestBuildNotesFailureRetriesThenGivesUp(t *testing.T) {
 		t.Fatal("noteOK must reset attempts")
 	}
 	h.w.buildNotes(context.Background(), 424242) // missing pack: logged
+}
+
+// Записи нет вовсе — это не сбой сборки: пак закрывается как empty без ретраев.
+func TestBuildNotesMissingAudioIsEmpty(t *testing.T) {
+	h := newWorkerHarness(t)
+	p := h.pack(h.lesson("Сети", "Лекция", 3*time.Hour), model.PackRecorded)
+
+	if !h.w.buildNotes(context.Background(), p.ID) {
+		t.Fatal("пустая запись не должна считаться сбоем сборки")
+	}
+	got, _ := h.st.PackByID(p.ID)
+	if got.Status != model.PackEmpty || got.Err == "" {
+		t.Fatalf("pack = %+v", got)
+	}
+	if h.w.noteAttemptsFor(p.ID) != 0 {
+		t.Fatal("empty не тратит попытки")
+	}
+	h.wantSent(adminTG, "конспекта не будет")
 }
 
 func TestBuildNotesDayRetriesErrorsAndPromotesStuck(t *testing.T) {
@@ -375,6 +410,7 @@ func TestAttachTestRecorderMergesOnClose(t *testing.T) {
 func TestNotesDayStaysOpenUntilAttemptsRunOut(t *testing.T) {
 	h := newWorkerHarness(t)
 	p := h.pack(h.lesson("Сети", "Лекция", 3*time.Hour), model.PackRecorded)
+	h.write(p.Audio, strings.Repeat("a", minRecordedBytes+1))
 	if done := h.w.buildNotesDay(context.Background(), p.Date); done {
 		t.Fatal("first failure must keep the day open")
 	}
@@ -407,5 +443,38 @@ func TestTestJoinStopsAfterRepeatedFails(t *testing.T) {
 	h.wantSent(adminTG, "останавливаюсь")
 	if got, _ := h.st.GetTestJoin(); got.Want != model.TestWantOff || got.Status != model.TestError {
 		t.Fatalf("test join = %+v", got)
+	}
+}
+
+// Упавший позавчера конспект догоняется, а счётчик попыток переживает рестарт.
+func TestNotesCatchUpOlderDaysAndPersistAttempts(t *testing.T) {
+	h := newWorkerHarness(t)
+	p := h.pack(h.lesson("Сети", "Лекция", 3*time.Hour), model.PackRecorded)
+	h.write(p.Audio, strings.Repeat("a", minRecordedBytes+1))
+	day, err := time.ParseInLocation("2006-01-02", p.Date, time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := day.AddDate(0, 0, 3).Add(time.Hour) // пак — позавчерашний относительно «вчера»
+	yesterday := now.AddDate(0, 0, -1).Format("2006-01-02")
+
+	days := h.w.openNoteDays(now)
+	if len(days) != 2 || days[0] != p.Date || days[1] != yesterday {
+		t.Fatalf("open days = %v, want [%s %s]", days, p.Date, yesterday)
+	}
+	h.w.buildNotes(context.Background(), p.ID)
+	if n := h.w.noteAttemptsFor(p.ID); n != 1 {
+		t.Fatalf("attempts = %d", n)
+	}
+	if raw, ok, _ := h.st.GetSetting(noteAttemptsKey + "1"); !ok || raw != "1" {
+		t.Fatalf("попытки должны лежать в settings: %q ok=%v", raw, ok)
+	}
+
+	h.w.setSetting(notesDoneKey+p.Date, "1")
+	if days := h.w.openNoteDays(now); len(days) != 1 || days[0] != yesterday {
+		t.Fatalf("закрытый день не должен возвращаться: %v", days)
+	}
+	if days := h.w.openNoteDays(day.AddDate(0, 0, noteCatchUpDays+3)); len(days) != 1 {
+		t.Fatalf("слишком старые дни не догоняем: %v", days)
 	}
 }
