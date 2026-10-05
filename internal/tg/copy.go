@@ -11,12 +11,13 @@ import (
 
 const (
 	introText      = "Захожу на онлайн-пары вместо тебя: в списке BBB будет твоё ФИО, без микрофона и камеры.\n\n<b>Как тебя записать в журнал?</b>\nФамилия Имя Отчество, как в ведомости."
+	badFIO         = "Не похоже на ФИО. Нужно 2–4 слова, как в ведомости: Фамилия Имя Отчество."
 	askFIO         = "Напиши ФИО как в ведомости — три слова: Фамилия Имя Отчество.\nПод этим именем зайду в комнату."
 	askSub         = "Какая подгруппа? Чужие подгрупповые пары пропускаю."
 	askWords       = "На лекции слушаю короткие слова и пишу тебе, если препод их сказал.\nУже есть: фамилия, «тест», «контрольная», «мудл».\nМожно добавить свои."
 	askWordsNext   = "Напиши свои слова через запятую — например: лаба, зачёт.\n«-» — убрать свои, базовые останутся."
 	askBBBLink     = "Ссылка нужна <b>на эту пару</b>. Пришли bbb.ssau.ru/b/… — без неё не зайду."
-	helpText       = "<b>Что умею</b>\nЗахожу на онлайн-пары вместо тебя: в BBB в списке твоё ФИО, микрофон выключен.\n\n<b>Кнопки внизу</b>\nПары — что сегодня и зайду ли\nКонспекты — PDF после полуночи\nПрофиль — имя в журнале, подгруппа, слова\n\n<b>Как это работает</b>\nЗа 15 минут спрошу: заходить? Молчишь — зайду за 5 минут до звонка.\nСсылку bbb.ssau.ru/b/… кинь перед парой — привяжу к ней и запомню для этого предмета.\nОтключиться можно кнопкой в карточке пары."
+	helpText       = "<b>Что умею</b>\nЗахожу на онлайн-пары вместо тебя: в BBB в списке твоё ФИО, микрофон выключен.\n\n<b>Кнопки внизу</b>\nПары — весь день и зайду ли на онлайн; /week — неделя\nКонспекты — PDF после полуночи\nПрофиль — имя в журнале, подгруппа, слова\n\n<b>Как это работает</b>\nЗа 15 минут спрошу: заходить? Молчишь — зайду за 5 минут до звонка.\nСсылку bbb.ssau.ru/b/… кинь перед парой — привяжу к ней и запомню для этого предмета.\nОтключиться можно кнопкой в карточке пары."
 	fallbackText   = "Не понял. Внизу три кнопки: Пары, Конспекты, Профиль."
 	noBBBTarget    = "Не понял, к какой паре ссылка. Открой Профиль → Комнаты BBB или пришли bbb.ssau.ru/b/… ближе к паре."
 	testNeedURL    = "Кинь ссылку bbb.ssau.ru/b/… — сразу покажу кнопки захода."
@@ -206,27 +207,38 @@ type todayRow struct {
 	Detail   string
 }
 
+var weekdaysRU = [...]string{"вс", "пн", "вт", "ср", "чт", "пт", "сб"}
+
+func dayTitle(t time.Time) string {
+	return t.Format("02.01") + ", " + weekdaysRU[t.Weekday()]
+}
+
+// formatToday — весь день: и очные пары (с аудиторией), и прошедшие. Раньше
+// показывались только онлайн-пары, которые ещё не кончились: в день военной
+// кафедры бот писал «пар больше нет» — «не знает расписание».
 func formatToday(now time.Time, loc *time.Location, fio string, rows []todayRow) string {
 	logx.Debugf("tg", "formatToday: rows=%d fio=%q", len(rows), fio)
 	var b strings.Builder
-	day := now.Format("02.01")
 	if loc != nil {
-		day = now.In(loc).Format("02.01")
+		now = now.In(loc)
 	}
-	fmt.Fprintf(&b, "<b>Сегодня, %s</b>", day)
+	fmt.Fprintf(&b, "<b>Сегодня, %s</b>", dayTitle(now))
 	if strings.TrimSpace(fio) != "" {
 		fmt.Fprintf(&b, "\nВ журнале: %s", esc(fio))
 	}
 	if len(rows) == 0 {
-		b.WriteString("\n\nОнлайн-пар на сегодня больше нет.")
+		b.WriteString("\n\nСегодня пар нет.")
 		return b.String()
 	}
-
-	var nowRows, later []todayRow
+	var past, nowRows, later []todayRow
 	for _, r := range rows {
-		if !r.Lesson.Finish.IsZero() && !now.Before(r.Lesson.Begin) && now.Before(r.Lesson.Finish) {
+		l := r.Lesson
+		switch {
+		case !l.Finish.IsZero() && !now.Before(l.Finish):
+			past = append(past, r)
+		case !l.Begin.IsZero() && !now.Before(l.Begin):
 			nowRows = append(nowRows, r)
-		} else {
+		default:
 			later = append(later, r)
 		}
 	}
@@ -242,13 +254,38 @@ func formatToday(now time.Time, loc *time.Location, fio string, rows []todayRow)
 			writeTodayRow(&b, r, loc)
 		}
 	}
+	if len(past) > 0 {
+		b.WriteString("\n\n<b>Прошли</b>")
+		for _, r := range past {
+			fmt.Fprintf(&b, "\n• %s · %s", esc(dashOr(r.Lesson.Discipline)), code(r.Lesson.SlotLabel()))
+		}
+	}
+	if len(nowRows) == 0 && len(later) == 0 {
+		b.WriteString("\n\nНа сегодня всё.")
+	}
+	return b.String()
+}
+
+// formatDayBlock — пары другого дня (ближайший день с парами, неделя).
+func formatDayBlock(title string, rows []todayRow, loc *time.Location) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "<b>%s</b>", esc(title))
+	for _, r := range rows {
+		writeTodayRow(&b, r, loc)
+	}
 	return b.String()
 }
 
 func writeTodayRow(b *strings.Builder, r todayRow, loc *time.Location) {
 	logx.Debugf("tg", "writeTodayRow: lesson=%d hasLink=%v decision=%s presence=%s", r.Lesson.ID, r.HasLink, r.Decision, r.Presence)
 	l := r.Lesson
-	fmt.Fprintf(b, "\n• %s · %s", bold(dashOr(l.Discipline)), code(lessonStamp(l, loc)))
+	fmt.Fprintf(b, "\n• %s · %s", bold(dashOr(l.Discipline)), code(l.SlotLabel()))
+	if t := strings.TrimSpace(l.Type); t != "" && t != "unknown" {
+		fmt.Fprintf(b, " · %s", esc(t))
+	}
+	if l.Subgroup > 0 {
+		fmt.Fprintf(b, " · подгр. %d", l.Subgroup)
+	}
 	if note := todayNote(r); note != "" {
 		fmt.Fprintf(b, "\n  %s", note)
 	}
@@ -256,6 +293,13 @@ func writeTodayRow(b *strings.Builder, r todayRow, loc *time.Location) {
 
 func todayNote(r todayRow) string {
 	logx.Debugf("tg", "todayNote: lesson=%d decision=%s presence=%s", r.Lesson.ID, r.Decision, r.Presence)
+	if !r.Lesson.Online {
+		place := strings.TrimSpace(r.Lesson.Place)
+		if place == "" {
+			return "очно"
+		}
+		return "очно · " + esc(place)
+	}
 	switch r.Presence {
 	case model.PresenceRoom:
 		return "в комнате"
@@ -269,22 +313,22 @@ func todayNote(r todayRow) string {
 	}
 	switch r.Decision {
 	case model.JoinNo:
-		return "сегодня пропускаю"
+		return "онлайн · пропускаю"
 	case model.JoinYes:
 		if r.HasLink {
-			return "зайду за тебя"
+			return "онлайн · зайду за тебя"
 		}
-		return "зайду, но нет ссылки на комнату"
+		return "онлайн · зайду, но нет ссылки на комнату"
 	case model.JoinPending:
 		if r.HasLink {
-			return "молчу — зайду за 5 мин"
+			return "онлайн · молчу — зайду за 5 мин"
 		}
-		return "нужна ссылка комнаты bbb.ssau.ru/b/…"
+		return "онлайн · нужна ссылка комнаты bbb.ssau.ru/b/…"
 	}
 	if r.HasLink {
-		return "ссылка есть"
+		return "онлайн · ссылка есть"
 	}
-	return "нет ссылки"
+	return "онлайн · нет ссылки"
 }
 
 func formatWordsHint() string {

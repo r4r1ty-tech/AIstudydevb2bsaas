@@ -63,11 +63,11 @@ func TestParseJoinCallback(t *testing.T) {
 
 func TestParseSubgroup(t *testing.T) {
 	t.Parallel()
-	n, ok := parseSubgroup("")
-	if !ok || n != 1 {
-		t.Fatalf("empty -> %d %v", n, ok)
+	// Пустой текст (кнопка меню, /settings) — не выбор подгруппы.
+	if _, ok := parseSubgroup(""); ok {
+		t.Fatal("empty must not pick subgroup 1")
 	}
-	n, ok = parseSubgroup("2")
+	n, ok := parseSubgroup("2")
 	if !ok || n != 2 {
 		t.Fatalf("2 -> %d %v", n, ok)
 	}
@@ -125,5 +125,17 @@ func TestPickLessonForBBBPreferCurrent(t *testing.T) {
 	got := pickLessonForBBB(now, 1, []model.Lesson{next, live}, none, nil)
 	if got == nil || got.ID != 10 {
 		t.Fatalf("want current lesson id=10, got %#v", got)
+	}
+}
+
+func TestNormalizeFIO(t *testing.T) {
+	t.Parallel()
+	if got, ok := normalizeFIO("  Иванов\n Иван   Иванович "); !ok || got != "Иванов Иван Иванович" {
+		t.Fatalf("got %q %v", got, ok)
+	}
+	for _, bad := range []string{"привет", "", strings.Repeat("Оченьдлиннаяфамилия ", 3) + strings.Repeat("я", 60), "а б в г д"} {
+		if _, ok := normalizeFIO(bad); ok {
+			t.Errorf("%q must be rejected", bad)
+		}
 	}
 }

@@ -518,3 +518,29 @@ func TestWordsCommandBeforeOnboardingShowsHint(t *testing.T) {
 	h.text(studentID, "/words")
 	h.wantText(studentID, askWordsNext)
 }
+
+func TestTodayShowsOfflineAndNextDay(t *testing.T) {
+	h := newHarness(t)
+	if time.Now().In(h.b.loc).Hour() < 4 {
+		t.Skip("пара «3 часа назад» попала бы во вчера")
+	}
+	h.onboarded(studentID, "Имя", 1)
+	h.lesson("Военная кафедра", "Практика", -3*time.Hour, false, 0) // прошла сегодня
+	h.lesson("Компьютерные сети", "Лекция", 24*time.Hour, true, 0)  // завтра
+	h.lesson("Чужая лаба", "Лабораторная", 25*time.Hour, true, 2)   // не моя подгруппа
+	h.text(studentID, "/today")
+	got := h.lastTo(studentID)
+	if !strings.Contains(got, "Военная кафедра") || !strings.Contains(got, "Прошли") {
+		t.Fatalf("today: %s", got)
+	}
+	if !strings.Contains(got, "Компьютерные сети") {
+		t.Fatalf("next day block missing: %s", got)
+	}
+	if strings.Contains(got, "Чужая лаба") {
+		t.Fatalf("other subgroup leaked: %s", got)
+	}
+	h.text(studentID, "/week")
+	if got := h.lastTo(studentID); !strings.Contains(got, "Компьютерные сети") {
+		t.Fatalf("week: %s", got)
+	}
+}

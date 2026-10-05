@@ -52,11 +52,11 @@ func TestFormatTodaySplitsNowAndLater(t *testing.T) {
 	loc := time.UTC
 	now := time.Date(2026, 9, 12, 12, 0, 0, 0, loc)
 	cur := model.Lesson{
-		Discipline: "Алгебра", Start: "11:30", End: "13:05",
+		Discipline: "Алгебра", Start: "11:30", End: "13:05", Online: true,
 		Begin: now.Add(-30 * time.Minute), Finish: now.Add(65 * time.Minute),
 	}
 	next := model.Lesson{
-		Discipline: "Физика", Start: "13:15", End: "14:50",
+		Discipline: "Физика", Start: "13:15", End: "14:50", Online: true,
 		Begin: now.Add(75 * time.Minute), Finish: now.Add(2 * time.Hour),
 	}
 	got := formatToday(now, loc, "Иванов Иван", []todayRow{
@@ -70,8 +70,27 @@ func TestFormatTodaySplitsNowAndLater(t *testing.T) {
 		t.Fatalf("notes: %s", got)
 	}
 	empty := formatToday(now, loc, "Иванов Иван", nil)
-	if !strings.Contains(empty, "Онлайн-пар на сегодня больше нет") {
+	if !strings.Contains(empty, "Сегодня пар нет") {
 		t.Fatalf("empty: %s", empty)
+	}
+}
+
+// Прод 01.10: четыре пары военной кафедры, все очные, — бот писал «онлайн-пар
+// больше нет». Очные пары показываются с аудиторией, прошедшие — отдельно.
+func TestFormatTodayShowsOfflineAndPast(t *testing.T) {
+	t.Parallel()
+	loc := time.UTC
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, loc)
+	done := model.Lesson{Discipline: "Военная кафедра", Start: "08:00", End: "09:35",
+		Begin: now.Add(-4 * time.Hour), Finish: now.Add(-150 * time.Minute), Place: "Военная кафедра - 4"}
+	next := model.Lesson{Discipline: "Военная кафедра", Start: "13:30", End: "15:05",
+		Begin: now.Add(90 * time.Minute), Finish: now.Add(185 * time.Minute), Place: "Военная кафедра - 4"}
+	got := formatToday(now, loc, "", []todayRow{{Lesson: done}, {Lesson: next}})
+	if !strings.Contains(got, "очно · Военная кафедра - 4") || !strings.Contains(got, "Прошли") || !strings.Contains(got, "Дальше") {
+		t.Fatalf("offline/past: %s", got)
+	}
+	if strings.Contains(got, "нет ссылки") {
+		t.Fatalf("offline lesson must not ask for a link: %s", got)
 	}
 }
 
