@@ -523,3 +523,16 @@ func TestAttachRecorderGuards(t *testing.T) {
 		t.Fatal("archive helper")
 	}
 }
+
+// Пишущая вкладка заходит до звонка: тишина до начала пары — не повод для алерта.
+func TestOnLevelNoSilenceAlertBeforeLessonStarts(t *testing.T) {
+	h := newWorkerHarness(t)
+	early := model.Lesson{Discipline: "Сети", Begin: time.Now().Add(10 * time.Minute)}
+	h.w.onLevel(context.Background(), early, capture.LevelSilent, 0, 5, 5)
+	if n := len(h.sentTo(adminTG)); n != 0 {
+		t.Fatalf("до начала пары алертов быть не должно: %d", n)
+	}
+	going := model.Lesson{Discipline: "Сети", Begin: time.Now().Add(-20 * time.Minute)}
+	h.w.onLevel(context.Background(), going, capture.LevelSilent, 0, 5, 5)
+	h.wantSent(adminTG, "5 мин тишины")
+}

@@ -262,3 +262,37 @@ func TestRefreshKeepsFutureWhenNextWeekUnknown(t *testing.T) {
 		t.Fatalf("next week dropped: %+v", got)
 	}
 }
+
+// Сайт ответил 200, но пар в странице нет (шаблон ошибки): расписание не трогаем.
+func TestRefreshEmptyPageKeepsLessons(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	keep := []model.Lesson{{
+		Date: "2026-01-01", Start: "08:00", End: "09:35",
+		Begin: time.Now(), Finish: time.Now().Add(time.Hour),
+		Discipline: "Keep", Teacher: "T", Place: "online", Online: true,
+	}}
+	if err := st.ReplaceLessons(keep); err != nil {
+		t.Fatal(err)
+	}
+	prev := fetchSchedule
+	fetchSchedule = func(ctx context.Context, groupID int64, week int) ([]byte, int, error) {
+		return []byte(`<html><body><a class="week-nav-next" href="/rasp?groupId=1&selectedWeek=4">4</a></body></html>`), http.StatusOK, nil
+	}
+	t.Cleanup(func() { fetchSchedule = prev })
+
+	run, err := (&Refresher{Store: st, GroupID: 1, Loc: time.UTC}).Refresh(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.OK || !strings.Contains(run.Status, "пустое расписание") {
+		t.Fatalf("run = %+v", run)
+	}
+	got, err := st.ListLessons()
+	if err != nil || len(got) != 1 || got[0].Discipline != "Keep" {
+		t.Fatalf("пары должны остаться: %v %v", got, err)
+	}
+}

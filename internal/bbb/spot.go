@@ -236,6 +236,11 @@ func (w *Worker) onLevel(ctx context.Context, lesson model.Lesson, ev capture.Le
 	if windows == 1 {
 		capture.LogRoute("capture", "first-minute")
 	}
+	// Пишущая вкладка заходит за 5–15 минут до начала и может ждать в лобби:
+	// тишина до звонка — норма, алерт на каждой паре никому не нужен.
+	if !lesson.Begin.IsZero() && time.Now().Before(lesson.Begin.Add(silenceAlertMinutes*time.Minute)) {
+		return
+	}
 	switch ev {
 	case capture.LevelSilent:
 		logx.Warnf("capture", "recording %q silent for %d min — аудио, похоже, не подключилось", lesson.Discipline, silent)

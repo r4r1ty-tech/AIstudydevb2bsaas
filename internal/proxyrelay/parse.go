@@ -101,7 +101,7 @@ func ParseEntry(raw string) (Proxy, error) {
 	if !p.valid() {
 		return Proxy{}, fmt.Errorf("не разобрал адрес %q", hostport)
 	}
-	logx.Debugf("proxyrelay", "ParseEntry: %q -> %s user_present=%v", raw, p.Redacted(), p.User != "")
+	logx.Debugf("proxyrelay", "ParseEntry: %s user_present=%v", p.Redacted(), p.User != "")
 	return p, nil
 }
 

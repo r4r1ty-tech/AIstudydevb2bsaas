@@ -40,6 +40,7 @@ type Worker struct {
 	lobbyAlertAt map[string]time.Time // последний алерт «долго в лобби»
 	recorder     map[int64]string     // пара → ключ сессии, которая пишет звук
 	recFailAt    map[int64]time.Time  // пара → когда не стартовала запись
+	recFailN     map[int64]int        // пара → сколько раз подряд запись не стартовала
 	noBBBAdmin   map[int64]struct{}   // пара → админу про «нет ссылки» уже писали
 	audioMiss    map[string]int       // пишущая вкладка не в аудио, тиков подряд
 	joining      map[string]struct{}
@@ -96,6 +97,7 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		lobbyAlertAt: make(map[string]time.Time),
 		recorder:     make(map[int64]string),
 		recFailAt:    make(map[int64]time.Time),
+		recFailN:     make(map[int64]int),
 		noBBBAdmin:   make(map[int64]struct{}),
 		audioMiss:    make(map[string]int),
 		joining:      make(map[string]struct{}),
@@ -302,6 +304,7 @@ const (
 	lobbyAlertWait = 2 * time.Minute  // лобби после начала пары дольше этого — алерт
 	lobbyAlertGap  = 20 * time.Minute // повтор алерта админу
 	recRetryGap    = 2 * time.Minute  // запись не стартовала — новая попытка не раньше
+	maxRecFails    = 3                // столько неудач подряд — пара остаётся без записи
 )
 
 type pending struct {
@@ -359,6 +362,7 @@ func (w *Worker) chooseRecorder(lesson model.Lesson, here []pending, now time.Ti
 	cur := w.recorder[lesson.ID]
 	_, curLive := w.sessions[cur]
 	failAt, failed := w.recFailAt[lesson.ID]
+	fails := w.recFailN[lesson.ID]
 	w.mu.Unlock()
 	if cur != "" && curLive {
 		for i := range here {
@@ -366,6 +370,11 @@ func (w *Worker) chooseRecorder(lesson model.Lesson, here []pending, now time.Ti
 				return i
 			}
 		}
+	}
+	// Каждая новая попытка — перезаход вкладки на глазах у преподавателя.
+	// Запись не стартует раз за разом — сидим до конца пары просто присутствием.
+	if fails >= maxRecFails {
+		return -1
 	}
 	if failed && now.Sub(failAt) < recRetryGap {
 		return -1
@@ -498,6 +507,7 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	if lobby {
 		state = model.PresenceLobby
 	}
+	recGaveUp := false
 	w.mu.Lock()
 	w.sessions[key] = sess
 	delete(w.failN, key)
@@ -507,8 +517,11 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		if recording {
 			w.recorder[lesson.ID] = key
 			delete(w.recFailAt, lesson.ID)
+			delete(w.recFailN, lesson.ID)
 		} else {
 			w.recFailAt[lesson.ID] = now
+			w.recFailN[lesson.ID]++
+			recGaveUp = w.recFailN[lesson.ID] == maxRecFails
 		}
 	}
 	if state == model.PresenceLobby {
@@ -516,6 +529,10 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	}
 	w.mu.Unlock()
 	logx.Infof("bbb", "seated key=%s state=%s tg=%d record=%v", key, state, u.TelegramID, recording)
+	if recGaveUp {
+		logx.Warnf("bbb", "lesson=%d: запись не стартовала %d раз — больше не пробую, пара без записи", lesson.ID, maxRecFails)
+		notify.Admin(ctx, w.Cfg, fmt.Sprintf("«%s» %s: запись не стартовала %d раз подряд — больше не перезахожу, пара останется без записи и конспекта.", lesson.Discipline, lesson.SlotLabel(), maxRecFails))
+	}
 	if err := w.Store.SetPresence(model.Presence{
 		TelegramID: u.TelegramID, LessonID: lesson.ID,
 		State: state, Message: "join", UpdatedAt: now,
@@ -863,6 +880,7 @@ func (w *Worker) forget(ctx context.Context, valid map[int64]struct{}) {
 	for id := range w.recFailAt {
 		if _, ok := valid[id]; !ok {
 			delete(w.recFailAt, id)
+			delete(w.recFailN, id)
 		}
 	}
 	for id, key := range w.recorder {

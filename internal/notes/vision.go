@@ -186,6 +186,7 @@ func describeOne(ctx context.Context, prov visionProvider, path string, n int) (
 	b, err := io.ReadAll(io.LimitReader(res.Body, 2<<20))
 	if err != nil {
 		logx.Errorf("notes", "describeOne: read body provider=%s: %v", prov.name, err)
+		return "", fmt.Errorf("%s vision: ответ оборвался: %w", prov.name, err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		logx.Errorf("notes", "describeOne: %s HTTP %d: %s", prov.name, res.StatusCode, truncate(string(b), 300))
