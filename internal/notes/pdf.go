@@ -21,7 +21,7 @@ import (
 
 // pdfTimeout caps headless Chromium: a hung print must not hold the notes
 // job (and the worker shutdown) forever.
-const pdfTimeout = 3 * time.Minute
+var pdfTimeout = 3 * time.Minute
 
 func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 	// RECORDINGS_DIR на VDS относительный, а file://recordings/... Chromium
@@ -45,13 +45,6 @@ func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 	if bin == "" {
 		bin = "chromium"
 	}
-	// Свой профиль: печать не должна делить каталог с Chromium, сидящим на паре.
-	profile, err := os.MkdirTemp("", "ssau-pdf-")
-	if err != nil {
-		logx.Errorf("notes", "WritePDF: temp profile: %v", err)
-		return fmt.Errorf("WritePDF: temp profile: %w", err)
-	}
-	defer os.RemoveAll(profile)
 	// Старый файл не должен сойти за свежий, если печать молча не сработала.
 	_ = os.Remove(pdfPath)
 	ctx, cancel := context.WithTimeout(context.Background(), pdfTimeout)
@@ -61,14 +54,18 @@ func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 		"--disable-gpu",
 		"--no-sandbox",
 		"--no-pdf-header-footer",
-		"--user-data-dir="+profile,
 		"--print-to-pdf="+pdfPath,
 		(&url.URL{Scheme: "file", Path: filepath.ToSlash(htmlPath)}).String(),
 	)
 	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
-		logx.Errorf("notes", "WritePDF: print-to-pdf не уложился в %s bin=%s", pdfTimeout, bin)
+		// Chrome иногда печатает файл и не выходит: готовый PDF важнее кода возврата.
+		if st, serr := os.Stat(pdfPath); serr == nil && st.Size() >= 100 {
+			logx.Warnf("notes", "WritePDF: chromium не вышел за %s, но pdf записан bytes=%d", pdfTimeout, st.Size())
+			return nil
+		}
+		logx.Errorf("notes", "WritePDF: print-to-pdf не уложился в %s bin=%s out=%q", pdfTimeout, bin, truncate(string(out), 400))
 		return fmt.Errorf("print-to-pdf: таймаут %s", pdfTimeout)
 	}
 	if err != nil {
