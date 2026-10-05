@@ -42,7 +42,6 @@ type Worker struct {
 	recFailAt    map[int64]time.Time  // пара → когда не стартовала запись
 	noBBBAdmin   map[int64]struct{}   // пара → админу про «нет ссылки» уже писали
 	audioMiss    map[string]int       // пишущая вкладка не в аудио, тиков подряд
-	noteAttempts map[int64]int        // pack id → сколько раз не собрался конспект
 	joining      map[string]struct{}
 	testPaused   bool
 	lectureNow   bool      // этот тик решил сидеть на паре — тяжёлые задачи ждут
@@ -99,7 +98,6 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		recFailAt:    make(map[int64]time.Time),
 		noBBBAdmin:   make(map[int64]struct{}),
 		audioMiss:    make(map[string]int),
-		noteAttempts: make(map[int64]int),
 		joining:      make(map[string]struct{}),
 	}
 	logx.Debugf("bbb", "NewWorker: joiner=%T hogs=%T", j, hogs)

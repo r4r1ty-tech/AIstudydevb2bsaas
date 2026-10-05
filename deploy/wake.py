@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Keyword spotting for SSAU lectures. Reads s16le 16 kHz mono from stdin."""
+"""Speech-to-words for SSAU wake words. Reads s16le 16 kHz mono from stdin,
+prints recognized phrases, one per line; matching against user words is done
+by the bbb worker (internal/wake)."""
 from __future__ import annotations
 
 import argparse
@@ -7,10 +9,11 @@ import json
 import os
 import sys
 
-# Закрытая грамматика «подгоняет» шум и чужую речь под слова словаря: финальный
-# результат берём только по словам с уверенностью не ниже порога, partial —
-# только если слово держится в двух partial подряд.
-MIN_CONF = float(os.environ.get("WAKE_MIN_CONF", "0.7"))
+# Распознаём без закрытого словаря. С грамматикой из нескольких слов Vosk
+# подгонял под них любую речь: десятки «тест»/«контрольная» за пару, которых
+# никто не произносил, причём с уверенностью до 1.0 — порогом это не лечилось.
+# Слова ниже порога в свободном режиме — обычно шум, их не отдаём.
+MIN_CONF = float(os.environ.get("WAKE_MIN_CONF", "0.5"))
 
 
 def emit(text: str) -> None:
@@ -21,10 +24,13 @@ def emit(text: str) -> None:
 
 
 def confident(res: dict) -> str:
+    words = res.get("result")
+    if words is None:
+        return str(res.get("text") or "")
     out = []
-    for w in res.get("result") or []:
+    for w in words:
         word = str(w.get("word", ""))
-        if word and word != "[unk]" and float(w.get("conf", 0)) >= MIN_CONF:
+        if word and float(w.get("conf", 0)) >= MIN_CONF:
             out.append(word)
     return " ".join(out)
 
@@ -32,7 +38,7 @@ def confident(res: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
-    ap.add_argument("--vocab", default="[]")
+    ap.add_argument("--vocab", default="[]")  # не используется; оставлен для старых вызовов
     ap.add_argument("--rate", type=int, default=16000)
     args = ap.parse_args()
 
@@ -43,42 +49,18 @@ def main() -> int:
         return 1
 
     SetLogLevel(-1)
-    words = []
-    try:
-        raw = json.loads(args.vocab)
-    except json.JSONDecodeError:
-        raw = []
-    if isinstance(raw, list):
-        for w in raw:
-            s = str(w).strip().lower()
-            if s:
-                words.append(s)
-    if not words:
-        words = ["тест", "контрольная", "мудл", "moodle"]
-
-    grammar = json.dumps(words + ["[unk]"], ensure_ascii=False)
-    rec = KaldiRecognizer(Model(args.model), args.rate, grammar)
+    rec = KaldiRecognizer(Model(args.model), args.rate)
     rec.SetWords(True)
 
     buf = sys.stdin.buffer
-    prev: set[str] = set()
-    sent: set[str] = set()
     while True:
         data = buf.read(4000)
         if not data:
             emit(confident(json.loads(rec.FinalResult())))
             break
+        # Только законченные фразы: partial в свободном режиме ещё меняется.
         if rec.AcceptWaveform(data):
             emit(confident(json.loads(rec.Result())))
-            prev, sent = set(), set()
-            continue
-        partial = (json.loads(rec.PartialResult()).get("partial") or "").split()
-        words = {w for w in partial if w != "[unk]"}
-        stable = (words & prev) - sent
-        if stable:
-            sent |= stable
-            emit(" ".join(sorted(stable)))
-        prev = words
     return 0
 
 

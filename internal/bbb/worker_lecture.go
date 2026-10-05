@@ -2,9 +2,12 @@ package bbb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,8 +30,16 @@ const (
 	publishedTTL = 24 * time.Hour
 	publishRetry = 5 * time.Minute
 
-	maxNoteAttempts = 3
-	noteRetryEvery  = 10 * time.Minute
+	// Первые попытки идут часто (сеть моргнула), дальше — редко: сбой
+	// провайдера на полдня не должен стоить конспекта.
+	maxNoteAttempts  = 10
+	noteQuickRetries = 3
+	noteRetryEvery   = 10 * time.Minute
+	noteRetrySlow    = 2 * time.Hour
+	// Сколько прошлых дней догоняем, если их конспекты не закрыты.
+	noteCatchUpDays = 7
+
+	noteAttemptsKey = "notes_attempts:"
 )
 
 func (w *Worker) recRoot() string {
@@ -152,23 +163,59 @@ func (w *Worker) maybeNotes(ctx context.Context, now time.Time) {
 	if w == nil || w.Store == nil {
 		return
 	}
-	day := archive.NotesDay(now)
-	if day == "" || w.settingOn(notesDoneKey+day) {
+	days := w.openNoteDays(now)
+	if len(days) == 0 {
+		logx.Debugf("bbb", "maybeNotes: нет открытых дней")
 		return
 	}
 	if !w.beginJob(true) {
-		logx.Debugf("bbb", "maybeNotes: busy, skip day=%s", day)
+		logx.Debugf("bbb", "maybeNotes: busy days=%v", days)
 		return
 	}
-	logx.Infof("bbb", "maybeNotes: start day=%s", day)
+	logx.Infof("bbb", "maybeNotes: start days=%v", days)
 	w.jobWG.Add(1)
 	go func() {
 		defer w.jobWG.Done()
 		defer w.endJob()
-		if w.buildNotesDay(ctx, day) {
-			w.setSetting(notesDoneKey+day, "1")
+		for _, day := range days {
+			if ctx.Err() != nil {
+				return
+			}
+			if w.buildNotesDay(ctx, day) {
+				w.setSetting(notesDoneKey+day, "1")
+			}
 		}
 	}()
+}
+
+// openNoteDays: вчерашний день и более ранние дни с паками, у которых
+// notes_done ещё не стоит — конспект, упавший вчера, догоняется сегодня.
+func (w *Worker) openNoteDays(now time.Time) []string {
+	last := archive.NotesDay(now)
+	if last == "" {
+		return nil
+	}
+	var days []string
+	if packs, err := w.Store.ListPacks(); err != nil {
+		logx.Errorf("bbb", "openNoteDays: list packs: %v", err)
+	} else {
+		first := now.AddDate(0, 0, -noteCatchUpDays).Format("2006-01-02")
+		seen := map[string]bool{}
+		for _, p := range packs {
+			if p.Date < first || p.Date >= last || seen[p.Date] {
+				continue
+			}
+			seen[p.Date] = true
+			if !w.settingOn(notesDoneKey + p.Date) {
+				days = append(days, p.Date)
+			}
+		}
+		sort.Strings(days)
+	}
+	if !w.settingOn(notesDoneKey + last) {
+		days = append(days, last)
+	}
+	return days
 }
 
 func (w *Worker) harvestDay(ctx context.Context, day string) {
@@ -239,33 +286,48 @@ func (w *Worker) noteRetryReady(p *model.LecturePack, now time.Time) bool {
 	if p == nil {
 		return false
 	}
-	if w.noteAttemptsFor(p.ID) >= maxNoteAttempts {
+	n := w.noteAttemptsFor(p.ID)
+	if n >= maxNoteAttempts {
 		return false
 	}
-	ready := !p.UpdatedAt.After(now.Add(-noteRetryEvery))
-	logx.Debugf("bbb", "noteRetryReady: pack=%d ready=%v updated=%s", p.ID, ready, p.UpdatedAt.Format(time.RFC3339))
+	ready := !p.UpdatedAt.After(now.Add(-noteRetryGap(n)))
+	logx.Debugf("bbb", "noteRetryReady: pack=%d attempts=%d ready=%v", p.ID, n, ready)
 	return ready
 }
 
+func noteRetryGap(attempts int) time.Duration {
+	if attempts < noteQuickRetries {
+		return noteRetryEvery
+	}
+	return noteRetrySlow
+}
+
+// Счётчик попыток лежит в settings: рестарт воркера (деплой, падение) не
+// должен ни обнулять лимит, ни стирать память о том, что пак ещё не собран.
 func (w *Worker) noteAttemptsFor(id int64) int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.noteAttempts[id]
+	raw, ok, err := w.Store.GetSetting(noteAttemptsKey + strconv.FormatInt(id, 10))
+	if err != nil || !ok {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(raw))
+	return n
 }
 
 func (w *Worker) noteFail(id int64) int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.noteAttempts[id]++
-	logx.Debugf("bbb", "noteFail: pack=%d attempts=%d", id, w.noteAttempts[id])
-	return w.noteAttempts[id]
+	n := w.noteAttemptsFor(id) + 1
+	w.setSetting(noteAttemptsKey+strconv.FormatInt(id, 10), strconv.Itoa(n))
+	logx.Debugf("bbb", "noteFail: pack=%d attempts=%d", id, n)
+	return n
 }
 
 func (w *Worker) noteOK(id int64) {
 	w.mu.Lock()
-	delete(w.noteAttempts, id)
-	w.mu.Unlock()
-	logx.Debugf("bbb", "noteOK: pack=%d", id)
+	defer w.mu.Unlock()
+	if w.noteAttemptsFor(id) != 0 {
+		w.setSetting(noteAttemptsKey+strconv.FormatInt(id, 10), "0")
+	}
 }
 
 type stuckResult int
@@ -398,6 +460,18 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 	w.hogs().Hold()
 	err = notes.Build(ctx, w.Cfg, w.recRoot(), *p)
 	w.hogs().Release()
+	if errors.Is(err, notes.ErrEmptyAudio) {
+		// Не ошибка сборки: повторять нечего, выдуманный конспект не рассылаем.
+		w.noteOK(p.ID)
+		p.Status = model.PackEmpty
+		p.Err = err.Error()
+		if serr := w.Store.SavePack(p); serr != nil {
+			logx.Errorf("bbb", "buildNotes: save empty pack=%s: %v", p.Dir, serr)
+		}
+		logx.Warnf("bbb", "buildNotes: pack=%s закрыт как empty: %v", p.Dir, err)
+		notify.Admin(ctx, w.Cfg, fmt.Sprintf("лекция «%s» %s: %v — конспекта не будет", p.Discipline, p.Date, err))
+		return true
+	}
 	if err != nil {
 		n := w.noteFail(p.ID)
 		p.Status = model.PackError
@@ -407,12 +481,15 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 		}
 		attempt := ""
 		if n < maxNoteAttempts {
-			attempt = fmt.Sprintf(" (попытка %d/%d)", n, maxNoteAttempts)
+			attempt = fmt.Sprintf(" (попытка %d/%d, следующая через %s)", n, maxNoteAttempts, noteRetryGap(n))
 		} else {
 			attempt = fmt.Sprintf(" (попыток больше не будет: %d)", n)
 		}
 		logx.Warnf("bbb", "buildNotes: pack=%d failed attempt=%d: %v", p.ID, n, err)
-		notify.Admin(ctx, w.Cfg, "конспект не собрался: "+archive.Rel(p.Discipline, p.Number)+" — "+err.Error()+attempt)
+		// Редкие повторы не шлём каждый раз: админ уже знает, что пак в работе.
+		if n <= noteQuickRetries || n >= maxNoteAttempts {
+			notify.Admin(ctx, w.Cfg, "конспект не собрался: "+archive.Rel(p.Discipline, p.Number)+" — "+err.Error()+attempt)
+		}
 		return false
 	}
 	w.noteOK(p.ID)

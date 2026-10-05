@@ -26,39 +26,36 @@ func Transcribe(ctx context.Context, cfg *config.Config, audioPath string) (stri
 		logx.Errorf("notes", "Transcribe: нет конфига")
 		return "", fmt.Errorf("нет конфига")
 	}
-	var last error
-	fishKey := strings.TrimSpace(cfg.FishStudioAPIKey)
-	groqKey := strings.TrimSpace(cfg.GroqAPIKey)
-	logx.Debugf("notes", "Transcribe: fish_key=%t groq_key=%t fish_url=%s groq_url=%s", fishKey != "", groqKey != "", cfg.FishStudioAPIURL, cfg.GroqAPIURL)
-	if fishKey != "" {
-		logx.Debugf("notes", "Transcribe: try fish")
-		t, err := transcribeFish(ctx, cfg, audioPath)
+	type provider struct {
+		name string
+		key  string
+		fn   func(context.Context, *config.Config, string) (string, error)
+	}
+	// AssemblyAI первым; Fish и Groq — запасные, если у него ошибка или нет ключа.
+	providers := []provider{
+		{"assemblyai", cfg.AssemblyAPIKey, transcribeAssembly},
+		{"fish", cfg.FishStudioAPIKey, transcribeFish},
+		{"groq", cfg.GroqAPIKey, transcribeGroq},
+	}
+	var fails []string
+	for _, p := range providers {
+		if strings.TrimSpace(p.key) == "" {
+			continue
+		}
+		t, err := p.fn(ctx, cfg, audioPath)
 		if err == nil {
-			logx.Debugf("notes", "Transcribe: fish ok chars=%d", len(t))
+			logx.Debugf("notes", "Transcribe: %s ok chars=%d", p.name, len(t))
 			return t, nil
 		}
-		logx.Warnf("notes", "Transcribe: fish failed: %v", err)
-		last = fmt.Errorf("fish: %w", err)
+		logx.Warnf("notes", "Transcribe: %s failed: %v", p.name, err)
+		fails = append(fails, p.name+": "+err.Error())
 	}
-	if groqKey != "" {
-		logx.Debugf("notes", "Transcribe: try groq")
-		t, err := transcribeGroq(ctx, cfg, audioPath)
-		if err == nil {
-			logx.Debugf("notes", "Transcribe: groq ok chars=%d", len(t))
-			return t, nil
-		}
-		logx.Errorf("notes", "Transcribe: groq failed: %v", err)
-		if last != nil {
-			return "", fmt.Errorf("%v; groq: %w", last, err)
-		}
-		return "", err
+	if len(fails) > 0 {
+		logx.Errorf("notes", "Transcribe: все провайдеры STT не сработали: %s", strings.Join(fails, "; "))
+		return "", fmt.Errorf("%s", strings.Join(fails, "; "))
 	}
-	if last != nil {
-		logx.Errorf("notes", "Transcribe: все провайдеры STT не сработали: %v", last)
-		return "", last
-	}
-	logx.Errorf("notes", "Transcribe: нет ключа STT (Fish / Groq)")
-	return "", fmt.Errorf("нет ключа STT (Fish / Groq)")
+	logx.Errorf("notes", "Transcribe: нет ключа STT (AssemblyAI / Fish / Groq)")
+	return "", fmt.Errorf("нет ключа STT (AssemblyAI / Fish / Groq)")
 }
 
 func transcribeFish(ctx context.Context, cfg *config.Config, audioPath string) (string, error) {

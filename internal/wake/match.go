@@ -27,35 +27,69 @@ func Message(discipline, word string) string {
 	return msg
 }
 
+// Match returns the vocabulary words heard in the transcript, in order of
+// appearance. A word also matches its inflected forms (см. sameWord), and the
+// result always carries the vocabulary spelling, so cooldowns and recipients
+// are keyed by what the user typed.
 func Match(transcript string, vocab []string) []string {
 	logx.Debugf("wake", "Match: enter transcript=%d bytes vocab=%d", len(transcript), len(vocab))
 	tokens := tokenize(transcript)
 	if len(tokens) == 0 || len(vocab) == 0 {
-		logx.Debugf("wake", "Match: exit no tokens=%d vocab=%d", len(tokens), len(vocab))
 		return nil
 	}
-	want := make(map[string]struct{}, len(vocab))
+	want := make([][]rune, 0, len(vocab))
+	names := make([]string, 0, len(vocab))
 	for _, w := range vocab {
 		w = strings.ToLower(strings.TrimSpace(w))
 		if w == "" {
 			continue
 		}
-		want[w] = struct{}{}
+		want = append(want, []rune(w))
+		names = append(names, w)
 	}
 	var out []string
 	seen := make(map[string]struct{})
 	for _, tok := range tokens {
-		if _, ok := want[tok]; !ok {
-			continue
+		t := []rune(tok)
+		for i, w := range want {
+			if !sameWord(w, t) {
+				continue
+			}
+			if _, dup := seen[names[i]]; !dup {
+				seen[names[i]] = struct{}{}
+				out = append(out, names[i])
+			}
 		}
-		if _, dup := seen[tok]; dup {
-			continue
-		}
-		seen[tok] = struct{}{}
-		out = append(out, tok)
 	}
 	logx.Debugf("wake", "Match: exit tokens=%d want=%d matched=%v", len(tokens), len(want), out)
 	return out
+}
+
+// sameWord: слышимое слово tok — это словарное word или его форма.
+// Короткое слово (до 5 букв) — само плюс окончание до двух букв: «тест» ловит
+// «тесты», «тестов», но не «тестирование». Длинное — основа без двух последних
+// букв и длина не больше исходной на одну: «контрольная» ловит «контрольную»,
+// «контрольной», но не «контроллер»; «алексей» ловит «алексея», не «александр».
+func sameWord(word, tok []rune) bool {
+	if len(word) == 0 || len(tok) == 0 {
+		return false
+	}
+	if len(word) <= 5 {
+		return len(tok) <= len(word)+2 && hasPrefix(tok, word)
+	}
+	return len(tok) >= len(word)-2 && len(tok) <= len(word)+1 && hasPrefix(tok, word[:len(word)-2])
+}
+
+func hasPrefix(s, prefix []rune) bool {
+	if len(s) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if s[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func tokenize(s string) []string {

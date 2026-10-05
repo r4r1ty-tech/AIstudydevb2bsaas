@@ -80,7 +80,8 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	req.Header.Set("Content-Type", "application/json")
 
 	start := time.Now()
-	cli := &http.Client{Timeout: 4 * time.Minute}
+	// 25 минут пары дают ответ за ~80 с; на полную пару 4 минут впритык.
+	cli := &http.Client{Timeout: 15 * time.Minute}
 	res, err := cli.Do(req)
 	if err != nil {
 		logx.Errorf("notes", "Summarize: request failed after %s: %v", time.Since(start), err)
@@ -90,7 +91,8 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	logx.Debugf("notes", "Summarize: HTTP %d in %s", res.StatusCode, time.Since(start))
 	b, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if err != nil {
-		logx.Errorf("notes", "Summarize: read body: %v", err)
+		logx.Errorf("notes", "Summarize: read body after %s: %v", time.Since(start), err)
+		return "", fmt.Errorf("llm: ответ оборвался: %w", err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		logx.Errorf("notes", "Summarize: HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
