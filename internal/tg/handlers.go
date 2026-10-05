@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -280,10 +281,10 @@ func (b *Bot) handleAwait(u *model.User, chatID int64, text string, kind awaitKi
 	logx.Debugf("tg", "handleAwait: tg=%d chat=%d kind=%d text=%q", u.TelegramID, chatID, kind, text)
 	switch kind {
 	case awaitFIO:
-		fio := strings.TrimSpace(text)
-		if fio == "" {
-			logx.Warnf("tg", "handleAwait: empty fio tg=%d", u.TelegramID)
-			return b.sendAskFIO(chatID, u.TelegramID, askFIO)
+		fio, ok := normalizeFIO(text)
+		if !ok {
+			logx.Warnf("tg", "handleAwait: bad fio tg=%d", u.TelegramID)
+			return b.sendAskFIO(chatID, u.TelegramID, badFIO)
 		}
 		if err := b.st.SetFIO(u.TelegramID, fio); err != nil {
 			logx.Errorf("tg", "handleAwait: set fio tg=%d: %v", u.TelegramID, err)
@@ -326,10 +327,14 @@ func (b *Bot) handleAwait(u *model.User, chatID int64, text string, kind awaitKi
 func (b *Bot) continueOnboarding(u *model.User, chatID int64, text string) error {
 	logx.Debugf("tg", "continueOnboarding: tg=%d chat=%d stage=%d text=%q", u.TelegramID, chatID, u.OnboardStage, text)
 	if strings.TrimSpace(u.FIO) == "" {
-		fio := strings.TrimSpace(text)
-		if fio == "" {
+		if strings.TrimSpace(text) == "" {
 			logx.Debugf("tg", "continueOnboarding: ask fio tg=%d", u.TelegramID)
 			return b.sendAskFIO(chatID, u.TelegramID, askFIO)
+		}
+		fio, ok := normalizeFIO(text)
+		if !ok {
+			logx.Debugf("tg", "continueOnboarding: bad fio tg=%d", u.TelegramID)
+			return b.sendAskFIO(chatID, u.TelegramID, badFIO)
 		}
 		b.clearAwait(u.TelegramID)
 		if err := b.st.SetFIO(u.TelegramID, fio); err != nil {
@@ -353,6 +358,9 @@ func (b *Bot) continueOnboarding(u *model.User, chatID int64, text string) error
 		return b.finishOnboarding(u, chatID, text)
 	}
 
+	if strings.TrimSpace(text) == "" {
+		return b.sendInline(chatID, askSub, subgroupKeyboard())
+	}
 	n, ok := parseSubgroup(text)
 	if !ok {
 		logx.Warnf("tg", "continueOnboarding: bad subgroup tg=%d text=%q", u.TelegramID, text)
@@ -744,17 +752,30 @@ func (b *Bot) sendToday(u *model.User, chatID int64) error {
 	return b.sendMain(chatID, text)
 }
 
-func (b *Bot) formatTodayReply(u *model.User) (string, error) {
-	logx.Debugf("tg", "formatTodayReply: tg=%d subgroup=%d", u.TelegramID, u.Subgroup)
+// lessonDay — самарский день пары: по Begin (точное время), Date — запасной.
+func (b *Bot) lessonDay(l model.Lesson) string {
+	if !l.Begin.IsZero() {
+		return l.Begin.In(b.loc).Format("2006-01-02")
+	}
+	return l.Date
+}
+
+// dayRows — пары подгруппы пользователя по дням, с решением, presence и ссылкой.
+func (b *Bot) dayRows(u *model.User) (map[string][]todayRow, error) {
 	lessons, err := b.st.ListLessons()
 	if err != nil {
-		logx.Errorf("tg", "formatTodayReply: list lessons: %v", err)
-		return "", err
+		logx.Errorf("tg", "dayRows: list lessons: %v", err)
+		return nil, err
 	}
 	pres, err := b.st.ListPresence()
 	if err != nil {
-		logx.Errorf("tg", "formatTodayReply: list presence: %v", err)
-		return "", err
+		logx.Errorf("tg", "dayRows: list presence: %v", err)
+		return nil, err
+	}
+	links, err := b.st.ListBBB()
+	if err != nil {
+		logx.Errorf("tg", "dayRows: list bbb: %v", err)
+		return nil, err
 	}
 	byLesson := map[int64]model.Presence{}
 	for _, p := range pres {
@@ -762,34 +783,107 @@ func (b *Bot) formatTodayReply(u *model.User) (string, error) {
 			byLesson[p.LessonID] = p
 		}
 	}
-	now := b.now()
-	day := now.Format("2006-01-02")
-	rows := make([]todayRow, 0)
+	out := map[string][]todayRow{}
 	for _, l := range lessons {
-		if !l.Online || !l.MatchesSubgroup(u.Subgroup) {
+		if !l.MatchesSubgroup(u.Subgroup) {
 			continue
 		}
-		if l.Date != day && (l.Begin.IsZero() || l.Begin.In(b.loc).Format("2006-01-02") != day) {
-			continue
+		row := todayRow{Lesson: l}
+		if l.Online {
+			url, _ := model.ResolveBBB(l, links)
+			row.HasLink = url != ""
+			if p, ok := byLesson[l.ID]; ok {
+				row.Presence = p.State
+				row.Detail = p.Message
+			}
+			if in, err := b.st.GetIntent(u.TelegramID, l.ID); err == nil && in != nil {
+				row.Decision = in.Decision
+			}
 		}
-		if !l.Finish.IsZero() && !now.Before(l.Finish) {
-			continue
-		}
-		row := todayRow{
-			Lesson:  l,
-			HasLink: b.lookupBBB(l.ID) != "",
-		}
-		if p, ok := byLesson[l.ID]; ok {
-			row.Presence = p.State
-			row.Detail = p.Message
-		}
-		if in, err := b.st.GetIntent(u.TelegramID, l.ID); err == nil && in != nil {
-			row.Decision = in.Decision
-		}
-		rows = append(rows, row)
+		day := b.lessonDay(l)
+		out[day] = append(out[day], row)
 	}
-	logx.Debugf("tg", "formatTodayReply: lessons=%d rows=%d", len(lessons), len(rows))
-	return formatToday(now, b.loc, u.FIO, rows), nil
+	for d := range out {
+		rows := out[d]
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Lesson.Begin.Before(rows[j].Lesson.Begin) })
+	}
+	return out, nil
+}
+
+func (b *Bot) formatTodayReply(u *model.User) (string, error) {
+	logx.Debugf("tg", "formatTodayReply: tg=%d subgroup=%d", u.TelegramID, u.Subgroup)
+	days, err := b.dayRows(u)
+	if err != nil {
+		return "", err
+	}
+	now := b.now().In(b.loc)
+	today := now.Format("2006-01-02")
+	rows := days[today]
+	text := formatToday(now, b.loc, u.FIO, rows)
+	upcoming := false
+	for _, r := range rows {
+		if r.Lesson.Finish.IsZero() || now.Before(r.Lesson.Finish) {
+			upcoming = true
+			break
+		}
+	}
+	if !upcoming {
+		// На сегодня всё — показываем ближайший день с парами.
+		for i := 1; i <= 8; i++ {
+			d := now.AddDate(0, 0, i)
+			if next := days[d.Format("2006-01-02")]; len(next) > 0 {
+				title := "Ближайшие: " + dayTitle(d)
+				if i == 1 {
+					title = "Завтра, " + dayTitle(d)
+				}
+				text += "\n\n" + formatDayBlock(title, next, b.loc)
+				break
+			}
+		}
+	}
+	logx.Debugf("tg", "formatTodayReply: rows=%d", len(rows))
+	return text, nil
+}
+
+// formatWeekReply — семь дней начиная с сегодня.
+func (b *Bot) formatWeekReply(u *model.User) (string, error) {
+	days, err := b.dayRows(u)
+	if err != nil {
+		return "", err
+	}
+	now := b.now().In(b.loc)
+	var parts []string
+	for i := 0; i < 7; i++ {
+		d := now.AddDate(0, 0, i)
+		rows := days[d.Format("2006-01-02")]
+		if len(rows) == 0 {
+			continue
+		}
+		parts = append(parts, formatDayBlock(dayTitle(d), rows, b.loc))
+	}
+	if len(parts) == 0 {
+		return "На ближайшую неделю пар нет.", nil
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
+func (b *Bot) onWeek(_ *gotgbot.Bot, ctx *ext.Context) error {
+	from := b.allowed(ctx)
+	if from == nil || ctx.EffectiveMessage == nil {
+		return nil
+	}
+	u, err := b.st.GetUser(from.Id)
+	if err != nil {
+		return err
+	}
+	if u == nil {
+		return b.sendAskFIO(ctx.EffectiveMessage.Chat.Id, from.Id, askFIO)
+	}
+	text, err := b.formatWeekReply(u)
+	if err != nil {
+		return err
+	}
+	return b.sendMain(ctx.EffectiveMessage.Chat.Id, text)
 }
 
 func (b *Bot) onOnboardCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
@@ -810,11 +904,6 @@ func (b *Bot) onOnboardCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		return nil
 	}
 	logx.Debugf("tg", "onOnboardCallback: tg=%d kind=%s n=%d", from.Id, kind, n)
-	toast := "Пропуск"
-	if kind == "sub" {
-		toast = fmt.Sprintf("Подгруппа %d", n)
-	}
-	answerToast(bot, ctx, toast)
 	u, err := b.st.GetUser(from.Id)
 	if err != nil || u == nil || u.Onboarded {
 		if err != nil {
@@ -822,8 +911,19 @@ func (b *Bot) onOnboardCallback(bot *gotgbot.Bot, ctx *ext.Context) error {
 		} else {
 			logx.Debugf("tg", "onOnboardCallback: skip tg=%d u_nil=%v", from.Id, u == nil)
 		}
+		// Старая кнопка онбординга у уже настроенного: ничего не меняем и честно говорим.
+		answerToast(bot, ctx, "Уже настроено — меняй в Профиле")
 		return err
 	}
+	if kind == "skipw" && (u.OnboardStage != model.StageWords || strings.TrimSpace(u.FIO) == "") {
+		answerToast(bot, ctx, "Кнопка устарела")
+		return nil
+	}
+	toast := "Пропуск"
+	if kind == "sub" {
+		toast = fmt.Sprintf("Подгруппа %d", n)
+	}
+	answerToast(bot, ctx, toast)
 	chatID := from.Id
 	if ctx.EffectiveChat != nil {
 		chatID = ctx.EffectiveChat.Id

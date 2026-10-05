@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
@@ -76,9 +77,8 @@ func joinCallbackData(yes bool, lessonID int64) string {
 func parseSubgroup(text string) (n int, ok bool) {
 	logx.Debugf("tg", "parseSubgroup: text=%q", strings.TrimSpace(text))
 	s := strings.TrimSpace(text)
-	if s == "" || s == "-" || s == "—" || s == "." {
-		return 1, true
-	}
+	// Пустой текст — не ответ: кнопка меню или /settings на шаге подгруппы раньше
+	// молча ставили подгруппу 1, и студент 2-й получал чужие пары и заходы.
 	for _, tok := range strings.Fields(s) {
 		tok = strings.Trim(tok, ".,")
 		if tok == "1" {
@@ -90,6 +90,20 @@ func parseSubgroup(text string) (n int, ok bool) {
 	}
 	logx.Debugf("tg", "parseSubgroup: no group in %q", s)
 	return 0, false
+}
+
+// normalizeFIO: ФИО — имя в комнате BBB, его видят преподаватель и группа.
+// Схлопываем пробелы и переводы строк; нужно 2–4 слова и не длиннее 80 символов.
+func normalizeFIO(text string) (string, bool) {
+	words := strings.Fields(text)
+	if len(words) < 2 || len(words) > 4 {
+		return "", false
+	}
+	fio := strings.Join(words, " ")
+	if utf8.RuneCountInString(fio) > 80 {
+		return "", false
+	}
+	return fio, true
 }
 
 func isCommandText(text string) bool {
