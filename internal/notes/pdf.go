@@ -86,13 +86,20 @@ var mdRenderer = goldmark.New(goldmark.WithExtensions(extension.GFM))
 // markdownHTML renders the LLM Markdown into a printable page. Raw HTML in
 // the Markdown is dropped by goldmark, so the model cannot inject markup.
 func markdownHTML(title, md string) string {
+	src, spans := protectMath(md)
 	var body bytes.Buffer
-	if err := mdRenderer.Convert([]byte(md), &body); err != nil {
+	if err := mdRenderer.Convert([]byte(src), &body); err != nil {
+		spans = nil
 		logx.Warnf("notes", "markdownHTML: render: %v — печатаю как текст", err)
 		body.Reset()
 		body.WriteString("<pre>" + html.EscapeString(md) + "</pre>")
 	}
 	t := html.EscapeString(title)
+	// KaTeX весит ~600 КБ: в конспект без формул его не кладём.
+	mathHead, mathFoot := "", ""
+	if len(spans) > 0 {
+		mathHead, mathFoot = katexAssets()
+	}
 	out := `<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <title>` + t + `</title>
 <style>
@@ -104,9 +111,12 @@ th,td{border:1px solid #999;padding:4px 8px;text-align:left;vertical-align:top}
 code,pre{font-family:DejaVu Sans Mono,Liberation Mono,monospace;font-size:12.5px}
 pre{background:#f3f3f3;padding:8px;white-space:pre-wrap}
 blockquote{border-left:3px solid #bbb;margin-left:0;padding-left:12px;color:#333}
-</style></head><body>
+.math[data-display]{display:block;margin:10px 0;text-align:center;break-inside:avoid}
+.katex{font-size:1.1em}
+</style>
+` + mathHead + `</head><body>
 <h1>` + t + `</h1>
-<article>` + body.String() + `</article>
-</body></html>`
+<article>` + restoreMath(body.String(), spans) + `</article>
+` + mathFoot + `</body></html>`
 	return out
 }
