@@ -156,7 +156,7 @@ func describeOne(ctx context.Context, prov visionProvider, path string, n int) (
 		Messages: []visionMsg{{
 			Role: "user",
 			Content: []any{
-				map[string]any{"type": "text", "text": fmt.Sprintf("Это слайд %d университетской лекции. Выпиши весь текст, формулы и смысл схемы. По-русски, без вступлений.", n)},
+				map[string]any{"type": "text", "text": fmt.Sprintf("Это слайд %d университетской лекции. Выпиши весь текст, формулы и смысл схемы. Формулы — только в LaTeX: в строке $...$, отдельной строкой $$...$$. По-русски, без вступлений.", n)},
 				map[string]any{"type": "image_url", "image_url": map[string]string{"url": dataURL}},
 			},
 		}},
