@@ -110,7 +110,7 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 
 ### Запись и вейкворды
 
-Для лекционных пар выбирается один рекордер (`pickRecorder` — минимальный Telegram id). `attachRecorder` создаёт пак (`EnsurePack`), запускает `capture.Start` (PulseAudio null-sink + ffmpeg: ogg на диск и PCM 16 кГц в пайп) и `startSpotter`. Споттер (`internal/bbb/spot.go`) гоняет PCM через `internal/wake` и на совпадении шлёт вейкворд пользователям. Один поток на комнату.
+Для лекционных пар выбирается один рекордер (`chooseRecorder`: держит живого, иначе минимальный Telegram id). `attachRecorder` создаёт пак (`EnsurePack`), запускает `capture.Start` (PulseAudio null-sink + ffmpeg: ogg на диск и PCM 16 кГц в пайп) и `startSpotter`. Споттер (`internal/bbb/spot.go`) гоняет PCM через `internal/wake` и на совпадении шлёт вейкворд пользователям. Один поток на комнату.
 
 ### После пары
 
