@@ -150,7 +150,7 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 | GET | `/api/week` | Все дни расписания | `days[]` (`date`, `mode`, `lessons[]`), `today`, `me` |
 | POST | `/api/intent` | Решение по одной онлайн-паре | `{lesson_id, decision: yes\|no\|auto}` -> `{lesson, mode}`; `auto` возвращает «молчание = заходить» |
 | GET | `/api/deadlines` | Дедлайны Moodle | `moodle` (`connected`, `available`, `login`, `synced_at`, `message`), `deadlines[]` (`group`, `due`, `status`, `kind`), `counts` |
-| POST | `/api/moodle/login` | Подключить Moodle. Пароль не хранится и не логируется | `{login, password}`; пока 501 в обычном режиме, 422 при неверных данных |
+| POST | `/api/moodle/login` | Подключить Moodle (и ЛК тем же логином). Пароль хранится зашифрованным, в логи не пишется | `{login, password}`; 501 — нет ключа шифрования, 422 — неверные данные |
 | POST | `/api/moodle/logout` | Отключить Moodle | — |
 | GET | `/api/notes` | Конспекты по предметам | `subjects[]` (`discipline`, `latest`, `notes[]` со `status`, `topic`, `pdf_url`), `repo_url`, `total` |
 | GET | `/api/me` | Мой профиль | `fio`, `subgroup`, `enabled`, `active`, `reason`, `extra_words`, `wake_words` |
