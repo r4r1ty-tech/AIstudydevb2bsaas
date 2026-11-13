@@ -46,6 +46,9 @@ type Config struct {
 	BBBDryRun        bool
 	LecturePause     bool
 	PanelPassword    string
+	PanelAllowIPs    string // PANEL_ALLOW_IPS: IP и CIDR через запятую; пусто — без фильтра
+	PanelTrustProxy  bool   // PANEL_TRUST_PROXY: брать клиента из X-Forwarded-For, если запрос пришёл с loopback
+	PanelDemo        bool   // PANEL_DEMO: панель на тестовых данных из памяти, без бота и базы
 	LLMAPIKey        string
 	LLMAPIURL        string
 	LLMModel         string
@@ -90,6 +93,9 @@ func Load() (*Config, error) {
 		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
 		LecturePause:     boolEnv("LECTURE_PAUSE", true),
 		PanelPassword:    strEnv("PANEL_PASSWORD", ""),
+		PanelAllowIPs:    strEnv("PANEL_ALLOW_IPS", ""),
+		PanelTrustProxy:  boolEnv("PANEL_TRUST_PROXY", false),
+		PanelDemo:        boolEnv("PANEL_DEMO", false),
 		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
 		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
 		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
@@ -131,6 +137,7 @@ func Load() (*Config, error) {
 		c.DBPath, c.WebAppURL, c.WebAppURLFile, c.ListenAddr, c.Timezone, c.RecordingsDir)
 	logx.Debugf("config", "Load: key_lengths llm=%d grok=%d groq=%d fish=%d assembly=%d github=%d panel=%d",
 		len(c.LLMAPIKey), len(c.GrokAPIKey), len(c.GroqAPIKey), len(c.FishStudioAPIKey), len(c.AssemblyAPIKey), len(c.GitHubToken), len(c.PanelPassword))
+	logx.Debugf("config", "Load: panel allow_ips=%q trust_proxy=%v demo=%v", c.PanelAllowIPs, c.PanelTrustProxy, c.PanelDemo)
 	logx.Infof("config", "Load: ok whitelist=%d group=%d db=%s", len(c.Whitelist), c.GroupID, c.DBPath)
 	return c, nil
 }

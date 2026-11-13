@@ -72,6 +72,8 @@ type settingsResponse struct {
 	GroupID   int64  `json:"group_id"`
 	GroupCode string `json:"group_code"`
 	Timezone  string `json:"timezone"`
+	Demo      bool   `json:"demo"`
+	BBBPrefix string `json:"bbb_prefix"`
 }
 
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +85,7 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	presByID := map[int64]string{}
-	if list, err := s.st.ListPresence(); err == nil {
+	if list, err := s.src.ListPresence(); err == nil {
 		for _, p := range list {
 			stt := p.State
 			if stt == "" {
@@ -118,9 +120,9 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 		accounts = append(accounts, a)
 	}
 
-	now := time.Now().In(s.loc)
+	now := s.now()
 	logx.Debugf("webapp", "handleNow: now=%s accounts=%d", now.Format(time.RFC3339), len(accounts))
-	cur, err := s.st.CurrentLesson(now)
+	cur, err := s.src.CurrentLesson(now)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		logx.Errorf("webapp", "handleNow: CurrentLesson: %v", err)
 		writeErr(w, http.StatusInternalServerError, "store error")
@@ -129,7 +131,7 @@ func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		logx.Debugf("webapp", "handleNow: CurrentLesson none: %v", err)
 	}
-	next, err := s.st.NextLesson(now)
+	next, err := s.src.NextLesson(now)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		logx.Errorf("webapp", "handleNow: NextLesson: %v", err)
 		writeErr(w, http.StatusInternalServerError, "store error")
@@ -163,11 +165,11 @@ func (s *Server) lessonWithBBB(l *model.Lesson) *lessonDTO {
 }
 
 func (s *Server) lookupBBB(lessonID int64) string {
-	if s.st == nil {
+	if s.src == nil {
 		logx.Debugf("webapp", "lookupBBB: nil store lesson=%d", lessonID)
 		return ""
 	}
-	u := s.st.GetLessonBBB(lessonID)
+	u := s.src.GetLessonBBB(lessonID)
 	logx.Debugf("webapp", "lookupBBB: lesson=%d found=%v", lessonID, u != "")
 	return u
 }
@@ -213,7 +215,7 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 
 	if patch.Enabled != nil {
 		logx.Debugf("webapp", "handlePeoplePatch: id=%d set enabled=%v", id, *patch.Enabled)
-		if err := s.st.SetEnabled(id, *patch.Enabled); err != nil {
+		if err := s.src.SetEnabled(id, *patch.Enabled); err != nil {
 			logx.Errorf("webapp", "handlePeoplePatch: SetEnabled id=%d: %v", id, err)
 			writeStoreErr(w, err)
 			return
@@ -221,7 +223,7 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.FIO != nil {
 		logx.Debugf("webapp", "handlePeoplePatch: id=%d set fio=%q", id, *patch.FIO)
-		if err := s.st.SetFIO(id, *patch.FIO); err != nil {
+		if err := s.src.SetFIO(id, *patch.FIO); err != nil {
 			logx.Errorf("webapp", "handlePeoplePatch: SetFIO id=%d: %v", id, err)
 			writeStoreErr(w, err)
 			return
@@ -229,7 +231,7 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.Subgroup != nil {
 		logx.Debugf("webapp", "handlePeoplePatch: id=%d set subgroup=%d", id, *patch.Subgroup)
-		if err := s.st.SetSubgroup(id, *patch.Subgroup); err != nil {
+		if err := s.src.SetSubgroup(id, *patch.Subgroup); err != nil {
 			logx.Errorf("webapp", "handlePeoplePatch: SetSubgroup id=%d: %v", id, err)
 			writeStoreErr(w, err)
 			return
@@ -237,7 +239,7 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.ExtraWords != nil {
 		logx.Debugf("webapp", "handlePeoplePatch: id=%d set extra_words=%q", id, *patch.ExtraWords)
-		if err := s.st.SetExtraWords(id, model.ParseWakeWords(*patch.ExtraWords)); err != nil {
+		if err := s.src.SetExtraWords(id, model.ParseWakeWords(*patch.ExtraWords)); err != nil {
 			logx.Errorf("webapp", "handlePeoplePatch: SetExtraWords id=%d: %v", id, err)
 			writeStoreErr(w, err)
 			return
@@ -247,19 +249,19 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 		logx.Debugf("webapp", "handlePeoplePatch: id=%d disable_today=%v", id, *patch.DisableToday)
 		var until *time.Time
 		if *patch.DisableToday {
-			n := time.Now().In(s.loc)
+			n := s.now()
 			end := time.Date(n.Year(), n.Month(), n.Day(), 23, 59, 59, 0, s.loc)
 			until = &end
 			logx.Debugf("webapp", "handlePeoplePatch: id=%d disabled_until=%s", id, end.Format(time.RFC3339))
 		}
-		if err := s.st.SetDisabledUntil(id, until); err != nil {
+		if err := s.src.SetDisabledUntil(id, until); err != nil {
 			logx.Errorf("webapp", "handlePeoplePatch: SetDisabledUntil id=%d: %v", id, err)
 			writeStoreErr(w, err)
 			return
 		}
 	}
 
-	u, err := s.st.GetUser(id)
+	u, err := s.src.GetUser(id)
 	if err != nil {
 		logx.Errorf("webapp", "handlePeoplePatch: GetUser id=%d: %v", id, err)
 		writeStoreErr(w, err)
@@ -276,13 +278,13 @@ func (s *Server) handlePeoplePatch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLessons(w http.ResponseWriter, r *http.Request) {
 	logx.Debugf("webapp", "handleLessons: enter %s %s", r.Method, r.URL.Path)
-	lessons, err := s.st.ListLessons()
+	lessons, err := s.src.ListLessons()
 	if err != nil {
 		logx.Errorf("webapp", "handleLessons: ListLessons: %v", err)
 		writeErr(w, http.StatusInternalServerError, "store error")
 		return
 	}
-	bbb, err := s.st.ListBBB()
+	bbb, err := s.src.ListBBB()
 	if err != nil {
 		logx.Errorf("webapp", "handleLessons: ListBBB: %v", err)
 		writeErr(w, http.StatusInternalServerError, "store error")
@@ -323,7 +325,7 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 	}
 	key := strings.TrimSpace(req.Key)
 	if req.LessonID > 0 {
-		l, err := s.st.LessonByID(req.LessonID)
+		l, err := s.src.LessonByID(req.LessonID)
 		if err != nil {
 			logx.Errorf("webapp", "handleBBB: LessonByID %d: %v", req.LessonID, err)
 			writeStoreErr(w, err)
@@ -334,7 +336,7 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Как в боте: пара + комната предмета у препода этого типа.
-		if err := s.st.SetLessonBBB(l.ID, req.URL); err != nil {
+		if err := s.src.SetLessonBBB(l.ID, req.URL); err != nil {
 			logx.Errorf("webapp", "handleBBB: SetLessonBBB %d: %v", l.ID, err)
 			writeStoreErr(w, err)
 			return
@@ -352,12 +354,12 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 		key = model.BBBKey(s.cfg.GroupID, req.Discipline, req.Teacher)
 	}
 	logx.Debugf("webapp", "handleBBB: key=%q lesson_id=%d", key, req.LessonID)
-	if err := s.st.SetBBB(key, req.URL); err != nil {
+	if err := s.src.SetBBB(key, req.URL); err != nil {
 		logx.Errorf("webapp", "handleBBB: SetBBB key=%q: %v", key, err)
 		writeStoreErr(w, err)
 		return
 	}
-	link, err := s.st.GetBBB(key)
+	link, err := s.src.GetBBB(key)
 	if err != nil || link == nil {
 		logx.Debugf("webapp", "handleBBB: GetBBB key=%q err=%v nil=%v, returning request echo", key, err, link == nil)
 		writeJSON(w, model.BBBLink{Key: key, URL: req.URL, UpdatedAt: time.Now()})
@@ -369,7 +371,7 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleParser(w http.ResponseWriter, r *http.Request) {
 	logx.Debugf("webapp", "handleParser: enter %s %s", r.Method, r.URL.Path)
-	run, err := s.st.LastParseRun()
+	run, err := s.src.LastParseRun()
 	if err != nil || run == nil {
 		logx.Debugf("webapp", "handleParser: no run err=%v nil=%v", err, run == nil)
 		writeJSON(w, model.ParseRun{})
@@ -411,7 +413,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			limit = 1000
 		}
 	}
-	events, err := s.st.ListEvents(limit)
+	events, err := s.src.ListEvents(limit)
 	if err != nil {
 		logx.Errorf("webapp", "handleLogs: ListEvents limit=%d: %v", limit, err)
 		writeErr(w, http.StatusInternalServerError, "store error")
@@ -435,7 +437,7 @@ type testJoinPatch struct {
 
 func (s *Server) handleTestGet(w http.ResponseWriter, r *http.Request) {
 	logx.Debugf("webapp", "handleTestGet: enter %s %s", r.Method, r.URL.Path)
-	j, err := s.st.GetTestJoin()
+	j, err := s.src.GetTestJoin()
 	if err != nil {
 		logx.Errorf("webapp", "handleTestGet: GetTestJoin: %v", err)
 		writeStoreErr(w, err)
@@ -453,7 +455,7 @@ func (s *Server) handleTestPost(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	j, err := s.st.GetTestJoin()
+	j, err := s.src.GetTestJoin()
 	if err != nil {
 		logx.Errorf("webapp", "handleTestPost: GetTestJoin: %v", err)
 		writeStoreErr(w, err)
@@ -489,7 +491,7 @@ func (s *Server) handleTestPost(w http.ResponseWriter, r *http.Request) {
 		j.Message = "выхожу"
 	}
 	logx.Debugf("webapp", "handleTestPost: want=%q status=%q url=%q", j.Want, j.Status, j.URL)
-	if err := s.st.PutTestJoin(j); err != nil {
+	if err := s.src.PutTestJoin(j); err != nil {
 		logx.Errorf("webapp", "handleTestPost: PutTestJoin: %v", err)
 		writeStoreErr(w, err)
 		return
@@ -519,12 +521,14 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		GroupID:   s.cfg.GroupID,
 		GroupCode: s.cfg.GroupCode,
 		Timezone:  s.cfg.Timezone,
+		Demo:      s.demo,
+		BBBPrefix: bbbPrefix,
 	})
 }
 
 func (s *Server) personCards() ([]model.PersonCard, error) {
 	logx.Debugf("webapp", "personCards: enter whitelist=%d", len(s.cfg.Whitelist))
-	users, err := s.st.ListUsers()
+	users, err := s.src.ListUsers()
 	if err != nil {
 		logx.Errorf("webapp", "personCards: ListUsers: %v", err)
 		return nil, fmt.Errorf("personCards: ListUsers: %w", err)
@@ -570,7 +574,7 @@ func (s *Server) personCards() ([]model.PersonCard, error) {
 
 func (s *Server) ensureUser(id int64) error {
 	logx.Debugf("webapp", "ensureUser: enter id=%d", id)
-	u, err := s.st.GetUser(id)
+	u, err := s.src.GetUser(id)
 	if err != nil {
 		logx.Errorf("webapp", "ensureUser: GetUser id=%d: %v", id, err)
 		return fmt.Errorf("ensureUser: GetUser %d: %w", id, err)
@@ -579,7 +583,7 @@ func (s *Server) ensureUser(id int64) error {
 		logx.Debugf("webapp", "ensureUser: id=%d exists", id)
 		return nil
 	}
-	if err := s.st.UpsertUser(&model.User{
+	if err := s.src.UpsertUser(&model.User{
 		TelegramID: id,
 		Enabled:    true,
 		Subgroup:   1,
@@ -602,11 +606,11 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) anyRecording() bool {
-	if s == nil || s.st == nil {
+	if s == nil || s.src == nil {
 		logx.Debugf("webapp", "anyRecording: nil server/store -> false")
 		return false
 	}
-	ok, err := s.st.AnyRecording()
+	ok, err := s.src.AnyRecording()
 	if err != nil {
 		logx.Errorf("webapp", "anyRecording: %v", err)
 	}
@@ -617,27 +621,34 @@ func (s *Server) anyRecording() bool {
 func (s *Server) listPackRecordings() []model.Recording {
 	logx.Debugf("webapp", "listPackRecordings: enter")
 	out := []model.Recording{}
-	if s == nil || s.st == nil {
+	if s == nil || s.src == nil {
 		logx.Debugf("webapp", "listPackRecordings: nil server/store -> empty")
 		return out
 	}
-	packs, err := s.st.ListPacks()
+	packs, err := s.src.ListPacks()
 	if err != nil {
 		logx.Errorf("webapp", "listPackRecordings: ListPacks: %v", err)
 		return out
 	}
+	details, _ := s.src.(packDetails)
 	for _, p := range packs {
 		abs := filepath.Join(s.recordingsDir, p.Dir)
 		mod := p.UpdatedAt
-		if st, err := os.Stat(abs); err == nil {
-			mod = st.ModTime()
+		var size int64
+		if details != nil {
+			size = details.PackSize(p)
 		} else {
-			logx.Debugf("webapp", "listPackRecordings: stat %s: %v", abs, err)
+			if st, err := os.Stat(abs); err == nil {
+				mod = st.ModTime()
+			} else {
+				logx.Debugf("webapp", "listPackRecordings: stat %s: %v", abs, err)
+			}
+			size = dirSize(abs)
 		}
 		out = append(out, model.Recording{
 			Name:       p.Dir,
 			Rel:        p.Dir,
-			Size:       dirSize(abs),
+			Size:       size,
 			Mod:        mod,
 			Status:     p.Status,
 			Number:     p.Number,

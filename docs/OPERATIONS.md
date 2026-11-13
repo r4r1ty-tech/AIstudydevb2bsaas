@@ -11,6 +11,9 @@
 | `TELEGRAM_BOT_TOKEN` | — | Bot API-токен. Нужен `tg` и `panel` |
 | `ADMIN_TELEGRAM_ID` | `1074442235` | Админ: `/panel`, `/test`, пуш-уведомления |
 | `PANEL_PASSWORD` | — | Пароль API панели (заголовок `X-Panel-Password` или `Authorization: Bearer`) |
+| `PANEL_ALLOW_IPS` | — | IP и CIDR через запятую, которым открыта панель; остальным 403. Пусто — без фильтра. Без `PANEL_PASSWORD` API отвечает только при непустом списке. Кривой элемент закрывает панель для всех |
+| `PANEL_TRUST_PROXY` | `0` | `1` — IP клиента берётся из правого элемента `X-Forwarded-For`, но только если запрос пришёл с loopback (то есть от Caddy на этой же машине) |
+| `PANEL_DEMO` | `0` | `1` — демо: панель на тестовых данных в памяти, без бота, базы и пароля |
 | `WEBAPP_PUBLIC_URL` | — | HTTPS-адрес туннеля для Mini App (фолбэк, если нет файла) |
 | `WEBAPP_URL_FILE` | — | Файл с текущим URL туннеля. Если задан и непуст — важнее `WEBAPP_PUBLIC_URL` |
 | `LISTEN_ADDR` | `:8080` | Порт панели |
@@ -32,6 +35,32 @@
 | `LOG_FILE` | — | Если задан — писать лог ещё и в файл |
 
 Шаблон — [../env.example](../env.example). `deploy/remote.sh` при первом деплое дописывает недостающие `LECTURE_PAUSE`, `CHROME_USER_DATA_DIR`, `VOSK_*`, `LOG_LEVEL`, `LOG_FILE`.
+
+## Панель за Caddy
+
+Caddyfile:
+
+```caddy
+panel.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+В `.env`:
+
+```
+LISTEN_ADDR=127.0.0.1:8080
+PANEL_TRUST_PROXY=1
+PANEL_ALLOW_IPS=203.0.113.10,198.51.100.0/24   # свои IP
+```
+
+Слушаем только loopback, чтобы до панели нельзя было достучаться в обход Caddy: иначе `X-Forwarded-For` подделывается, а фильтр по IP обходится. `PANEL_PASSWORD` можно не задавать, пока список IP не пуст.
+
+Демо на тестовых данных (ни базы, ни Telegram не нужно):
+
+```bash
+PANEL_DEMO=1 LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/panel
+```
 
 ## Логи
 

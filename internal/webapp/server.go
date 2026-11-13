@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -25,15 +26,29 @@ type RefreshFunc func(ctx context.Context) (model.ParseRun, error)
 
 type Server struct {
 	cfg           *config.Config
-	st            *store.Store
+	src           Source
+	moodle        Moodle
 	refresh       RefreshFunc
 	recordingsDir string
 	loc           *time.Location
+	clock         func() time.Time
+	demo          bool
+	allow         []netip.Prefix
+	allowErr      error
 	handler       http.Handler
 }
 
+// New — панель поверх настоящей базы. st может быть nil (тесты статики и пароля).
 func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir string) *Server {
 	logx.Debugf("webapp", "New: enter cfg_nil=%v store_nil=%v refresh_nil=%v recordings_dir=%q", cfg == nil, st == nil, refresh == nil, recordingsDir)
+	var src Source
+	if st != nil {
+		src = st
+	}
+	return buildServer(cfg, src, moodleStub{}, refresh, recordingsDir, nil, false)
+}
+
+func buildServer(cfg *config.Config, src Source, moodle Moodle, refresh RefreshFunc, recordingsDir string, clock func() time.Time, demo bool) *Server {
 	if cfg == nil {
 		cfg = &config.Config{
 			ListenAddr: config.DefaultListen,
@@ -45,26 +60,46 @@ func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir
 	if recordingsDir == "" {
 		recordingsDir = cfg.RecordingsDir
 	}
-	loc, err := time.LoadLocation(cfg.Timezone)
+	if moodle == nil {
+		moodle = moodleStub{}
+	}
+	if clock == nil {
+		clock = time.Now
+	}
+	s := &Server{
+		cfg:           cfg,
+		src:           src,
+		moodle:        moodle,
+		refresh:       refresh,
+		recordingsDir: recordingsDir,
+		loc:           loadLocation(cfg.Timezone),
+		clock:         clock,
+		demo:          demo,
+	}
+	s.allow, s.allowErr = ParseAllowList(cfg.PanelAllowIPs)
+	if s.allowErr != nil {
+		logx.Errorf("webapp", "New: PANEL_ALLOW_IPS: %v; панель закрыта для всех", s.allowErr)
+	}
+	s.handler = s.routes()
+	logx.Debugf("webapp", "New: exit listen=%q tz=%s whitelist=%d demo=%v allow=%d", s.cfg.ListenAddr, s.loc.String(), len(s.cfg.Whitelist), demo, len(s.allow))
+	return s
+}
+
+func loadLocation(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
 	if err != nil || loc == nil {
-		logx.Warnf("webapp", "New: timezone %q load failed: %v; falling back to %q", cfg.Timezone, err, config.DefaultTimezone)
+		logx.Warnf("webapp", "New: timezone %q load failed: %v; falling back to %q", name, err, config.DefaultTimezone)
 		loc, err = time.LoadLocation(config.DefaultTimezone)
 	}
 	if err != nil || loc == nil {
 		logx.Warnf("webapp", "New: default timezone load failed: %v; using fixed Samara +04", err)
 		loc = time.FixedZone("Samara", 4*3600)
 	}
+	return loc
+}
 
-	s := &Server{
-		cfg:           cfg,
-		st:            st,
-		refresh:       refresh,
-		recordingsDir: recordingsDir,
-		loc:           loc,
-	}
-	s.handler = s.routes()
-	logx.Debugf("webapp", "New: exit listen=%q tz=%s whitelist=%d", s.cfg.ListenAddr, s.loc.String(), len(s.cfg.Whitelist))
-	return s
+func (s *Server) now() time.Time {
+	return s.clock().In(s.loc)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -124,11 +159,29 @@ func (s *Server) Listen(ctx context.Context) error {
 
 func (s *Server) routes() http.Handler {
 	logx.Debugf("webapp", "routes: registering handlers")
+	if s.allowErr != nil {
+		err := s.allowErr
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			logx.Warnf("panel", "allow: список IP не разобран (%v), отказ %s %s", err, r.Method, r.URL.Path)
+			http.Error(w, "forbidden: PANEL_ALLOW_IPS", http.StatusForbidden)
+		})
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.handleIndex)
-	mux.Handle("GET /static/", noCache(http.FileServer(http.FS(staticFS))))
+	mux.Handle("GET /static/", staticHeaders(http.FileServer(http.FS(staticFS))))
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		data, err := fs.ReadFile(staticFS, "static/img/icon-32.png")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		_, _ = w.Write(data)
+	})
 
 	api := http.NewServeMux()
+	// Пульт (вкладка «Служебное»).
 	api.HandleFunc("GET /api/now", s.handleNow)
 	api.HandleFunc("GET /api/people", s.handlePeople)
 	api.HandleFunc("POST /api/people/{id}", s.handlePeoplePatch)
@@ -140,10 +193,22 @@ func (s *Server) routes() http.Handler {
 	api.HandleFunc("GET /api/settings", s.handleSettingsGet)
 	api.HandleFunc("GET /api/test", s.handleTestGet)
 	api.HandleFunc("POST /api/test", s.handleTestPost)
+	// Личная панель владельца.
+	api.HandleFunc("GET /api/day", s.handleDay)
+	api.HandleFunc("POST /api/day", s.handleDayMode)
+	api.HandleFunc("GET /api/week", s.handleWeek)
+	api.HandleFunc("POST /api/intent", s.handleIntent)
+	api.HandleFunc("GET /api/deadlines", s.handleDeadlines)
+	api.HandleFunc("POST /api/moodle/login", s.handleMoodleLogin)
+	api.HandleFunc("POST /api/moodle/logout", s.handleMoodleLogout)
+	api.HandleFunc("GET /api/notes", s.handleNotes)
+	api.HandleFunc("GET /api/me", s.handleMeGet)
+	api.HandleFunc("POST /api/me", s.handleMePost)
+	api.HandleFunc("GET /api/rooms", s.handleRooms)
 
-	mux.Handle("/api/", s.requirePassword(api))
+	mux.Handle("/api/", s.requireAccess(api))
 	logx.Debugf("webapp", "routes: done")
-	return logRequests(mux)
+	return AllowIPs(s.allow, s.cfg.PanelTrustProxy, logRequests(mux))
 }
 
 type statusWriter struct {
@@ -186,10 +251,31 @@ func logRequests(next http.Handler) http.Handler {
 	})
 }
 
-func noCache(h http.Handler) http.Handler {
+// staticHeaders: шрифты кешируются надолго (имена файлов не меняются вместе
+// с содержимым редко, а весят они больше всего), остальное — no-store, чтобы
+// после деплоя сразу подхватывались свежие скрипты и стили.
+func staticHeaders(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logx.Debugf("webapp", "noCache: %s %s", r.Method, r.URL.Path)
-		w.Header().Set("Cache-Control", "no-store")
+		logx.Debugf("webapp", "staticHeaders: %s %s", r.Method, r.URL.Path)
+		switch {
+		case strings.HasSuffix(r.URL.Path, ".woff2"):
+			w.Header().Set("Content-Type", "font/woff2")
+			w.Header().Set("Cache-Control", "public, max-age=2592000")
+		case strings.HasSuffix(r.URL.Path, ".js"):
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+		case strings.HasSuffix(r.URL.Path, ".webmanifest"):
+			w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+		case strings.HasSuffix(r.URL.Path, ".png"), strings.HasSuffix(r.URL.Path, ".webp"):
+			w.Header().Set("Cache-Control", "no-cache")
+		case strings.HasSuffix(r.URL.Path, ".svg"):
+			w.Header().Set("Content-Type", "image/svg+xml")
+			w.Header().Set("Cache-Control", "no-store")
+		default:
+			w.Header().Set("Cache-Control", "no-store")
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		h.ServeHTTP(w, r)
 	})
 }
@@ -211,21 +297,32 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	logx.Debugf("webapp", "handleIndex: served %d bytes", len(data))
 }
 
-func (s *Server) requirePassword(next http.Handler) http.Handler {
+// apiAllowed — правило входа в API: пароль задан и совпал; или пароля нет,
+// но панель закрыта непустым PANEL_ALLOW_IPS (чужие IP уже отсёк AllowIPs);
+// или демо. Ни пароля, ни списка IP — отказ.
+func (s *Server) apiAllowed(r *http.Request) bool {
+	if s.demo {
+		return true
+	}
+	want := ""
+	if s.cfg != nil {
+		want = s.cfg.PanelPassword
+	}
+	if want != "" {
+		return passwordOK(passwordFromRequest(r), want)
+	}
+	return len(s.allow) > 0
+}
+
+func (s *Server) requireAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		want := ""
-		if s.cfg != nil {
-			want = s.cfg.PanelPassword
-		}
-		got := passwordFromRequest(r)
-		logx.Debugf("webapp", "requirePassword: %s %s password_present=%v configured=%v", r.Method, r.URL.Path, got != "", want != "")
-		if !passwordOK(got, want) {
-			logx.Warnf("webapp", "requirePassword: auth failed %s %s", r.Method, r.URL.Path)
+		logx.Debugf("webapp", "requireAccess: %s %s demo=%v allow=%d", r.Method, r.URL.Path, s.demo, len(s.allow))
+		if !s.apiAllowed(r) {
+			logx.Warnf("webapp", "requireAccess: auth failed %s %s", r.Method, r.URL.Path)
 			logx.Warnf("panel", "bad password %s", r.URL.Path)
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		logx.Debugf("webapp", "requirePassword: authorized %s %s", r.Method, r.URL.Path)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -261,10 +358,14 @@ func decodeJSON(r io.Reader, dst any) error {
 	return err
 }
 
+// bbbPrefix — единственный разрешённый вид ссылки на комнату. Отдаётся в
+// /api/settings, чтобы адрес вуза не был зашит в саму страницу.
+const bbbPrefix = "https://bbb.ssau.ru/b/"
+
 func bbbHostOK(u string) bool {
 	logx.Debugf("webapp", "bbbHostOK: url=%q", u)
 	u = strings.TrimSpace(u)
-	ok := strings.HasPrefix(u, "https://bbb.ssau.ru/b/")
+	ok := strings.HasPrefix(u, bbbPrefix)
 	logx.Debugf("webapp", "bbbHostOK: url=%q -> %v", u, ok)
 	return ok
 }
