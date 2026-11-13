@@ -28,7 +28,8 @@ const (
 	dueSoon    = "soon" // сегодня и завтра
 	dueWeek    = "week" // до конца этой недели
 	dueLater   = "later"
-	dueDone    = "done" // сдано
+	dueDone    = "done"  // сдано
+	dueNone    = "nodue" // срока нет
 )
 
 type deadlineView struct {
@@ -46,6 +47,9 @@ type deadlinesResponse struct {
 func dueGroup(d Deadline, now time.Time) string {
 	if d.Status == DeadlineSubmitted {
 		return dueDone
+	}
+	if d.Due.IsZero() {
+		return dueNone
 	}
 	if d.Due.Before(now) {
 		return dueOverdue
@@ -70,7 +74,7 @@ func (s *Server) handleDeadlines(w http.ResponseWriter, r *http.Request) {
 		Moodle:    s.moodle.Status(),
 		Now:       now,
 		Deadlines: []deadlineView{},
-		Counts:    map[string]int{dueOverdue: 0, dueSoon: 0, dueWeek: 0, dueLater: 0, dueDone: 0},
+		Counts:    map[string]int{dueOverdue: 0, dueSoon: 0, dueWeek: 0, dueLater: 0, dueDone: 0, dueNone: 0},
 	}
 	if resp.Moodle.Connected {
 		list, err := s.moodle.Deadlines(r.Context(), now)
@@ -79,10 +83,17 @@ func (s *Server) handleDeadlines(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadGateway, "Moodle не ответил, попробуйте позже.")
 			return
 		}
-		sort.SliceStable(list, func(i, j int) bool { return list[i].Due.Before(list[j].Due) })
+		sort.SliceStable(list, func(i, j int) bool {
+			if list[i].Due.IsZero() != list[j].Due.IsZero() {
+				return !list[i].Due.IsZero()
+			}
+			return list[i].Due.Before(list[j].Due)
+		})
 		for _, d := range list {
 			v := deadlineView{Deadline: d, Group: dueGroup(d, now)}
-			v.Due = v.Due.In(s.loc)
+			if !v.Due.IsZero() {
+				v.Due = v.Due.In(s.loc)
+			}
 			resp.Counts[v.Group]++
 			resp.Deadlines = append(resp.Deadlines, v)
 		}
@@ -361,6 +372,9 @@ type mePatch struct {
 	Subgroup   *int    `json:"subgroup"`
 	ExtraWords *string `json:"extra_words"`
 	Enabled    *bool   `json:"enabled"`
+	// Onboard — первый заход в панель: имя и подгруппа заданы, настройка закончена
+	// (как онбординг в Telegram), бот начинает заходить.
+	Onboard bool `json:"onboard"`
 }
 
 func (s *Server) currentMe() (meView, error) {
@@ -427,6 +441,23 @@ func (s *Server) handleMePost(w http.ResponseWriter, r *http.Request) {
 	if p.Enabled != nil {
 		on := *p.Enabled
 		steps = append(steps, func() error { return s.src.SetEnabled(id, on) })
+	}
+	if p.Onboard {
+		if p.FIO == nil || p.Subgroup == nil {
+			writeErr(w, http.StatusBadRequest, "Для первого входа нужны имя для BBB и подгруппа.")
+			return
+		}
+		steps = append(steps, func() error {
+			u, err := s.src.GetUser(id)
+			if err != nil || u == nil {
+				return err
+			}
+			if u.Onboarded && u.OnboardStage == model.StageDone {
+				return nil
+			}
+			u.Onboarded, u.OnboardStage = true, model.StageDone
+			return s.src.UpsertUser(u)
+		})
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {

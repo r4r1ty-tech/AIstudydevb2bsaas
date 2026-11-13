@@ -164,6 +164,34 @@ func (s *Store) migrate() error {
 			created_at TEXT,
 			updated_at TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS accounts (
+			telegram_id INTEGER,
+			kind TEXT,
+			login TEXT,
+			secret TEXT,
+			session TEXT,
+			status TEXT,
+			message TEXT,
+			synced_at TEXT NULL,
+			updated_at TEXT,
+			PRIMARY KEY (telegram_id, kind)
+		)`,
+		`CREATE TABLE IF NOT EXISTS moodle_items (
+			telegram_id INTEGER,
+			cmid INTEGER,
+			course_id INTEGER,
+			course TEXT,
+			section TEXT,
+			kind TEXT,
+			title TEXT,
+			url TEXT,
+			opens TEXT NULL,
+			due TEXT NULL,
+			status TEXT,
+			todo TEXT,
+			updated_at TEXT,
+			PRIMARY KEY (telegram_id, cmid)
+		)`,
 	}
 	logx.Debugf("store", "migrate: statements=%d", len(stmts))
 	tx, err := s.db.Begin()
@@ -191,11 +219,27 @@ func (s *Store) migrate() error {
 		logx.Errorf("store", "migrate: ensure user columns: %v", err)
 		return err
 	}
+	if err := s.ensureLessonColumns(); err != nil {
+		return err
+	}
 	if err := s.ensurePackColumns(); err != nil {
 		logx.Errorf("store", "migrate: ensure pack columns: %v", err)
 		return err
 	}
 	logx.Debugf("store", "migrate: done")
+	return nil
+}
+
+func (s *Store) ensureLessonColumns() error {
+	for i, q := range []string{
+		`ALTER TABLE lessons ADD COLUMN bbb_url TEXT`,
+		`ALTER TABLE lessons ADD COLUMN owner INTEGER DEFAULT 0`,
+	} {
+		if _, err := s.db.Exec(q); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			logx.Errorf("store", "ensureLessonColumns: alter %d: %v", i, err)
+			return fmt.Errorf("store: migrate lessons: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -384,7 +428,8 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 	logx.Debugf("store", "scanLesson: enter")
 	var l model.Lesson
 	var date, start, end, begin, finish, discipline, teacher, place, typ sql.NullString
-	var subgroup, online sql.NullInt64
+	var subgroup, online, owner sql.NullInt64
+	var bbbURL sql.NullString
 	if err := sc.Scan(
 		&l.ID,
 		&date,
@@ -398,6 +443,8 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 		&subgroup,
 		&typ,
 		&online,
+		&bbbURL,
+		&owner,
 	); err != nil {
 		logScanErr("scanLesson", err)
 		return nil, err
@@ -413,6 +460,10 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 		l.Subgroup = int(subgroup.Int64)
 	}
 	l.Online = online.Valid && online.Int64 != 0
+	l.BBBURL = nullStr(bbbURL)
+	if owner.Valid {
+		l.Owner = owner.Int64
+	}
 	if begin.Valid && begin.String != "" {
 		t, err := parseTime(begin.String)
 		if err != nil {

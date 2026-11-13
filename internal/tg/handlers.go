@@ -181,6 +181,12 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 	}
 	text := strings.TrimSpace(ctx.EffectiveMessage.GetText())
 	chatID := ctx.EffectiveMessage.Chat.Id
+
+	// Пароль от ЛК/Moodle — раньше всех разборов: он может начинаться с «/»
+	// или совпасть с кнопкой меню, и его надо сразу удалить из чата.
+	if b.peekAwait(from.Id) == awaitUniPassword {
+		return b.handleUniPassword(from.Id, ctx.EffectiveMessage)
+	}
 	logx.Debugf("tg", "onText: tg=%d chat=%d text=%q", from.Id, chatID, text)
 
 	if url := extractBBBURL(text); url != "" {
@@ -237,6 +243,8 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 		return b.sendToday(u, chatID)
 	case btnNotes:
 		return b.sendNotes(chatID)
+	case btnTasks:
+		return b.sendTasks(chatID, from.Id)
 	case btnLinks:
 		return b.sendRooms(u, chatID)
 	case btnSettings, btnSettingsOld:
@@ -307,6 +315,8 @@ func (b *Bot) handleAwait(u *model.User, chatID int64, text string, kind awaitKi
 		u.ExtraWords = words
 		logx.Infof("tg", "words saved tg=%d words=%v", u.TelegramID, words)
 		return b.sendSettings(u, chatID)
+	case awaitUniLogin:
+		return b.handleUniLogin(u, chatID, text)
 	case awaitTestName:
 		return b.setTestGuestName(chatID, text)
 	case awaitTestURL:
@@ -567,7 +577,7 @@ func (b *Bot) formatLinkReply(u *model.User) (string, error) {
 	upcoming := make([]string, 0)
 	n := 0
 	for _, l := range lessons {
-		if !l.Online || !l.MatchesSubgroup(u.Subgroup) || !l.Begin.After(now) {
+		if !l.Online || !l.For(*u) || !l.Begin.After(now) {
 			continue
 		}
 		n++
@@ -673,7 +683,7 @@ func (b *Bot) pickBBBTarget(u *model.User, now time.Time) *model.Lesson {
 			intents[lid] = now
 		}
 	}
-	l := pickLessonForBBB(now, u.Subgroup, lessons, hasLink, intents)
+	l := pickLessonForBBB(now, *u, lessons, hasLink, intents)
 	if l != nil {
 		logx.Debugf("tg", "pickBBBTarget: chosen lesson=%d", l.ID)
 	} else {
@@ -785,7 +795,7 @@ func (b *Bot) dayRows(u *model.User) (map[string][]todayRow, error) {
 	}
 	out := map[string][]todayRow{}
 	for _, l := range lessons {
-		if !l.MatchesSubgroup(u.Subgroup) {
+		if !l.For(*u) {
 			continue
 		}
 		row := todayRow{Lesson: l}

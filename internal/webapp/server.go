@@ -17,6 +17,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/vault"
 )
 
 //go:embed static
@@ -45,7 +46,15 @@ func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir
 	if st != nil {
 		src = st
 	}
-	return buildServer(cfg, src, moodleStub{}, refresh, recordingsDir, nil, false)
+	var md Moodle = moodleStub{}
+	if st != nil && cfg != nil && (cfg.SecretKey != "" || cfg.SecretKeyFile != "") {
+		if v, err := vault.Load(cfg.SecretKey, cfg.SecretKeyFile); err != nil {
+			logx.Errorf("webapp", "New: vault: %v — Moodle в панели выключен", err)
+		} else {
+			md = &storeMoodle{st: st, v: v, owner: cfg.AdminID, lkBase: cfg.LKBaseURL, moodleBase: cfg.MoodleBaseURL}
+		}
+	}
+	return buildServer(cfg, src, md, refresh, recordingsDir, nil, false)
 }
 
 func buildServer(cfg *config.Config, src Source, moodle Moodle, refresh RefreshFunc, recordingsDir string, clock func() time.Time, demo bool) *Server {

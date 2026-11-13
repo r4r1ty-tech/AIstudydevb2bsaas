@@ -102,14 +102,14 @@ func TestPickLessonForBBB(t *testing.T) {
 	c := model.Lesson{ID: 3, Discipline: "C", Teacher: "T3", Begin: now.Add(-time.Hour), Online: true, Subgroup: 0}
 
 	has := func(id int64) bool { return id == 1 }
-	got := pickLessonForBBB(now, 1, []model.Lesson{a, b, c}, has, nil)
+	got := pickLessonForBBB(now, model.User{Subgroup: 1}, []model.Lesson{a, b, c}, has, nil)
 	if got == nil || got.ID != 2 {
 		t.Fatalf("want nearest without BBB id=2, got %#v", got)
 	}
 
 	allLinked := func(int64) bool { return true }
 	intents := map[int64]time.Time{1: now.Add(-time.Minute), 3: now}
-	got = pickLessonForBBB(now, 1, []model.Lesson{a, b, c}, allLinked, intents)
+	got = pickLessonForBBB(now, model.User{Subgroup: 1}, []model.Lesson{a, b, c}, allLinked, intents)
 	if got == nil || got.ID != 3 {
 		t.Fatalf("want last intent id=3, got %#v", got)
 	}
@@ -122,7 +122,7 @@ func TestPickLessonForBBBPreferCurrent(t *testing.T) {
 	next := model.Lesson{ID: 11, Discipline: "Дальше", Begin: now.Add(20 * time.Minute), Finish: now.Add(2 * time.Hour), Online: true}
 
 	none := func(int64) bool { return false }
-	got := pickLessonForBBB(now, 1, []model.Lesson{next, live}, none, nil)
+	got := pickLessonForBBB(now, model.User{Subgroup: 1}, []model.Lesson{next, live}, none, nil)
 	if got == nil || got.ID != 10 {
 		t.Fatalf("want current lesson id=10, got %#v", got)
 	}

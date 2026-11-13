@@ -41,12 +41,13 @@ const (
 	btnLinks       = "Ссылки"
 	btnWords       = "Слова"
 	btnHelp        = "Помощь"
+	btnTasks       = "Сдать"
 )
 
 func isMenuLabel(text string) bool {
 	logx.Debugf("tg", "isMenuLabel: %q", strings.TrimSpace(text))
 	switch strings.TrimSpace(text) {
-	case btnToday, btnTodayOld, btnNotes, btnSettings, btnSettingsOld, btnLinks, btnWords, btnHelp:
+	case btnToday, btnTodayOld, btnNotes, btnSettings, btnSettingsOld, btnLinks, btnWords, btnHelp, btnTasks:
 		return true
 	default:
 		return false
@@ -500,3 +501,15 @@ func notesStatus(st string) string {
 		return st
 	}
 }
+
+// Аккаунт универа.
+const (
+	uniNoVault        = "Подключение ЛК и Moodle сейчас недоступно: на сервере нет ключа шифрования. Напиши админу."
+	uniAskLogin       = "<b>Подключаем ЛК и Moodle</b>\nПришли логин от личного кабинета (lk.ssau.ru) — обычно тот же подходит и к Moodle.\n\nПароль сохраню зашифрованным: он нужен, чтобы бот сам заходил за расписанием и заданиями. Отключить и стереть — Профиль → Аккаунт универа."
+	uniAskMoodleLogin = "<b>Отдельный вход в Moodle</b>\nПришли логин от do.ssau.ru."
+	uniAskPassword    = "Теперь пароль. Сообщение с ним удалю сразу."
+	uniBadLoginInput  = "Не понял логин. Пришли его одним словом или /cancel."
+	uniChecking       = "Проверяю вход…"
+	uniNeedMoodle     = "Moodle не подключён — нечего показать. Подключи аккаунт универа, и я буду собирать задания, тесты и сроки."
+	uniMenuHint       = "Из ЛК беру расписание (подгруппы, ИОТ, онлайн-недели, ссылки BBB). Из Moodle — все задания и тесты курсов со сроками; напомню за сутки и за 3 часа."
+)

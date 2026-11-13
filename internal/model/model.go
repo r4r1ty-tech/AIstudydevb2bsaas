@@ -148,6 +148,13 @@ type Lesson struct {
 	Subgroup   int       `json:"subgroup"` // 0 = вся группа
 	Type       string    `json:"type"`
 	Online     bool      `json:"online"`
+	BBBURL     string    `json:"bbb_url,omitempty"` // комната из ЛК (conference.url)
+	Owner      int64     `json:"owner,omitempty"`   // 0 — пара группы; иначе telegram_id: личная пара ИОТ
+}
+
+// For — пара видна пользователю: своя подгруппа и не чужая пара ИОТ.
+func (l Lesson) For(u User) bool {
+	return (l.Owner == 0 || l.Owner == u.TelegramID) && l.MatchesSubgroup(u.Subgroup)
 }
 
 func (l Lesson) MatchesSubgroup(n int) bool {
@@ -174,6 +181,9 @@ func (l Lesson) Identity() string {
 		strings.TrimSpace(l.Discipline),
 		fmt.Sprintf("%d", l.Subgroup),
 	}, "|")
+	if l.Owner != 0 {
+		out += fmt.Sprintf("|o%d", l.Owner)
+	}
 	logx.Debugf("model", "Lesson.Identity: lesson=%d -> %q", l.ID, out)
 	return out
 }
@@ -184,7 +194,7 @@ func (l Lesson) DetailKey() string {
 	if l.Online {
 		on = "1"
 	}
-	return strings.Join([]string{l.Identity(), strings.TrimSpace(l.Teacher), strings.TrimSpace(l.Place), strings.TrimSpace(l.Type), on}, "|")
+	return strings.Join([]string{l.Identity(), strings.TrimSpace(l.Teacher), strings.TrimSpace(l.Place), strings.TrimSpace(l.Type), on, strings.TrimSpace(l.BBBURL)}, "|")
 }
 
 type BBBLink struct {
@@ -207,7 +217,7 @@ func BBBRoomKey(discipline, teacher, typ string) string {
 }
 
 // ResolveBBB выбирает ссылку пары: своя lesson:<id> (пустая — снята явно, без
-// подстановки), иначе комната room|предмет|препод|тип, иначе самый свежий ключ
+// подстановки), иначе комната из ЛК у самой пары, иначе комната room|предмет|препод|тип, иначе самый свежий ключ
 // панели <group>|предмет|препод. own=true — ссылка привязана именно к этой паре.
 func ResolveBBB(l Lesson, links []BBBLink) (url string, own bool) {
 	byKey := make(map[string]BBBLink, len(links))
@@ -216,6 +226,9 @@ func ResolveBBB(l Lesson, links []BBBLink) (url string, own bool) {
 	}
 	if b, ok := byKey[BBBLessonKey(l.ID)]; ok && l.ID > 0 {
 		return strings.TrimSpace(b.URL), true
+	}
+	if u := strings.TrimSpace(l.BBBURL); u != "" {
+		return u, true
 	}
 	if b, ok := byKey[BBBRoomKey(l.Discipline, l.Teacher, l.Type)]; ok && strings.TrimSpace(b.URL) != "" {
 		return strings.TrimSpace(b.URL), false

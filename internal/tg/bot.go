@@ -15,6 +15,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/vault"
 )
 
 type awaitKind int
@@ -25,6 +26,8 @@ const (
 	awaitWords
 	awaitTestName
 	awaitTestURL
+	awaitUniLogin
+	awaitUniPassword
 )
 
 // botOpts is nil in production; tests point it at a fake Bot API.
@@ -45,6 +48,8 @@ type Bot struct {
 	live     map[int64]liveSnap
 	testLive *testLiveSnap
 	webURL   string
+	vault    *vault.Vault
+	uniPend  map[int64]uniPending
 }
 
 func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) {
@@ -91,6 +96,14 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 		lastT15:  make(map[int64]int64),
 		awaiting: make(map[int64]awaitKind),
 		live:     make(map[int64]liveSnap),
+		uniPend:  make(map[int64]uniPending),
+	}
+	if cfg.SecretKey != "" || cfg.SecretKeyFile != "" {
+		if v, err := vault.Load(cfg.SecretKey, cfg.SecretKeyFile); err != nil {
+			logx.Errorf("tg", "New: vault: %v — подключение ЛК и Moodle недоступно", err)
+		} else {
+			b.vault = v
+		}
 	}
 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
@@ -105,12 +118,16 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	dispatcher.AddHandler(handlers.NewCommand("words", b.onWords))
 	dispatcher.AddHandler(handlers.NewCommand("link", b.onLink))
 	dispatcher.AddHandler(handlers.NewCommand("links", b.onLink))
+	dispatcher.AddHandler(handlers.NewCommand("connect", b.onConnect))
+	dispatcher.AddHandler(handlers.NewCommand("deadlines", b.onTasks))
+	dispatcher.AddHandler(handlers.NewCommand("tasks", b.onTasks))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("j:"), b.onJoinCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("x:"), b.onLeaveCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("ob:"), b.onOnboardCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("st:"), b.onSettingsCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("tx:"), b.onTestCallback))
 	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("nt:"), b.onNotesCallback))
+	dispatcher.AddHandler(handlers.NewCallback(callbackquery.Prefix("un:"), b.onUniCallback))
 	dispatcher.AddHandler(handlers.NewMessage(message.Text, b.onText))
 
 	logx.Debugf("tg", "New: handlers registered")
@@ -147,6 +164,7 @@ func (b *Bot) Start(ctx context.Context) error {
 	go b.t15Loop(t15Ctx)
 	go b.liveLoop(t15Ctx)
 	go b.webappLoop(t15Ctx)
+	go b.deadlineLoop(t15Ctx)
 
 	<-ctx.Done()
 	logx.Debugf("tg", "Start: ctx done, stopping")
@@ -279,6 +297,8 @@ func (b *Bot) publishProfile() {
 		{Command: "start", Description: "Пары и статус"},
 		{Command: "today", Description: "Пары на сегодня"},
 		{Command: "week", Description: "Пары на неделю"},
+		{Command: "tasks", Description: "Что сдать в Moodle"},
+		{Command: "connect", Description: "Подключить ЛК и Moodle"},
 		{Command: "notes", Description: "Конспекты PDF"},
 		{Command: "settings", Description: "Профиль: имя, подгруппа, пинг"},
 		{Command: "cancel", Description: "Отменить ввод"},

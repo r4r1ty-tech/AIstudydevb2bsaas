@@ -10,14 +10,30 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notify"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/rasp"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/uni"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/vault"
 )
 
 func main() {
 	logx.Infof("rasp", "starting rasp")
-	logx.Debugf("rasp", "main: binary=rasp need_token=false")
 	app.Run("rasp", false, func(ctx context.Context, cfg *config.Config, st *store.Store, loc *time.Location) error {
-		logx.Debugf("rasp", "main: refresh enter group_id=%d", cfg.GroupID)
 		r := &rasp.Refresher{Store: st, GroupID: cfg.GroupID, Loc: loc}
+
+		// Аккаунты универа: ЛК — основной источник расписания, плюс уведомления ЛК
+		// и задания Moodle. Без ключа шифрования живём по-старому (только ssau.ru/rasp).
+		if v, err := vault.Load(cfg.SecretKey, cfg.SecretKeyFile); err != nil {
+			logx.Errorf("rasp", "vault: %v — синк ЛК и Moodle выключен", err)
+			notify.Admin(ctx, cfg, "ключ шифрования не загрузился, ЛК и Moodle не синкаются: "+err.Error())
+		} else {
+			sy := &uni.Syncer{
+				Store: st, Vault: v, Loc: loc, GroupID: cfg.GroupID, AdminID: cfg.AdminID,
+				LKBase: cfg.LKBaseURL, MoodleBase: cfg.MoodleBaseURL,
+				Notify: func(ctx context.Context, id int64, text string) { notify.HTML(ctx, cfg, id, text) },
+			}
+			r.Source = sy.Lessons
+			go sy.Run(ctx)
+		}
+
 		run, err := r.Refresh(ctx)
 		if err != nil {
 			logx.Errorf("rasp", "main: refresh: %v", err)
@@ -28,9 +44,7 @@ func main() {
 		} else {
 			logx.Infof("rasp", "lessons=%d online=%d", run.LessonCount, run.OnlineCount)
 		}
-		logx.Debugf("rasp", "main: StartCron enter")
 		r.StartCron(ctx)
-		logx.Debugf("rasp", "main: StartCron returned")
 		return nil
 	})
 }

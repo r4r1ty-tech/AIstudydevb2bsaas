@@ -35,6 +35,9 @@ type Refresher struct {
 	Store   *store.Store
 	GroupID int64
 	Loc     *time.Location
+	// Source — основной источник (ЛК: подгруппы, ИОТ, онлайн-недели, ссылки BBB).
+	// Ошибка или пустой ответ — берём публичное расписание с ssau.ru/rasp.
+	Source func(ctx context.Context) ([]model.Lesson, error)
 }
 
 func (r *Refresher) loc() *time.Location {
@@ -66,6 +69,18 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	logx.Debugf("rasp", "refresh group=%d", r.GroupID)
 	logx.Debugf("rasp", "Refresher.Refresh: group=%d now=%s", r.GroupID, now.Format(time.RFC3339))
 
+	if r.Source != nil {
+		ls, err := r.Source(ctx)
+		if err == nil && len(ls) > 0 {
+			logx.Infof("rasp", "Refresher.Refresh: source lk lessons=%d", len(ls))
+			return r.apply(run, now, ls, true, "лк")
+		}
+		if ctx.Err() != nil {
+			return run, ctx.Err()
+		}
+		logx.Warnf("rasp", "Refresher.Refresh: source failed (%v, n=%d) — публичное расписание", err, len(ls))
+	}
+
 	body, status, err := Fetch(ctx, r.GroupID, 0)
 	if err != nil {
 		run.OK = false
@@ -96,17 +111,6 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	}
 	logx.Infof("rasp", "Refresher.Refresh: parsed=%d group=%d", len(lessons), r.GroupID)
 
-	old, err := r.Store.ListLessons()
-	if err != nil {
-		run.OK = false
-		run.Status = err.Error()
-		logx.Errorf("rasp", "list lessons: %v", err)
-		logx.Errorf("rasp", "Refresher.Refresh: list lessons: %v", err)
-		r.persistFail(run)
-		return run, err
-	}
-	logx.Debugf("rasp", "Refresher.Refresh: existing=%d", len(old))
-
 	fetchedNext := false
 	if nextWeek, ok := extractNextWeek(body); ok {
 		logx.Debugf("rasp", "Refresher.Refresh: next week=%d", nextWeek)
@@ -128,6 +132,20 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	} else {
 		logx.Debugf("rasp", "Refresher.Refresh: next week not found")
 	}
+	return r.apply(run, now, lessons, fetchedNext, "сайт")
+}
+
+// apply — общий хвост: сверка со старым, защита от пустого ответа, замена, лог.
+func (r *Refresher) apply(run model.ParseRun, now time.Time, lessons []model.Lesson, fetchedNext bool, source string) (model.ParseRun, error) {
+	old, err := r.Store.ListLessons()
+	if err != nil {
+		run.OK = false
+		run.Status = err.Error()
+		logx.Errorf("rasp", "Refresher.apply: list lessons: %v", err)
+		r.persistFail(run)
+		return run, err
+	}
+	logx.Debugf("rasp", "Refresher.apply: existing=%d source=%s", len(old), source)
 	if !fetchedNext {
 		lessons = keepFutureLessons(lessons, old)
 		logx.Debugf("rasp", "Refresher.Refresh: keepFuture total=%d", len(lessons))
@@ -176,7 +194,7 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 	logx.Infof("rasp", "lessons=%d online=%d next_week=%v", run.LessonCount, run.OnlineCount, fetchedNext)
 	logx.Infof("rasp", "Refresher.Refresh: ok group=%d status=%s lessons=%d online=%d next_week=%v",
 		r.GroupID, run.Status, run.LessonCount, run.OnlineCount, fetchedNext)
-	msg := fmt.Sprintf("ok lessons=%d online=%d", run.LessonCount, run.OnlineCount)
+	msg := fmt.Sprintf("ok lessons=%d online=%d source=%s", run.LessonCount, run.OnlineCount, source)
 	if diff != "" {
 		msg = msg + "\n" + diff
 	}
@@ -227,6 +245,10 @@ func (r *Refresher) StartCron(ctx context.Context) {
 		now := nowFn().In(r.loc())
 		hm := now.Format("15:04")
 		_, cron := cronTimes[hm]
+		// ЛК дёшев и там появляются ссылки BBB перед парами — обновляем каждый час днём.
+		if !cron && r.Source != nil && now.Minute() == 0 && now.Hour() >= 7 && now.Hour() <= 21 {
+			cron = true
+		}
 		key := now.Format("2006-01-02 15:04")
 		logx.Debugf("rasp", "Refresher.StartCron: tick hm=%s cron=%v kicked=%v lastFired=%s", hm, cron, kicked, lastFired)
 		if cron {

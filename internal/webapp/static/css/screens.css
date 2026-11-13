@@ -421,3 +421,10 @@
   .due-stat { padding: 10px; }
   .due-stat b { font-size: 22px; }
 }
+
+/* «Что сделать» в карточке срока: условия выполнения, попытки, описание. */
+.due-item .fold { margin-top: 10px; }
+.due-todo { margin: 0; padding-left: 18px; display: grid; gap: 4px; color: var(--text-2); font-size: 0.9rem; line-height: 1.4; overflow-wrap: anywhere; }
+
+/* «Без срока»: спокойные карточки без цвета срочности. */
+.due-nodue { margin-top: 16px; }

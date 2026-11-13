@@ -178,7 +178,7 @@ func (w *Worker) tick(ctx context.Context) {
 			var here []pending
 			for i := range users {
 				u := users[i]
-				if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
+				if !u.Active(now) || !lesson.For(u) {
 					continue
 				}
 				intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)

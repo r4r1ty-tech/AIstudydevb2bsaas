@@ -172,7 +172,7 @@ func buildMe(id int64, u *model.User, now time.Time, loc *time.Location) meView 
 		WakeWords:   append([]string{}, model.CommonWakeWords...),
 	}
 	if u == nil {
-		me.Reason = "Профиль ещё не создан: впишите имя для BBB в разделе «Ещё»."
+		me.Reason = "Профиль ещё не создан: укажите имя для BBB и подгруппу."
 		return me
 	}
 	me.FIO = u.FIO
@@ -197,16 +197,19 @@ func buildMe(id int64, u *model.User, now time.Time, loc *time.Location) meView 
 	case strings.TrimSpace(u.FIO) == "":
 		me.Reason = "Не задано имя для BBB — без него бот не зайдёт."
 	case !u.Onboarded:
-		me.Reason = "Закончите настройку в Telegram-боте, тогда он начнёт заходить."
+		me.Reason = "Профиль не настроен: укажите имя для BBB и подгруппу."
 	}
 	return me
 }
 
 func (m *mine) isMine(l model.Lesson) bool {
-	if m.user == nil || m.user.Subgroup == 0 {
-		return true
+	if m.user == nil {
+		return l.Owner == 0
 	}
-	return l.MatchesSubgroup(m.user.Subgroup)
+	if m.user.Subgroup == 0 {
+		return l.Owner == 0 || l.Owner == m.user.TelegramID
+	}
+	return l.For(*m.user)
 }
 
 func lessonKind(typ string) string {

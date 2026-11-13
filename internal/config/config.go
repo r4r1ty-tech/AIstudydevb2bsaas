@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -70,6 +71,10 @@ type Config struct {
 	GitHubRepo       string
 	GitHubBranch     string
 	Whitelist        []int64
+	SecretKey        string // SECRET_KEY: base64 32 байта для шифрования паролей универа
+	SecretKeyFile    string // SECRET_KEY_FILE: иначе ключ в файле (создаётся сам, 0600)
+	LKBaseURL        string // LK_BASE_URL: https://lk.ssau.ru
+	MoodleBaseURL    string // MOODLE_BASE_URL: https://do.ssau.ru/moodle
 }
 
 func Load() (*Config, error) {
@@ -117,7 +122,11 @@ func Load() (*Config, error) {
 		GitHubRepo:       strEnv("GITHUB_REPO", "LectionsSSAU"),
 		GitHubBranch:     strEnv("GITHUB_BRANCH", "main"),
 		Whitelist:        append([]int64(nil), DefaultWhitelist...),
+		SecretKey:        strings.TrimSpace(os.Getenv("SECRET_KEY")),
+		LKBaseURL:        strings.TrimRight(strEnv("LK_BASE_URL", "https://lk.ssau.ru"), "/"),
+		MoodleBaseURL:    strings.TrimRight(strEnv("MOODLE_BASE_URL", "https://do.ssau.ru/moodle"), "/"),
 	}
+	c.SecretKeyFile = strEnv("SECRET_KEY_FILE", filepath.Join(filepath.Dir(c.DBPath), "secret.key"))
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {
 		for _, p := range strings.Split(extra, ",") {
 			p = strings.TrimSpace(p)

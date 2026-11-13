@@ -52,7 +52,7 @@ func knownCommand(text string) bool {
 	} else {
 		switch name {
 		case "start", "panel", "test", "help", "today", "notes",
-			"settings", "words", "link", "links", "cancel":
+			"settings", "words", "link", "links", "cancel", "connect", "deadlines", "tasks":
 			ok = true
 		default:
 			ok = false

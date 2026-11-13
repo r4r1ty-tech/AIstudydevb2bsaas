@@ -20,6 +20,7 @@ const ROUTES = {
 };
 
 const gate = document.getElementById("gate");
+const setup = document.getElementById("setup");
 const shell = document.getElementById("app");
 let screen = document.getElementById("screen");
 const badges = {};
@@ -114,6 +115,7 @@ function showGate(msg) {
   leaveScreen();
   current = "";
   shell.hidden = true;
+  setup.hidden = true;
   gate.hidden = false;
   const p = document.getElementById("gate-msg");
   p.hidden = !msg;
@@ -152,13 +154,65 @@ async function boot() {
   }
   app.settings = s;
   setTimezone(s.timezone);
-  booted = true;
   gate.hidden = true;
+  // Первый вход: пока нет имени для BBB и подгруппы, приложение не открываем.
+  if (!s.demo) {
+    try {
+      const me = await api("api/me");
+      if (!me.onboarded || !me.fio || !me.subgroup) {
+        showSetup(me);
+        return;
+      }
+    } catch { /* профиль не прочитался — пускаем, поправят в «Ещё» */ }
+  }
+  setup.hidden = true;
+  booted = true;
   shell.hidden = false;
   await probeIllustrations();
   route();
   refreshBadge();
 }
+
+function showSetup(me) {
+  shell.hidden = true;
+  setup.hidden = false;
+  const form = document.getElementById("setup-form");
+  form.querySelector("#setup-fio").value = me.fio || "";
+  for (const b of form.querySelectorAll("[data-sub]")) b.setAttribute("aria-checked", String(Number(b.dataset.sub) === me.subgroup));
+  form.querySelector("#setup-fio").focus();
+}
+
+function setupError(msg) {
+  const p = document.getElementById("setup-msg");
+  p.textContent = msg;
+  p.hidden = !msg;
+}
+
+document.getElementById("setup-form").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-sub]");
+  if (!b) return;
+  for (const x of b.parentElement.querySelectorAll("[data-sub]")) x.setAttribute("aria-checked", String(x === b));
+});
+
+document.getElementById("setup-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const form = ev.currentTarget;
+  const fio = form.querySelector("#setup-fio").value.trim().replace(/\s+/g, " ");
+  const sel = form.querySelector('[data-sub][aria-checked="true"]');
+  if (fio.split(" ").length < 2) return setupError("Впишите хотя бы фамилию и имя.");
+  if (!sel) return setupError("Выберите подгруппу.");
+  setupError("");
+  const btn = form.querySelector('[type="submit"]');
+  btn.disabled = true;
+  try {
+    await api("api/me", { method: "POST", body: { fio, subgroup: Number(sel.dataset.sub), onboard: true } });
+    boot();
+  } catch (e) {
+    setupError(e.message || "Не сохранилось, попробуйте ещё раз.");
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 setUnauthorizedHandler(() => {
   if (!booted) return;
