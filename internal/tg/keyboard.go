@@ -15,8 +15,8 @@ func mainKeyboard() gotgbot.ReplyKeyboardMarkup {
 	logx.Debugf("tg", "mainKeyboard: build")
 	return gotgbot.ReplyKeyboardMarkup{
 		Keyboard: [][]gotgbot.KeyboardButton{
-			{{Text: btnToday}, {Text: btnNotes}},
-			{{Text: btnSettings}},
+			{{Text: btnToday}, {Text: btnTasks}},
+			{{Text: btnNotes}, {Text: btnSettings}},
 		},
 		IsPersistent:          true,
 		ResizeKeyboard:        true,
@@ -129,6 +129,7 @@ func settingsKeyboard(sub int) gotgbot.InlineKeyboardMarkup {
 			},
 			{{Text: "Слова для пинга на паре", CallbackData: "st:words"}},
 			{{Text: "Комнаты BBB", CallbackData: "st:rooms"}},
+			{{Text: "Аккаунт универа (ЛК, Moodle)", CallbackData: "un:menu"}},
 			{{Text: "Как это работает", CallbackData: "st:help"}},
 		},
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-const lessonCols = `id, date, start, end, begin, finish, discipline, teacher, place, subgroup, type, online`
+const lessonCols = `id, date, start, end, begin, finish, discipline, teacher, place, subgroup, type, online, bbb_url, owner`
 
 func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 	logx.Debugf("store", "ReplaceLessons: enter count=%d", len(lessons))
@@ -52,14 +52,14 @@ func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 	rows.Close()
 	logx.Debugf("store", "ReplaceLessons: existing count=%d", len(oldByIdent))
 
-	upd, err := tx.Prepare(`UPDATE lessons SET date=?, start=?, end=?, begin=?, finish=?, discipline=?, teacher=?, place=?, subgroup=?, type=?, online=? WHERE id=?`)
+	upd, err := tx.Prepare(`UPDATE lessons SET date=?, start=?, end=?, begin=?, finish=?, discipline=?, teacher=?, place=?, subgroup=?, type=?, online=?, bbb_url=?, owner=? WHERE id=?`)
 	if err != nil {
 		logx.Errorf("store", "ReplaceLessons: prepare update: %v", err)
 		return fmt.Errorf("store: replace lessons update: %w", err)
 	}
 	defer upd.Close()
-	ins, err := tx.Prepare(`INSERT INTO lessons (date, start, end, begin, finish, discipline, teacher, place, subgroup, type, online)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	ins, err := tx.Prepare(`INSERT INTO lessons (date, start, end, begin, finish, discipline, teacher, place, subgroup, type, online, bbb_url, owner)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		logx.Errorf("store", "ReplaceLessons: prepare insert: %v", err)
 		return fmt.Errorf("store: replace lessons prepare: %w", err)
@@ -71,7 +71,7 @@ func (s *Store) ReplaceLessons(lessons []model.Lesson) error {
 	for i, l := range lessons {
 		args := []any{
 			l.Date, l.Start, l.End, timeArg(l.Begin), timeArg(l.Finish),
-			l.Discipline, l.Teacher, l.Place, l.Subgroup, l.Type, btoi(l.Online),
+			l.Discipline, l.Teacher, l.Place, l.Subgroup, l.Type, btoi(l.Online), l.BBBURL, l.Owner,
 		}
 		if ids := oldByIdent[l.Identity()]; len(ids) > 0 {
 			id := ids[0]

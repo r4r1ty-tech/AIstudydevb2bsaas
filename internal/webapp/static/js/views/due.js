@@ -12,26 +12,28 @@ const GROUPS = [
   { id: "later", title: "Позже", ico: "clock" },
 ];
 
-function statusChip(s) {
+function statusChip(s, kind) {
   if (s === "submitted") return html`<span class="chip chip-acc">${icon("check")}Сдано</span>`;
-  if (s === "draft") return html`<span class="chip chip-amber">${icon("file")}Файл прикреплён, не отправлено</span>`;
+  if (s === "draft") return html`<span class="chip chip-amber">${icon("file")}${kind === "quiz" ? "Попытка не завершена" : "Черновик, не отправлено"}</span>`;
   return html`<span class="chip chip-ghost">${icon("x")}Не сдано</span>`;
 }
 
 function item(d) {
-  const ms = Date.parse(d.due) - now();
-  const left = d.group === "done" ? "" : ms < 0 ? `просрочено на ${duration(-ms)}` : `осталось ${duration(ms)}`;
+  const hasDue = d.due && !d.due.startsWith("0001-");
+  const ms = hasDue ? Date.parse(d.due) - now() : 0;
+  const left = d.group === "done" || !hasDue ? "" : ms < 0 ? `просрочено на ${duration(-ms)}` : `осталось ${duration(ms)}`;
   return html`<article class="due-item ${d.group}">
-    <p class="due-course">${d.course}</p>
+    <p class="due-course">${d.course}${d.section ? html` · ${d.section}` : ""}</p>
     <h3 class="due-title">${d.title}</h3>
-    <div class="due-when"><span>${icon("clock", "icon-sm")} до ${whenLabel(d.due)}</span>${left ? html`<span class="due-left">${left}</span>` : ""}</div>
+    <div class="due-when"><span>${icon("clock", "icon-sm")} ${hasDue ? html`до ${whenLabel(d.due)}` : "срок не указан"}</span>${left ? html`<span class="due-left">${left}</span>` : ""}</div>
     <div class="due-foot">
       <div class="row">
         <span class="chip">${icon(d.kind === "quiz" ? "quiz" : "assign")}${d.kind === "quiz" ? "Тест" : "Задание"}</span>
-        ${statusChip(d.status)}
+        ${statusChip(d.status, d.kind)}
       </div>
       ${d.url ? html`<a class="link-btn" href="${d.url}" target="_blank" rel="noopener noreferrer">Открыть в Moodle${icon("ext", "icon-sm")}</a>` : ""}
     </div>
+    ${d.todo ? html`<details class="fold"><summary>${icon("file")}Что сделать${icon("chev", "chev")}</summary><div class="fold-body"><ul class="due-todo">${d.todo.split("\n").filter(Boolean).map((t) => html`<li>${t}</li>`)}</ul></div></details>` : ""}
   </article>`;
 }
 
@@ -65,7 +67,9 @@ export function mountDue(root, ctx) {
     }
     const by = {};
     for (const x of d.deadlines) (by[x.group] = by[x.group] || []).push(x);
-    const open = d.deadlines.filter((x) => x.group !== "done").length;
+    // «Без срока» не горит: в счётчики не идёт, лежит отдельным блоком.
+    const open = d.deadlines.filter((x) => x.group !== "done" && x.group !== "nodue").length;
+    const nodue = by.nodue || [];
     const c = d.counts || {};
     const groups = GROUPS.filter((g) => by[g.id] && by[g.id].length);
     setHTML(root, html`${head({ eyebrow: html`Moodle · ${m.synced_at ? `обновлено ${ago(m.synced_at)}` : "подключён"}`, title: "Сдать" })}
@@ -74,11 +78,12 @@ export function mountDue(root, ctx) {
         <button type="button" class="due-stat${c.soon ? " is-amber" : ""}" data-jump="soon" ${c.soon ? "" : "disabled"} aria-label="Сегодня и завтра: ${c.soon || 0}. Показать"><b>${c.soon || 0}</b><span>сегодня и завтра</span></button>
         <button type="button" class="due-stat" data-jump="open" ${open ? "" : "disabled"} aria-label="Всего не сдано: ${open}. Показать"><b>${open}</b><span>всего не сдано</span></button>
       </div>
-      ${groups.length ? "" : empty({ ico: "check", title: "Всё сдано", text: "Открытых сроков нет. Новые появятся здесь сами." })}
+      ${groups.length ? "" : empty({ ico: "check", title: nodue.length ? "Горящих сроков нет" : "Всё сдано", text: nodue.length ? "Со сроками всё сдано. Ниже — задания без срока." : "Открытых сроков нет. Новые появятся здесь сами." })}
       ${groups.map((g) => html`<section class="due-group ${g.id}" id="due-${g.id}" aria-labelledby="dg-${g.id}">
         <h2 class="due-group-title" id="dg-${g.id}">${icon(g.ico)}${g.title} <span class="count mono">· ${by[g.id].length}</span></h2>
         ${by[g.id].map(item)}
       </section>`)}
+      ${nodue.length ? html`<details class="fold due-nodue"><summary>${icon("file")}Без срока · ${nodue.length}${icon("chev", "chev")}</summary><div class="fold-body"><p class="field-hint">Срок в Moodle не указан — не горит, но сдать всё равно нужно.</p>${nodue.map(item)}</div></details>` : ""}
       ${by.done && by.done.length ? html`<details class="fold"><summary>${icon("check")}Сдано · ${by.done.length}${icon("chev", "chev")}</summary><div class="fold-body">${by.done.map(item)}</div></details>` : ""}`);
   }
 

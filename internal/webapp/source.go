@@ -65,13 +65,15 @@ type MoodleStatus struct {
 
 // Deadline — один срок из Moodle.
 type Deadline struct {
-	ID     string    `json:"id"`
-	Course string    `json:"course"`
-	Title  string    `json:"title"`
-	Kind   string    `json:"kind"` // quiz | assign
-	Due    time.Time `json:"due"`
-	Status string    `json:"status"` // todo | draft | submitted
-	URL    string    `json:"url"`
+	ID      string    `json:"id"`
+	Course  string    `json:"course"`
+	Title   string    `json:"title"`
+	Kind    string    `json:"kind"` // quiz | assign
+	Due     time.Time `json:"due"`
+	Status  string    `json:"status"` // todo | draft | submitted
+	URL     string    `json:"url"`
+	Section string    `json:"section,omitempty"`
+	Todo    string    `json:"todo,omitempty"` // что сделать: условия, попытки, описание
 }
 
 const (

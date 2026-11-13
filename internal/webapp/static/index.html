@@ -41,6 +41,29 @@
     </form>
   </div>
 
+  <div id="setup" class="gate" hidden>
+    <form id="setup-form" class="gate-card" novalidate>
+      <span class="brand-mark" aria-hidden="true"></span>
+      <h1 class="gate-title">Первый вход</h1>
+      <p class="gate-sub">Две настройки, и бот начнёт заходить на онлайн-пары за вас.</p>
+      <label class="field">
+        <span class="field-label">Имя для BBB</span>
+        <input id="setup-fio" class="input" name="fio" autocomplete="name" maxlength="64" placeholder="Фамилия Имя Отчество" required>
+        <span class="field-hint">Так вас увидят в списке участников — как в журнале.</span>
+      </label>
+      <div class="field">
+        <span class="field-label" id="setup-sub-l">Подгруппа</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="setup-sub-l">
+          <button type="button" role="radio" data-sub="1" data-tone="acc" aria-checked="false">1-я</button>
+          <button type="button" role="radio" data-sub="2" data-tone="acc" aria-checked="false">2-я</button>
+        </div>
+        <span class="field-hint">По ней бот выбирает пары, которые делятся на подгруппы.</span>
+      </div>
+      <p id="setup-msg" class="form-error" role="alert" hidden></p>
+      <button type="submit" class="btn btn-primary btn-block">Готово</button>
+    </form>
+  </div>
+
   <div id="app" class="app" hidden>
     <nav class="nav" aria-label="Разделы">
       <div class="nav-brand">

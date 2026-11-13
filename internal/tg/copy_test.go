@@ -213,11 +213,11 @@ func TestJSRegexpNotUsedInT15Buttons(t *testing.T) {
 	if !kb.IsPersistent || kb.InputFieldPlaceholder != inputHint {
 		t.Fatalf("main kb: %+v", kb)
 	}
-	if kb.Keyboard[0][0].Text != btnToday || kb.Keyboard[0][1].Text != btnNotes {
+	if kb.Keyboard[0][0].Text != btnToday || kb.Keyboard[0][1].Text != btnTasks {
 		t.Fatalf("row1: %+v", kb.Keyboard)
 	}
-	if kb.Keyboard[1][0].Text != btnSettings {
-		t.Fatalf("profile button: %+v", kb.Keyboard)
+	if kb.Keyboard[1][0].Text != btnNotes || kb.Keyboard[1][1].Text != btnSettings {
+		t.Fatalf("row2: %+v", kb.Keyboard)
 	}
 }
 

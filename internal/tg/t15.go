@@ -54,7 +54,7 @@ func (b *Bot) tickT15() {
 		}
 		for i := range users {
 			u := users[i]
-			if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
+			if !u.Active(now) || !lesson.For(u) {
 				continue
 			}
 			intent, err := b.st.GetIntent(u.TelegramID, lesson.ID)

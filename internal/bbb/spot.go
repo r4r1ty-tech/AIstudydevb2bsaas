@@ -27,7 +27,7 @@ func (w *Worker) lectureUsers(lesson model.Lesson, now time.Time) []model.User {
 	}
 	out := make([]model.User, 0, len(users))
 	for _, u := range users {
-		if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
+		if !u.Active(now) || !lesson.For(u) {
 			continue
 		}
 		intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)
@@ -56,7 +56,7 @@ func (w *Worker) subgroupUsers(lesson model.Lesson, now time.Time) []model.User 
 	}
 	out := make([]model.User, 0, len(users))
 	for _, u := range users {
-		if u.Active(now) && lesson.MatchesSubgroup(u.Subgroup) {
+		if u.Active(now) && lesson.For(u) {
 			out = append(out, u)
 		}
 	}

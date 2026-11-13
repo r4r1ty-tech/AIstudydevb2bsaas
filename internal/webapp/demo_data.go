@@ -359,8 +359,8 @@ func demoDeadlines(now time.Time) []Deadline {
 		return fmt.Sprintf("https://lms.ssau.ru/mod/%s/view.php?id=%d", kind, id)
 	}
 	return []Deadline{
-		{ID: "a-31877", Course: subjStat, Title: "Лабораторная работа №3. Регрессионный анализ", Kind: DeadlineAssign, Due: at(-2, 23, 59), Status: DeadlineDraft, URL: lms("assign", 31877)},
-		{ID: "q-30411", Course: subjOpt, Title: "Тест по теме «Симплекс-метод»", Kind: DeadlineQuiz, Due: at(-1, 20, 0), Status: DeadlineTodo, URL: lms("quiz", 30411)},
+		{ID: "a-31877", Course: subjStat, Title: "Лабораторная работа №3. Регрессионный анализ", Kind: DeadlineAssign, Due: at(-2, 23, 59), Status: DeadlineDraft, URL: lms("assign", 31877), Section: "3. Регрессия", Todo: "Сделать: Отправить ответ\nСостояние ответа на задание: Черновик (не отправлен)\nОписание: построить модель регрессии по данным варианта и приложить отчёт в PDF."},
+		{ID: "q-30411", Course: subjOpt, Title: "Тест по теме «Симплекс-метод»", Kind: DeadlineQuiz, Due: at(-1, 20, 0), Status: DeadlineTodo, URL: lms("quiz", 30411), Todo: "Разрешено попыток: 2\nОграничение по времени: 30 мин.\nМетод оценивания: Высшая оценка"},
 		{ID: "a-32050", Course: subjTFYAG, Title: "Домашнее задание 4: построить ДКА по НКА", Kind: DeadlineAssign, Due: at(0, 23, 59), Status: DeadlineTodo, URL: lms("assign", 32050)},
 		{ID: "q-32102", Course: subjSE, Title: "Тест: модели жизненного цикла ПО", Kind: DeadlineQuiz, Due: at(1, 18, 0), Status: DeadlineTodo, URL: lms("quiz", 32102)},
 		{ID: "a-32119", Course: subjTPIVS, Title: "Практика 5: диаграмма IDEF0 для своей системы", Kind: DeadlineAssign, Due: at(1, 23, 59), Status: DeadlineDraft, URL: lms("assign", 32119)},

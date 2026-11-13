@@ -17,6 +17,7 @@ function section(id, ico, title, sub, body) {
 function accountBody(m) {
   if (m.connected) {
     return html`<div class="conn-state ok">${icon("check")}<span>Подключён как <b>${m.login}</b>${m.synced_at ? html` · обновлено ${ago(m.synced_at)}` : ""}</span></div>
+      ${m.message ? html`<p class="field-hint">${m.message}</p>` : ""}
       <button type="button" class="btn btn-ghost" data-action="moodle-logout">${icon("logout")}Отключить</button>`;
   }
   return html`<div class="conn-state">${icon("key")}<span>Не подключён</span></div>
@@ -27,7 +28,7 @@ function accountBody(m) {
         <input class="input" name="password" type="password" autocomplete="current-password" required></label>
       <div id="moodle-msg" role="alert"></div>
       <button type="submit" class="btn btn-primary">${icon("key")}Подключить</button>
-      <p class="field-hint">Пароль уходит только в Moodle и нигде в панели не сохраняется.</p>
+      <p class="field-hint">Пароль хранится на сервере зашифрованным: по нему бот сам обновляет задания Moodle и, если логин тот же, расписание из ЛК. «Отключить» стирает его.</p>
     </form>`;
 }
 
@@ -110,7 +111,7 @@ export function mountMore(root, ctx) {
   function render() {
     if (stopService) stopService();
     setHTML(root, html`${head({ eyebrow: "Настройки и служебное", title: "Ещё" })}
-      ${section("account", "key", "Аккаунт универа", "Moodle: тесты и задания со сроками", html`<div id="acc-body" class="stack-lg">${accountBody(st.moodle)}</div>`)}
+      ${section("account", "key", "Аккаунт универа", "Moodle: тесты и задания со сроками; ЛК: расписание, подгруппы и ссылки BBB", html`<div id="acc-body" class="stack-lg">${accountBody(st.moodle)}</div>`)}
       ${section("profile", "user", "Профиль", "Как бот заходит за вас", profileBody(st.me))}
       ${section("rooms", "door", "Комнаты BBB", "Ссылки по предметам — подставляются на каждую пару", roomsBody(st.rooms))}
       <details class="card fold service" id="service" ${st.serviceOpen ? "open" : ""}>

@@ -113,12 +113,12 @@ func isCommandText(text string) bool {
 	return ok
 }
 
-func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLink func(lessonID int64) bool, intents map[int64]time.Time) *model.Lesson {
-	logx.Debugf("tg", "pickLessonForBBB: now=%s sub=%d lessons=%d intents=%d", now.Format(time.RFC3339), subgroup, len(lessons), len(intents))
+func pickLessonForBBB(now time.Time, u model.User, lessons []model.Lesson, hasLink func(lessonID int64) bool, intents map[int64]time.Time) *model.Lesson {
+	logx.Debugf("tg", "pickLessonForBBB: now=%s sub=%d lessons=%d intents=%d", now.Format(time.RFC3339), u.Subgroup, len(lessons), len(intents))
 	var live *model.Lesson
 	for i := range lessons {
 		l := lessons[i]
-		if !l.Online || !l.MatchesSubgroup(subgroup) {
+		if !l.Online || !l.For(u) {
 			continue
 		}
 		if l.Begin.IsZero() || l.Finish.IsZero() {
@@ -140,7 +140,7 @@ func pickLessonForBBB(now time.Time, subgroup int, lessons []model.Lesson, hasLi
 	var nearest *model.Lesson
 	for i := range lessons {
 		l := lessons[i]
-		if !l.Online || !l.Begin.After(now) || !l.MatchesSubgroup(subgroup) {
+		if !l.Online || !l.Begin.After(now) || !l.For(u) {
 			continue
 		}
 		if hasLink != nil && hasLink(l.ID) {
