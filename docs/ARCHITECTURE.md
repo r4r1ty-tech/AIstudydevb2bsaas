@@ -114,7 +114,33 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 
 ### Панель
 
-`internal/webapp`: статика + JSON API под паролем (`X-Panel-Password`/`Bearer`). Вкладки читают `/api/now`, `/api/people`, `/api/lessons`, `/api/parser`, `/api/logs`; пульт пишет `/api/people/{id}`, `/api/bbb`, `/api/settings`, `/api/test`. WebSocket не используется — обычный пуллинг.
+`internal/webapp`: статика (`static/`: `index.html`, `css/`, `js/`, шрифты и картинки вшиты в бинарник) + JSON API. Вход в API: верный `PANEL_PASSWORD` (`X-Panel-Password`/`Bearer`), либо пароля нет, но задан `PANEL_ALLOW_IPS`, либо демо; иначе 401. Фильтр по IP (`PANEL_ALLOW_IPS`, `PANEL_TRUST_PROXY`) стоит перед всем, включая статику. Обработчики работают через интерфейс `Source`: `*store.Store` в обычном режиме, `demoSource` в памяти при `PANEL_DEMO=1`. WebSocket нет — пуллинг.
+
+Пять экранов (hash-роутинг, нижняя панель на телефоне, боковая от 900px):
+
+- **Сегодня** — пары дня, переключатель «заходить / не заходить» по каждой паре, режим дня, ближайшая пара;
+- **Неделя** — расписание по дням, те же переключатели;
+- **Сдать** — дедлайны Moodle по срочности (просрочено, сегодня и завтра, неделя, позже, сдано);
+- **Конспекты** — паки лекций по предметам и их статус, ссылки на PDF в GitHub;
+- **Ещё** — профиль (имя для BBB, подгруппа, свои вейкворды, вкл/выкл бота), аккаунт Moodle, комнаты BBB, служебное (пульт: люди, парсер, логи, тестовый заход).
+
+«Я» — пользователь `ADMIN_TELEGRAM_ID`. Решения пишутся в `join_intents`, как кнопки T-15 в боте; воркер `bbb` читает их сам.
+
+| Метод | Путь | Что делает | Основные поля |
+| --- | --- | --- | --- |
+| GET | `/api/day?date=YYYY-MM-DD` | Пары дня (по умолчанию сегодня) с моим решением | `lessons[]` (`decision`, `phase`, `mine`, `will_join`, `presence`), `mode`, `current_id`, `next_id`, `upcoming`, `me`, `demo` |
+| POST | `/api/day` | Решение разом по онлайн-парам моей подгруппы, которые ещё не кончились | `{date?, mode: auto\|all\|none}`, ответ как у GET |
+| GET | `/api/week` | Все дни расписания | `days[]` (`date`, `mode`, `lessons[]`), `today`, `me` |
+| POST | `/api/intent` | Решение по одной онлайн-паре | `{lesson_id, decision: yes\|no\|auto}` -> `{lesson, mode}`; `auto` возвращает «молчание = заходить» |
+| GET | `/api/deadlines` | Дедлайны Moodle | `moodle` (`connected`, `available`, `login`, `synced_at`, `message`), `deadlines[]` (`group`, `due`, `status`, `kind`), `counts` |
+| POST | `/api/moodle/login` | Подключить Moodle. Пароль не хранится и не логируется | `{login, password}`; пока 501 в обычном режиме, 422 при неверных данных |
+| POST | `/api/moodle/logout` | Отключить Moodle | — |
+| GET | `/api/notes` | Конспекты по предметам | `subjects[]` (`discipline`, `latest`, `notes[]` со `status`, `topic`, `pdf_url`), `repo_url`, `total` |
+| GET | `/api/me` | Мой профиль | `fio`, `subgroup`, `enabled`, `active`, `reason`, `extra_words`, `wake_words` |
+| POST | `/api/me` | Правка профиля, любые поля по отдельности | `{fio?, subgroup?, extra_words?, enabled?}` |
+| GET | `/api/rooms` | Комнаты BBB по предметам | `rooms[]` (`key`, `discipline`, `teacher`, `kind`, `url`, `lessons`); сохранение через `POST /api/bbb {key, url}` |
+
+Служебные ручки пульта остались: `/api/now`, `/api/people`, `/api/people/{id}`, `/api/lessons`, `/api/bbb`, `/api/parser`, `/api/parser/refresh`, `/api/logs`, `/api/settings`, `/api/test`.
 
 Публичный адрес Mini App резолвится в `config.ResolveWebAppURL`: свежий URL туннеля из `WEBAPP_URL_FILE` важнее статичного `WEBAPP_PUBLIC_URL`. `tg` опрашивает файл каждые 20 с (`webappLoop`) и при смене переставляет кнопку админу через `setChatMenuButton` — рестарт не требуется.
 

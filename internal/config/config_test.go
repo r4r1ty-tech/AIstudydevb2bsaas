@@ -15,6 +15,7 @@ func clearEnv(t *testing.T) {
 		"DATABASE_PATH", "GROUP_ID", "GROUP_CODE", "LISTEN_ADDR", "TZ",
 		"RECORDINGS_DIR", "CHROME_BIN", "CHROME_USER_DATA_DIR", "BBB_DRY_RUN",
 		"LECTURE_PAUSE", "PANEL_PASSWORD", "WHITELIST_EXTRA",
+		"PANEL_ALLOW_IPS", "PANEL_TRUST_PROXY", "PANEL_DEMO",
 		"LLM_API_KEY", "LLM_API_URL", "LLM_MODEL",
 		"DEEPSEEK_API_KEY", "DEEPSEEK_API_URL", "DEEPSEEK_MODEL",
 	} {
@@ -245,5 +246,26 @@ func TestLLMFallsBackToDeepSeekNames(t *testing.T) {
 	}
 	if c.LLMAPIKey != "sk-new" || c.LLMModel != "new-model" || c.LLMAPIURL != "https://api.deepseek.com" {
 		t.Fatalf("new names must win: key=%q model=%q url=%q", c.LLMAPIKey, c.LLMModel, c.LLMAPIURL)
+	}
+}
+
+func TestPanelAccessEnv(t *testing.T) {
+	clearEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PanelAllowIPs != "" || c.PanelTrustProxy || c.PanelDemo {
+		t.Fatalf("defaults: allow=%q trust=%v demo=%v", c.PanelAllowIPs, c.PanelTrustProxy, c.PanelDemo)
+	}
+	t.Setenv("PANEL_ALLOW_IPS", " 10.0.0.0/8, 192.168.1.5 ")
+	t.Setenv("PANEL_TRUST_PROXY", "1")
+	t.Setenv("PANEL_DEMO", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PanelAllowIPs != "10.0.0.0/8, 192.168.1.5" || !c.PanelTrustProxy || !c.PanelDemo {
+		t.Fatalf("env: allow=%q trust=%v demo=%v", c.PanelAllowIPs, c.PanelTrustProxy, c.PanelDemo)
 	}
 }
