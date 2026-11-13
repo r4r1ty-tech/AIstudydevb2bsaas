@@ -33,6 +33,11 @@ internal/notes            после пары: STT (AssemblyAI/Fish/Groq), visio
 internal/archive          имена файлов и путей записей, слайдов, конспектов
 internal/notify           отправка сообщений в Telegram без зависимости от tg-процесса
 internal/webapp           Mini App: статика + JSON API + password-gate
+internal/lk               клиент lk.ssau.ru: вход (server action Next.js), расписание
+internal/moodle           клиент do.ssau.ru/moodle: вход по форме, курсы, лента сроков, разбор заданий и тестов
+internal/uni              синк по аккаунтам: расписание из ЛК для rasp, задания Moodle
+internal/vault            AES-GCM для паролей и сессий аккаунтов (ключ вне базы)
+internal/websess          HTTP-сессия «как браузер» с выгрузкой кук в строку
 ```
 
 ## Схема данных (sqlite)
@@ -47,6 +52,8 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 | `bbb_links` | `key` | ссылка комнаты. `SetLessonBBB` пишет `lesson:<id>` и `room|предмет|препод|тип`; `model.ResolveBBB` (воркер, tg, панель): своя `lesson:<id>` (пустая — снята), иначе `room|…` по типу пары, иначе свежий ключ панели `<group>|предмет|препод`. Привязка новой ссылки в tg смотрит только на свои ссылки пар |
 | `lecture_packs` | `lesson_id` | запись/слайды/конспект: статус, пути, ошибка |
 | `parse_runs` | `id` | последний прогон парсера: время, ок/статус, счётчики, дифф |
+| `accounts` | `(telegram_id, kind)` | аккаунты универа `lk`/`moodle`: логин, пароль и куки (зашифрованы), статус `pending/ok/bad_login/error`, `synced_at` |
+| `moodle_items` | `(telegram_id, cmid)` | задания и тесты Moodle: курс, раздел, тип, срок открытия и сдачи, статус `todo/draft/submitted/done`, «что сделать» |
 | `settings` | `key` | `test_join`, `group_id`, `rasp_refresh`, `admin_id`, `slides_done:*`, `notes_done:*`, `notes_attempts:*` |
 
 ## Ключевые сценарии
@@ -54,6 +61,14 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 ### Парсер расписания
 
 `rasp.Refresh` (`internal/rasp/refresh.go`): `Fetch` (browser UA, cookie jar, при 403 повтор на `www.`), `Parse` (goquery: `.schedule__*`), при наличии — добор следующей недели, `Diff` и `ReplaceLessons` (upsert по `Identity()` = день+начало+предмет+подгруппа: смена аудитории, препода, типа или online обновляет пару на месте, id не меняется; удалённые пары уносят свои согласия и presence, а их ссылка переезжает в `room|…`; паки лекций остаются). Результат пишется в `parse_runs` и `events`. `StartCron` тикает раз в 30 с и срабатывает в 07/15/19/22 или по kick из панели (`settings.rasp_refresh`). Панель дергает kick и ждёт появления нового `parse_runs` (`rasp.WaitRun`).
+
+### ЛК и Moodle
+
+`uni.Syncer` живёт в процессе `rasp`. `Lessons` — источник для `rasp.Refresher.Source`: по аккаунту ЛК (админ первым) берёт группу, учебный год (`statements/student/years`), начало года (кэш `settings.lk_year_start:<год>`) и две недели `timetable/get-timetable`. Из ответа: подгруппа своей группы у пары, `weeks[].isOnline` и аудитория именно этой недели, `conference.url` → `lessons.bbb_url`, пары ИОТ (`ietLessons`) → `lessons.owner` = telegram id студента; у остальных аккаунтов берутся только их ИОТ. `Lesson.For(user)` прячет чужие ИОТ и чужую подгруппу. `ResolveBBB`: ручная ссылка пары, затем ссылка из ЛК, затем комнаты. ЛК недоступен — Refresher идёт на `ssau.ru/rasp`, как раньше.
+
+Сессии: куки после входа шифруются и пишутся в `accounts.session`; следующий синк поднимает их и логинится по паролю, только если сайт ответил «не авторизован».
+
+Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification`), лента `core_calendar_get_action_events_by_timesort` (по 50, это и есть «несделанное»), состав курса из HTML `course/view.php` (assign/quiz/lesson/workshop), страница элемента → сроки (`activity-dates`), условия выполнения, статус (`submissionstatustable`, `quizattemptsummary`), попытки и лимит времени, начало описания. Новые задания со сроком впереди приходят сообщением. Бот (`tg`) показывает «Сдать» и напоминает за 24 и 3 часа (`settings.dl_sent:*`); панель читает `moodle_items` через `storeMoodle`.
 
 ### T-15 и решение
 
@@ -120,9 +135,11 @@ internal/webapp           Mini App: статика + JSON API + password-gate
 
 - **Сегодня** — пары дня, переключатель «заходить / не заходить» по каждой паре, режим дня, ближайшая пара;
 - **Неделя** — расписание по дням, те же переключатели;
-- **Сдать** — дедлайны Moodle по срочности (просрочено, сегодня и завтра, неделя, позже, сдано);
+- **Сдать** — дедлайны Moodle по срочности (просрочено за 14 дней, сегодня и завтра, неделя, позже, сдано за 30 дней) и отдельный свёрнутый блок «Без срока», который в счётчики не идёт;
 - **Конспекты** — паки лекций по предметам и их статус, ссылки на PDF в GitHub;
 - **Ещё** — профиль (имя для BBB, подгруппа, свои вейкворды, вкл/выкл бота), аккаунт Moodle, комнаты BBB, служебное (пульт: люди, парсер, логи, тестовый заход).
+
+Первый вход: пока у «меня» нет ФИО для BBB и подгруппы, вместо приложения экран «Первый вход»; `POST /api/me {fio, subgroup, onboard:true}` заканчивает настройку (как онбординг в Telegram).
 
 «Я» — пользователь `ADMIN_TELEGRAM_ID`. Решения пишутся в `join_intents`, как кнопки T-15 в боте; воркер `bbb` читает их сам.
 
