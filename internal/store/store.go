@@ -328,9 +328,7 @@ func nullTimeArg(t *time.Time) any {
 }
 
 func parseTime(s string) (time.Time, error) {
-	logx.Debugf("store", "parseTime: enter s=%q", s)
 	if s == "" {
-		logx.Debugf("store", "parseTime: empty")
 		return time.Time{}, nil
 	}
 	t, err := time.Parse(time.RFC3339, s)
@@ -342,7 +340,6 @@ func parseTime(s string) (time.Time, error) {
 		}
 	}
 	out := t.UTC()
-	logx.Debugf("store", "parseTime: out=%s", out.Format(time.RFC3339Nano))
 	return out, nil
 }
 
@@ -363,10 +360,8 @@ func parseNullTime(ns sql.NullString) (*time.Time, error) {
 
 func nullStr(ns sql.NullString) string {
 	if !ns.Valid {
-		logx.Debugf("store", "nullStr: invalid")
 		return ""
 	}
-	logx.Debugf("store", "nullStr: value=%q", ns.String)
 	return ns.String
 }
 
@@ -380,7 +375,6 @@ func btoi(b bool) int {
 }
 
 func scanUser(sc scanner) (*model.User, error) {
-	logx.Debugf("store", "scanUser: enter")
 	var u model.User
 	var username, firstName, lastName, fio, createdAt, wakeWords sql.NullString
 	var disabledUntil sql.NullString
@@ -429,12 +423,10 @@ func scanUser(sc scanner) (*model.User, error) {
 		}
 		u.CreatedAt = t
 	}
-	logx.Debugf("store", "scanUser: out telegram_id=%d", u.TelegramID)
 	return &u, nil
 }
 
 func scanLesson(sc scanner) (*model.Lesson, error) {
-	logx.Debugf("store", "scanLesson: enter")
 	var l model.Lesson
 	var date, start, end, begin, finish, discipline, teacher, place, typ sql.NullString
 	var subgroup, online, owner sql.NullInt64
@@ -489,7 +481,6 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 		}
 		l.Finish = t
 	}
-	logx.Debugf("store", "scanLesson: out id=%d online=%v", l.ID, l.Online)
 	return &l, nil
 }
 
@@ -524,7 +515,6 @@ func scanParseRun(sc scanner) (*model.ParseRun, error) {
 }
 
 func scanBBB(sc scanner) (*model.BBBLink, error) {
-	logx.Debugf("store", "scanBBB: enter")
 	var b model.BBBLink
 	var key, url, updated sql.NullString
 	if err := sc.Scan(&key, &url, &updated); err != nil {
@@ -541,7 +531,6 @@ func scanBBB(sc scanner) (*model.BBBLink, error) {
 		}
 		b.UpdatedAt = t
 	}
-	logx.Debugf("store", "scanBBB: out key=%s", b.Key)
 	return &b, nil
 }
 
