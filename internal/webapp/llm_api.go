@@ -220,9 +220,10 @@ func (s *Server) handleQuizRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, runView{Run: *run, Who: access.Name(s.st, run.TelegramID)})
 }
 
-// requeueQuiz — снять отметки «решён / неудачи / прислан текст», поставить
-// «пройти принудительно» и пнуть синк Moodle (подхватит за ~5 с).
-func (s *Server) requeueQuiz(id, cmid int64) error {
+// markQuizForce — снять отметки «решён / неудачи / прислан текст» и поставить
+// «пройти принудительно». Пинок синка здесь не делается: массовая постановка
+// пинает один раз на всех.
+func (s *Server) markQuizForce(id, cmid int64) error {
 	for _, k := range []string{
 		fmt.Sprintf("quiz_solved:%d:%d", id, cmid),
 		fmt.Sprintf("quiz_fail:%d:%d", id, cmid),
@@ -232,7 +233,12 @@ func (s *Server) requeueQuiz(id, cmid int64) error {
 			return err
 		}
 	}
-	if err := s.st.SetSetting(uni.QuizForceKey(id, cmid), "1"); err != nil {
+	return s.st.SetSetting(uni.QuizForceKey(id, cmid), "1")
+}
+
+// requeueQuiz — markQuizForce и пнуть синк Moodle (подхватит за ~5 с).
+func (s *Server) requeueQuiz(id, cmid int64) error {
+	if err := s.markQuizForce(id, cmid); err != nil {
 		return err
 	}
 	return uni.Kick(s.st, id)
@@ -259,6 +265,43 @@ func (s *Server) handleQuizForce(w http.ResponseWriter, r *http.Request) {
 	}
 	logx.Infof("panel", "quiz force tg=%d cmid=%d", s.myID(), req.CMID)
 	writeJSON(w, map[string]any{"ok": true, "message": "Запускаю: бот зайдёт в тест в течение минуты, результат придёт в Telegram."})
+}
+
+// handleQuizForceAll — «Пройти все»: поставить на авторешение каждый несданный
+// тест из «Сдать». Список тот же, что у /api/deadlines, поэтому число совпадает
+// с кнопкой. Пинок синка один раз, если что-то поставлено.
+func (s *Server) handleQuizForceAll(w http.ResponseWriter, r *http.Request) {
+	if !s.needStore(w) {
+		return
+	}
+	id := s.myID()
+	n := 0
+	if s.moodle.Status().Connected {
+		list, err := s.moodle.Deadlines(r.Context(), s.now())
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		for _, d := range list {
+			cmid, perr := strconv.ParseInt(d.ID, 10, 64)
+			if d.Kind != DeadlineQuiz || d.Status == DeadlineSubmitted || perr != nil || cmid <= 0 {
+				continue
+			}
+			if err := s.markQuizForce(id, cmid); err != nil {
+				writeStoreErr(w, err)
+				return
+			}
+			n++
+		}
+	}
+	if n > 0 {
+		if err := uni.Kick(s.st, id); err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+	}
+	logx.Infof("panel", "quiz force all tg=%d n=%d", id, n)
+	writeJSON(w, map[string]any{"ok": true, "count": n})
 }
 
 // handleQuizResolve — админ: перерешать тест любого человека.
