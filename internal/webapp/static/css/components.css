@@ -16,7 +16,7 @@
 }
 .eyebrow::first-letter { text-transform: uppercase; }
 .screen-title {
-  font-family: var(--font-display);
+  font-family: var(--font-display); font-size-adjust: var(--fsa-display);
   font-weight: 700;
   font-size: clamp(28px, 8vw, 36px);
   line-height: 1.05;
@@ -37,7 +37,7 @@
   color: var(--text-3);
   margin: 6px 2px -6px;
 }
-.section-title .count { font-family: var(--font-mono); letter-spacing: 0; text-transform: none; font-weight: 500; }
+.section-title .count { font-family: var(--font-mono); font-size-adjust: var(--fsa-mono); letter-spacing: 0; text-transform: none; font-weight: 500; }
 
 /* ---------- Плашки и чипы ---------- */
 .pill {
@@ -169,6 +169,22 @@
   border: 1px solid var(--line-strong); background: var(--surface-sunk); font-size: 16px;
 }
 .gate input:focus { border-color: var(--acc-line); box-shadow: 0 0 0 3px var(--acc-soft); }
+/* Письмо и прочие textarea растут под текст; rows в разметке — запасной
+   вариант для браузеров без field-sizing. */
+textarea.input {
+  field-sizing: content;
+  min-block-size: calc(6lh + 24px);
+  max-block-size: calc(18lh + 24px);
+  resize: vertical;
+}
+/* Ошибку поля показываем только после того, как человек его тронул. */
+.input:user-invalid, .gate input:user-invalid {
+  border-color: var(--coral-line);
+  background: var(--coral-soft);
+}
+.input:user-invalid:focus, .gate input:user-invalid:focus { box-shadow: 0 0 0 3px var(--coral-soft); }
+.field-error { display: none; color: var(--coral-text); font-size: 13px; font-weight: 500; }
+.field:has(:user-invalid) .field-error { display: block; }
 .form-error { color: var(--coral-text); font-size: 14px; font-weight: 500; }
 .form-ok { color: var(--acc-text); font-size: 14px; font-weight: 500; }
 .form { display: flex; flex-direction: column; gap: 14px; }
@@ -414,7 +430,23 @@
   animation: toast-in 0.22s var(--ease);
   pointer-events: auto;
 }
-.toast .icon { margin-top: 1px; }
+.toast .icon { margin-top: 1px; flex: none; }
+.toast-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.toast-close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  min-width: 32px;
+  min-height: 32px;
+  margin: -6px -8px -6px 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.toast-close:hover { background: var(--surface-2); color: var(--text); }
+.toast-close .icon { margin: 0; color: inherit !important; }
 .toast-ok .icon { color: var(--acc-text); }
 .toast-error { border-color: var(--coral-line); }
 .toast-error .icon { color: var(--coral-text); }
@@ -430,3 +462,55 @@
 
 /* Двойной тап по переключателям не выделяет текст вокруг. */
 .join, .segmented button, .wday, .nav-link, .due-stat, .btn { -webkit-user-select: none; user-select: none; }
+
+/* ---------- Диалог подтверждения (js/dialog.js) ---------- */
+.dialog {
+  width: min(400px, calc(100% - 2 * var(--gutter)));
+  max-height: calc(100dvh - 2 * var(--gutter));
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.6);
+  opacity: 0;
+  transition-property: opacity, translate, display, overlay;
+  transition-duration: 0.18s;
+  transition-timing-function: var(--ease);
+  transition-behavior: allow-discrete;
+}
+.dialog[open] {
+  opacity: 1;
+  @starting-style { opacity: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .dialog { translate: 0 10px; }
+  .dialog[open] {
+    translate: 0 0;
+    @starting-style { translate: 0 10px; }
+  }
+}
+.dialog:modal { overscroll-behavior: contain; }
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0);
+  overflow: hidden;
+  overscroll-behavior: contain;
+  transition-property: background-color, display, overlay;
+  transition-duration: 0.18s;
+  transition-behavior: allow-discrete;
+}
+.dialog[open]::backdrop {
+  background: rgba(4, 6, 5, 0.62);
+  @starting-style { background: rgba(4, 6, 5, 0); }
+}
+.dialog-body { display: flex; flex-direction: column; gap: 12px; padding: 22px 20px 18px; }
+.dialog-title {
+  font-family: var(--font-display); font-size-adjust: var(--fsa-display);
+  font-weight: 700;
+  font-size: 19px;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+.dialog-text { color: var(--text-2); text-wrap: pretty; }
+.dialog-actions { margin-top: 6px; }

@@ -2,9 +2,10 @@
 import { api } from "../api.js";
 import { html, setHTML, str } from "../dom.js";
 import { icon } from "../icons.js";
-import { ago, duration, now, syncClock, whenLabel } from "../format.js";
+import { ago, duration, now, plural, syncClock, whenLabel } from "../format.js";
 import { app, busy, empty, errorBlock, head, skeleton } from "../ui.js";
 import { toast } from "../toast.js";
+import { confirmDialog } from "../dialog.js";
 
 const GROUPS = [
   { id: "overdue", title: "Просрочено", ico: "warn" },
@@ -197,7 +198,13 @@ export function mountDue(root, ctx) {
     const qa = ev.target.closest("[data-quiz-force-all]");
     if (qa) {
       const n = Number(qa.dataset.count) || 0;
-      if (!n || !confirm(`Поставить на авторешение ${n} несданных тестов? Бот решит их по очереди, результаты придут в Telegram.`)) return;
+      if (!n) return;
+      const yes = await confirmDialog({
+        title: `Решить ${n} ${plural(n, "тест", "теста", "тестов")}?`,
+        text: "Бот поставит все несданные тесты в очередь и решит их по одному. Результаты придут в Telegram.",
+        ok: "В очередь",
+      });
+      if (!yes || !alive) return;
       busy(qa, true);
       try {
         const r = await api("api/quiz/force-all", { method: "POST" });
