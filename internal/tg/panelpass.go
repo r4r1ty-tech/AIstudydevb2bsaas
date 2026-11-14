@@ -32,6 +32,7 @@ func (b *Bot) sendPanelPass(id, chatID int64) error {
 		logx.Warnf("tg", "panel pass: нет vault tg=%d", id)
 		return b.send(chatID, panelPassNoKey, nil)
 	}
+	b.setMenuButton(id)
 	pw, until := panelpass.Issue(b.vault.Derive(panelpass.Label), id, b.now())
 	text := fmt.Sprintf("🔑 Пароль в панель: <code>%s</code>\n"+
 		"Действует до %s. Потом жми «%s» ещё раз — каждый час новый.\n"+
