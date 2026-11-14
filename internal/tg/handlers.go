@@ -188,6 +188,12 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 		return b.handleUniPassword(from.Id, ctx.EffectiveMessage)
 	}
 	logx.Debugf("tg", "onText: tg=%d chat=%d text=%q", from.Id, chatID, text)
+	// Пароль в панель выдаём всем из вайтлиста, даже до онбординга:
+	// имя и подгруппу можно задать и в самой панели.
+	if text == btnPanelPass {
+		b.clearAwait(from.Id)
+		return b.sendPanelPass(from.Id, chatID)
+	}
 
 	if url := extractBBBURL(text); url != "" {
 		if b.peekAwait(from.Id) == awaitTestURL {

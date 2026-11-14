@@ -74,6 +74,8 @@ type settingsResponse struct {
 	Timezone  string `json:"timezone"`
 	Demo      bool   `json:"demo"`
 	BBBPrefix string `json:"bbb_prefix"`
+	// IsAdmin — показывать ли блок «Служебное».
+	IsAdmin bool `json:"is_admin"`
 }
 
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
@@ -523,6 +525,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		Timezone:  s.cfg.Timezone,
 		Demo:      s.demo,
 		BBBPrefix: bbbPrefix,
+		IsAdmin:   s.viewerIsAdmin(),
 	})
 }
 

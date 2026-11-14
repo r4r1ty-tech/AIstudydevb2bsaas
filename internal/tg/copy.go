@@ -42,12 +42,13 @@ const (
 	btnWords       = "Слова"
 	btnHelp        = "Помощь"
 	btnTasks       = "Сдать"
+	btnPanelPass   = "🔑 Пароль в панель"
 )
 
 func isMenuLabel(text string) bool {
 	logx.Debugf("tg", "isMenuLabel: %q", strings.TrimSpace(text))
 	switch strings.TrimSpace(text) {
-	case btnToday, btnTodayOld, btnNotes, btnSettings, btnSettingsOld, btnLinks, btnWords, btnHelp, btnTasks:
+	case btnToday, btnTodayOld, btnNotes, btnSettings, btnSettingsOld, btnLinks, btnWords, btnHelp, btnTasks, btnPanelPass:
 		return true
 	default:
 		return false

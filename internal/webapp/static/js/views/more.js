@@ -114,12 +114,13 @@ export function mountMore(root, ctx) {
       ${section("account", "key", "Аккаунт универа", "Moodle: тесты и задания со сроками; ЛК: расписание, подгруппы и ссылки BBB", html`<div id="acc-body" class="stack-lg">${accountBody(st.moodle)}</div>`)}
       ${section("profile", "user", "Профиль", "Как бот заходит за вас", profileBody(st.me))}
       ${section("rooms", "door", "Комнаты BBB", "Ссылки по предметам — подставляются на каждую пару", roomsBody(st.rooms))}
-      <details class="card fold service" id="service" ${st.serviceOpen ? "open" : ""}>
+      ${app.settings?.is_admin ? html`<details class="card fold service" id="service" ${st.serviceOpen ? "open" : ""}>
         <summary>${icon("tools")}Служебное${icon("chev", "chev")}</summary>
         <div id="service-root"></div>
-      </details>`);
+      </details>` : ""}`);
     const det = root.querySelector("#service");
     stopService = null;
+    if (!det) return;
     det.addEventListener("toggle", () => {
       st.serviceOpen = det.open;
       if (det.open && !stopService) stopService = mountService(root.querySelector("#service-root"));

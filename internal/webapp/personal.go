@@ -12,7 +12,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-// Личная панель: «я» — пользователь с telegram id cfg.AdminID. Решения по парам
+// Личная панель: «я» — тот, кто вошёл (viewer, по личному паролю), иначе cfg.AdminID. Решения по парам
 // живут в join_intents, как у кнопок T-15 в боте; воркер bbb читает их сам.
 
 const (
@@ -125,6 +125,9 @@ type mine struct {
 }
 
 func (s *Server) myID() int64 {
+	if s.viewer != 0 {
+		return s.viewer
+	}
 	if s.cfg == nil {
 		return 0
 	}
