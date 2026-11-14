@@ -46,15 +46,30 @@ func (s *Server) needStore(w http.ResponseWriter) bool {
 	return true
 }
 
-// visibleProviders — провайдеры, доступные тому, кто вошёл.
+// visibleProviders — провайдеры, доступные тому, кто вошёл. Не админ видит
+// только свои ключи (подпись = его фамилия) и только провайдеров, где они есть.
 func (s *Server) visibleProviders() []llm.Provider {
 	admin := s.viewerIsAdmin()
+	owner := access.KeyOwner(s.st, s.myID())
 	var out []llm.Provider
 	for _, p := range llm.Providers(s.cfg) {
 		if p.AdminOnly && !admin {
 			continue
 		}
-		out = append(out, p.Public(admin))
+		pub := p.Public(admin)
+		if !admin {
+			var mine []llm.KeyInfo
+			for i, ki := range pub.KeyInfo {
+				if llm.OwnsKey(p.Keys[i], owner) {
+					mine = append(mine, ki)
+				}
+			}
+			if len(mine) == 0 {
+				continue
+			}
+			pub.KeyInfo = mine
+		}
+		out = append(out, pub)
 	}
 	return out
 }
@@ -123,6 +138,23 @@ func (s *Server) decodeChoice(w http.ResponseWriter, r *http.Request) (llm.Choic
 		writeErr(w, http.StatusBadRequest, "нет такого ключа")
 		return ch, false
 	}
+	// Не админ — только свои ключи: чужой выбрать нельзя, а «любой» значит
+	// «любой из моих».
+	if !s.viewerIsAdmin() {
+		owner := access.KeyOwner(s.st, s.myID())
+		if ch.Key > 0 && !llm.OwnsKey(p.Keys[ch.Key-1], owner) {
+			writeErr(w, http.StatusForbidden, "это не твой ключ")
+			return ch, false
+		}
+		own := false
+		for _, k := range p.Keys {
+			own = own || llm.OwnsKey(k, owner)
+		}
+		if !own {
+			writeErr(w, http.StatusForbidden, "у тебя нет ключей этого провайдера")
+			return ch, false
+		}
+	}
 	return ch, true
 }
 
@@ -150,6 +182,18 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 	if ch.Provider == "" {
 		writeErr(w, http.StatusBadRequest, "выбери провайдера")
 		return
+	}
+	// «Любой» у не админа — проверяем его первый ключ, а не перебор чужих.
+	if ch.Key == 0 && !s.viewerIsAdmin() {
+		if p, ok := llm.Find(s.cfg, ch.Provider); ok {
+			owner := access.KeyOwner(s.st, s.myID())
+			for i, k := range p.Keys {
+				if llm.OwnsKey(k, owner) {
+					ch.Key = i + 1
+					break
+				}
+			}
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()

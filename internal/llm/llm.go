@@ -5,7 +5,7 @@
 // Провайдеры:
 //   - gemini — Google AI Studio (GEMINI_API_KEYS), бесплатный тариф: основная цепочка всех;
 //   - opencode — OpenCode Zen (OPENCODE_API_KEY), бесплатные модели: запасной вариант;
-//   - cheaper — LLM_API_* (cheaperinference): только у админа, по его выбору.
+//   - cheaper — LLM_API_* (cheaperinference: muse-spark-1.3-contributor → glm-5.3-flash): только админ.
 package llm
 
 import (
@@ -39,9 +39,36 @@ const (
 // бесплатном тарифе: hydrogen решает лучше всех (~1 мин), 3.6-flash ~7 с,
 // 3.5-flash-lite ~2 с; argon/carbon/pro на бесплатном тарифе отвечают 429.
 var (
-	GeminiModels   = []string{"gemini-4-hydrogen", "gemini-3.6-flash", "gemini-3.5-flash-lite"}
-	OpenCodeModels = []string{"glm-5.3-flash-free", "deepseek-v4.1-flash-free", "minimax-m3.1-flash-free"}
+	GeminiModels = []string{"gemini-4-hydrogen", "gemini-3.6-flash", "gemini-3.5-flash-lite"}
+	// Лимит бесплатных моделей Zen общий на аккаунт (FreeUsageLimitError,
+	// Retry-After ~9 ч), а не на модель: запасные модели после 429 только
+	// жгут запросы. Одна модель — та, что обычно отвечает.
+	OpenCodeModels = []string{"glm-5.3-flash-free"}
+	// CheaperModels — cheaperinference (только админ): обе дешёвые, умные и
+	// видят картинки. Проверено 2026-11-14 на Шенноне-Фано и таблице кода с
+	// картинки — обе верно. muse-spark-1.3-contributor ($0.085/$0.17 за 1M)
+	// — первая, glm-5.3-flash ($0.03/$0.053) — следом.
+	CheaperModels = []string{"muse-spark-1.3-contributor", "glm-5.3-flash"}
 )
+
+// cheaperModels — для cheaperinference CheaperModels и LLM_MODEL в конце,
+// если его там нет; у другого провайдера за LLM_API_URL — один LLM_MODEL.
+func cheaperModels(llmModel, url string) []string {
+	var list []string
+	if strings.Contains(strings.ToLower(url), "cheaperinference") {
+		list = append(list, CheaperModels...)
+	}
+	list = append(list, strings.TrimSpace(llmModel))
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range list {
+		if m != "" && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
+}
 
 // Key — ключ и подпись владельца («Зуев»). В env: «Подпись:ключ».
 type Key struct {
@@ -142,10 +169,7 @@ func Providers(cfg *config.Config) []Provider {
 		out = append(out, Provider{ID: OpenCode, Name: "OpenCode Zen (бесплатные модели)", URL: openCodeURL, Keys: keys, Models: OpenCodeModels})
 	}
 	if k := strings.TrimSpace(cfg.LLMAPIKey); k != "" && strings.TrimSpace(cfg.LLMAPIURL) != "" {
-		var models []string
-		if m := strings.TrimSpace(cfg.LLMModel); m != "" {
-			models = []string{m}
-		}
+		models := cheaperModels(cfg.LLMModel, cfg.LLMAPIURL)
 		out = append(out, Provider{ID: Cheaper, Name: "Ключ админа LLM_API_* (только админ)", URL: cfg.LLMAPIURL,
 			Keys: []Key{{Label: "админ", Secret: k}}, Models: models, AdminOnly: true})
 	}
@@ -210,32 +234,74 @@ func DefaultChain(cfg *config.Config) []Target {
 	return out
 }
 
-// ChainFor — сначала выбор человека: его ключ, потом остальные ключи того же
-// провайдера на этой модели, потом общая цепочка (все модели × все ключи).
-// cheaper (AdminOnly) — только при admin=true.
-func ChainFor(cfg *config.Config, ch Choice, admin bool) []Target {
-	def := DefaultChain(cfg)
-	if ch.Provider == "" {
-		return def
-	}
-	p, ok := Find(cfg, ch.Provider)
-	if !ok || (p.AdminOnly && !admin) {
-		return def
-	}
-	model := strings.TrimSpace(ch.Model)
-	if model == "" && len(p.Models) > 0 {
-		model = p.Models[0]
-	}
-	if model == "" {
-		return def
-	}
-	first := keyFirst(p, model, ch.Key)
-	out := append([]Target{}, first...)
-	for _, t := range def {
-		if t.Provider == p.ID && t.Model == model {
-			continue
+// OwnsKey — ключ подписан этим человеком (подпись = фамилия, без регистра).
+func OwnsKey(k Key, owner string) bool {
+	owner = strings.TrimSpace(owner)
+	return owner != "" && strings.EqualFold(strings.TrimSpace(k.Label), owner)
+}
+
+// ChainFor — цепочка для тестов человека.
+//
+// Не админ — жёстко только свои ключи (подпись ключа = owner, его фамилия):
+// выбранные модель и ключ первыми, потом его же ключи на остальных моделях.
+// Чужих ключей и cheaper нет; своих ключей нет — пустая цепочка.
+//
+// Админ — его выбор первым, а если не ответил: cheaper (muse-spark-1.3-
+// contributor первой), потом все ключи всех моделей.
+func ChainFor(cfg *config.Config, ch Choice, admin bool, owner string) []Target {
+	var out []Target
+	seen := map[string]bool{}
+	add := func(ts ...Target) {
+		for _, t := range ts {
+			k := fmt.Sprintf("%s|%s|%d", t.Provider, t.Model, t.KeyIdx)
+			if !seen[k] {
+				seen[k] = true
+				out = append(out, t)
+			}
 		}
-		out = append(out, t)
+	}
+	provs := Providers(cfg)
+
+	// выбор человека
+	if p, ok := Find(cfg, ch.Provider); ok && (admin || !p.AdminOnly) {
+		model := strings.TrimSpace(ch.Model)
+		if model == "" && len(p.Models) > 0 {
+			model = p.Models[0]
+		}
+		if model != "" {
+			for _, t := range keyFirst(p, model, ch.Key) {
+				if admin || OwnsKey(p.Keys[t.KeyIdx], owner) {
+					add(t)
+				}
+			}
+		}
+	}
+
+	if !admin {
+		for _, p := range provs {
+			if p.AdminOnly {
+				continue
+			}
+			for _, m := range p.Models {
+				for i, k := range p.Keys {
+					if OwnsKey(k, owner) {
+						add(target(p, m, i))
+					}
+				}
+			}
+		}
+		return out
+	}
+
+	for _, p := range provs {
+		if p.AdminOnly {
+			add(targets(p, p.Models)...)
+		}
+	}
+	for _, p := range provs {
+		if !p.AdminOnly {
+			add(targets(p, p.Models)...)
+		}
 	}
 	return out
 }
