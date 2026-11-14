@@ -28,6 +28,16 @@ const (
 	Parsed = "parsed" // ключей ИИ нет: прислали текст вопросов
 )
 
+// Search — один веб-запрос решателя.
+type Search struct {
+	Slot     int    `json:"slot"`
+	Query    string `json:"query"`
+	Provider string `json:"provider,omitempty"`
+	Hits     int    `json:"hits"`
+	Error    string `json:"error,omitempty"`
+	Refine   bool   `json:"refine,omitempty"` // второй проход: запрос придумала модель
+}
+
 type Page struct {
 	Page     int            `json:"page"`
 	Attempts []llm.Attempt  `json:"attempts"`
@@ -35,6 +45,9 @@ type Page struct {
 	Raw      string         `json:"raw,omitempty"`
 	Answers  map[int]string `json:"answers,omitempty"`
 	Error    string         `json:"error,omitempty"`
+	Search   []Search       `json:"search,omitempty"`
+	Refined  []int          `json:"refined,omitempty"` // слоты, ответ на которые поменялся в раундах уточнения
+	Notes    []string       `json:"notes,omitempty"`   // рисунки условия: распознаны или нет
 }
 
 type Run struct {

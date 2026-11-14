@@ -85,6 +85,13 @@ type Config struct {
 	SecretKeyFile    string // SECRET_KEY_FILE: иначе ключ в файле (создаётся сам, 0600)
 	LKBaseURL        string // LK_BASE_URL: https://lk.ssau.ru
 	MoodleBaseURL    string // MOODLE_BASE_URL: https://do.ssau.ru/moodle
+	// Веб-поиск для решателя тестов (internal/websearch). Ключи/адрес
+	// включают поставщика; без них работает только DuckDuckGo lite.
+	TavilyAPIKey string // TAVILY_API_KEY
+	ExaAPIKey    string // EXA_API_KEY
+	SearXNGURL   string // SEARXNG_URL: свой SearXNG с format=json
+	WebSearch    bool   // WEBSEARCH: 0 — решатель не ищет в интернете (по умолчанию 1)
+	WebSearchDDG bool   // WEBSEARCH_DDG: 0 — без запасного DuckDuckGo (по умолчанию 1)
 }
 
 func Load() (*Config, error) {
@@ -126,6 +133,11 @@ func Load() (*Config, error) {
 		GrokAPIURL:       strEnv("GROK_API_URL", "https://api.x.ai/v1"),
 		GrokModel:        strEnv("GROK_MODEL", "grok-2-vision-1212"),
 		GroqAPIKey:       strEnv("GROQ_API_KEY", ""),
+		TavilyAPIKey:     strEnv("TAVILY_API_KEY", ""),
+		ExaAPIKey:        strEnv("EXA_API_KEY", ""),
+		SearXNGURL:       strings.TrimRight(strEnv("SEARXNG_URL", ""), "/"),
+		WebSearch:        boolEnv("WEBSEARCH", true),
+		WebSearchDDG:     boolEnv("WEBSEARCH_DDG", true),
 		GroqAPIURL:       strEnv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
 		GroqVisionModel:  strEnv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
 		GroqSTTModel:     strEnv("GROQ_STT_MODEL", "whisper-large-v3"),

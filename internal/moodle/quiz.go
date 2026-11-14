@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/net/html"
 )
 
 var (
@@ -48,14 +49,16 @@ type AttemptPage struct {
 
 // QuizQuestion — разобранный блок вопроса .que.
 type QuizQuestion struct {
-	Slot              int           `json:"slot"`
-	QubaID            int64         `json:"quba_id"`
-	QType             string        `json:"qtype"`     // multichoice, shortanswer, numerical, match, truefalse
-	Behaviour         string        `json:"behaviour"` // adaptive, deferredfeedback
-	State             string        `json:"state"`     // notyetanswered, complete, correct, incorrect
-	SequenceCheck     int           `json:"sequence_check"`
-	Text              string        `json:"text"`
-	Prompt            string        `json:"prompt,omitempty"`
+	Slot          int    `json:"slot"`
+	QubaID        int64  `json:"quba_id"`
+	QType         string `json:"qtype"`     // multichoice, shortanswer, numerical, match, truefalse
+	Behaviour     string `json:"behaviour"` // adaptive, deferredfeedback
+	State         string `json:"state"`     // notyetanswered, complete, correct, incorrect
+	SequenceCheck int    `json:"sequence_check"`
+	Text          string `json:"text"`
+	Prompt        string `json:"prompt,omitempty"`
+	// Images — адреса рисунков условия по порядку («[рисунок N]» в Text).
+	Images            []string      `json:"images,omitempty"`
 	Choices           []QuizChoice  `json:"choices,omitempty"`
 	InputName         string        `json:"input_name,omitempty"`
 	InputValue        string        `json:"input_value,omitempty"`
@@ -329,7 +332,7 @@ func parseQuestion(que *goquery.Selection) QuizQuestion {
 	}
 
 	// Текст вопроса со склейкой битовых строк
-	q.Text = extractQText(que.Find(".qtext"))
+	q.Text, q.Images = extractQTextImages(que.Find(".qtext"), "")
 	q.Prompt = clean(que.Find(".prompt").Text())
 
 	// Варианты для multichoice и truefalse
@@ -415,7 +418,13 @@ func findChoiceLabel(in *goquery.Selection) string {
 			}
 			lblClone := lbl.Clone()
 			lblClone.Find(".answernumber, .accesshide").Remove()
-			return clean(lblClone.Text())
+			if t := clean(lblClone.Text()); t != "" {
+				return t
+			}
+			if alt := clean(lblClone.Find("img").AttrOr("alt", "")); alt != "" {
+				return "[рисунок: " + alt + "]"
+			}
+			return ""
 		}
 	}
 	parent := in.Closest(".r0, .r1, div, p")
@@ -441,37 +450,153 @@ func isBitString(s string) bool {
 	return true
 }
 
-// extractQText парсит текст вопроса .qtext и аккуратно склеивает соседние абзацы битовых строк.
+// extractQText — текст вопроса .qtext по порядку блоков: абзацы, списки,
+// таблицы (строками «a | b | c») и рисунки (заглушка «[рисунок N]», адрес —
+// в images). Соседние строки из одних битов склеиваются без разделителя:
+// длинные кодовые последовательности Moodle режет на абзацы.
 func extractQText(sel *goquery.Selection) string {
+	t, _ := extractQTextImages(sel, "")
+	return t
+}
+
+func extractQTextImages(sel *goquery.Selection, base string) (string, []string) {
 	if sel.Length() == 0 {
-		return ""
+		return "", nil
 	}
-	var paragraphs []string
-	sel.Find("p").Each(func(_ int, p *goquery.Selection) {
-		t := clean(p.Text())
-		if t != "" {
-			paragraphs = append(paragraphs, t)
-		}
-	})
-	if len(paragraphs) == 0 {
-		return clean(sel.Text())
+	w := &qtextWalker{base: base}
+	for _, n := range sel.Nodes {
+		w.walk(n)
 	}
+	w.flush()
 
 	var b strings.Builder
 	prevIsBits := false
-	for i, p := range paragraphs {
-		currIsBits := isBitString(p)
-		if i > 0 {
-			if prevIsBits && currIsBits {
-				// Соседние абзацы битовых строк склеиваем без пробела и перевода строки
-			} else {
-				b.WriteString("\n")
-			}
+	for i, line := range w.lines {
+		currIsBits := isBitString(line)
+		if i > 0 && !(prevIsBits && currIsBits) {
+			b.WriteString("\n")
 		}
-		b.WriteString(p)
+		b.WriteString(line)
 		prevIsBits = currIsBits
 	}
-	return b.String()
+	return b.String(), w.images
+}
+
+type qtextWalker struct {
+	base   string
+	cur    strings.Builder
+	lines  []string
+	images []string
+}
+
+func (w *qtextWalker) flush() {
+	if t := clean(w.cur.String()); t != "" {
+		w.lines = append(w.lines, t)
+	}
+	w.cur.Reset()
+}
+
+var qtextBlocks = map[string]bool{
+	"p": true, "div": true, "li": true, "ul": true, "ol": true, "pre": true, "br": true,
+	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true, "blockquote": true,
+}
+
+func (w *qtextWalker) walk(n *html.Node) {
+	switch n.Type {
+	case html.TextNode:
+		w.cur.WriteString(n.Data)
+		return
+	case html.ElementNode:
+	default:
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			w.walk(c)
+		}
+		return
+	}
+	switch n.Data {
+	case "script", "style":
+		return
+	case "table":
+		w.flush()
+		w.table(n)
+		return
+	case "img":
+		w.image(n)
+		return
+	}
+	block := qtextBlocks[n.Data]
+	if block {
+		w.flush()
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		w.walk(c)
+	}
+	if block {
+		w.flush()
+	}
+}
+
+func (w *qtextWalker) image(n *html.Node) {
+	sel := goquery.NewDocumentFromNode(n).Selection
+	src := strings.TrimSpace(sel.AttrOr("src", ""))
+	alt := clean(sel.AttrOr("alt", ""))
+	if src == "" || strings.HasPrefix(src, "data:") {
+		if alt != "" {
+			fmt.Fprintf(&w.cur, " [рисунок: %s] ", alt)
+		}
+		return
+	}
+	if w.base != "" {
+		if bu, err := url.Parse(w.base); err == nil {
+			if u, err := bu.Parse(src); err == nil {
+				src = u.String()
+			}
+		}
+	}
+	w.images = append(w.images, src)
+	if alt != "" && !strings.EqualFold(alt, "image") {
+		fmt.Fprintf(&w.cur, " [рисунок %d: %s] ", len(w.images), alt)
+	} else {
+		fmt.Fprintf(&w.cur, " [рисунок %d] ", len(w.images))
+	}
+}
+
+// table — каждая строка таблицы отдельной строкой «ячейка | ячейка».
+func (w *qtextWalker) table(n *html.Node) {
+	goquery.NewDocumentFromNode(n).Find("tr").Each(func(_ int, tr *goquery.Selection) {
+		var cells []string
+		tr.Children().Each(func(_ int, td *goquery.Selection) {
+			if td.Is("td, th") {
+				// Общая нумерация рисунков с остальным текстом.
+				sub := &qtextWalker{base: w.base, images: w.images}
+				for _, c := range td.Nodes {
+					sub.walk(c)
+				}
+				sub.flush()
+				w.images = sub.images
+				cells = append(cells, strings.Join(sub.lines, " "))
+			}
+		})
+		if len(cells) > 0 {
+			w.lines = append(w.lines, strings.Join(cells, " | "))
+		}
+	})
+}
+
+// FetchFile скачивает файл Moodle (рисунок вопроса из pluginfile.php) в
+// сессии пользователя. Возвращает тело и Content-Type.
+func (c *Client) FetchFile(ctx context.Context, src string) ([]byte, string, error) {
+	resp, body, err := c.s.Get(ctx, src, "image/*,*/*")
+	if err != nil {
+		return nil, "", err
+	}
+	if onLoginPage(resp) {
+		return nil, "", ErrUnauthorized
+	}
+	if resp.StatusCode/100 != 2 {
+		return nil, "", fmt.Errorf("moodle: file status %d", resp.StatusCode)
+	}
+	return body, resp.Header.Get("Content-Type"), nil
 }
 
 // SubmitAnswers отправляет ответы формы #responseform на /mod/quiz/processattempt.php?cmid=<cmid>.

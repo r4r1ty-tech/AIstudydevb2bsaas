@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/websearch"
 	"html"
 	"sort"
 	"strconv"
@@ -49,6 +50,10 @@ type Syncer struct {
 	MoodleBase string
 
 	Cfg *config.Config
+	// Web — веб-поиск решателя тестов; nil — собрать из Cfg.
+	Web *websearch.Searcher
+	// DescribeImage — текст рисунка вопроса (для тестов); nil — Moodle + vision.
+	DescribeImage func(ctx context.Context, src string) (string, error)
 
 	mu       sync.Mutex
 	lastFull map[int64]time.Time

@@ -2,7 +2,6 @@ package uni
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"html"
 	"os"
@@ -266,9 +265,10 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	usedModels := map[string]bool{}
 	var solveErr error
 
+	ws := s.webSearcher()
 	for i, p := range pages {
-		answers, res, err := s.solveQuestionsWithLLM(ctx, chain, it.Course, materials, p.Questions)
-		pl := quizlog.Page{Page: p.Page, Attempts: res.Attempts, Raw: res.Text}
+		answers, res, pl, err := s.solvePage(ctx, c, ws, chain, it.Course, materials, p.Questions)
+		pl.Page = p.Page
 		if res.Used != nil {
 			pl.Used = res.Used.String()
 			usedModels[res.Used.Provider+"/"+res.Used.Model] = true
@@ -446,122 +446,6 @@ func matchDiscipline(discipline, course string) bool {
 
 func cleanStr(s string) string {
 	return strings.Join(strings.Fields(s), " ")
-}
-
-type llmAnswerItem struct {
-	Slot    int               `json:"slot"`
-	Text    string            `json:"text,omitempty"`
-	Choice  string            `json:"choice,omitempty"`
-	Choices []string          `json:"choices,omitempty"`
-	Matches map[string]string `json:"matches,omitempty"`
-}
-
-type llmSolveResponse struct {
-	Answers []llmAnswerItem `json:"answers"`
-}
-
-func (s *Syncer) solveQuestionsWithLLM(ctx context.Context, chain []llm.Target, course string, materials string, questions []moodle.QuizQuestion) (map[int]moodle.QuizAnswer, llm.Result, error) {
-	var res llm.Result
-	if len(questions) == 0 {
-		return nil, res, nil
-	}
-
-	sysPrompt := "Ты — отличник университета. Твоя задача — решить тест по дисциплине на основе предоставленных материалов лекций (конспектов и транскриптов) и условий задач.\n" +
-		"Отвечай СТРОГО в формате JSON без какого-либо вступительного или пояснительного текста:\n" +
-		"{\n" +
-		"  \"answers\": [\n" +
-		"    {\n" +
-		"      \"slot\": 1,\n" +
-		"      \"text\": \"значение\",\n" +
-		"      \"choice\": \"0\",\n" +
-		"      \"choices\": [\"choice0\", \"choice1\"],\n" +
-		"      \"matches\": {\"q123:1_sub0\": \"1\"}\n" +
-		"    }\n" +
-		"  ]\n" +
-		"}\n" +
-		"Правила:\n" +
-		"- Для multichoice (один ответ) укажи в \"choice\" значение value или имя выбранного варианта.\n" +
-		"- Для multichoice (несколько ответов) укажи в \"choices\" список выбранных вариантов.\n" +
-		"- Для shortanswer или numerical укажи точный ответ в поле \"text\" без лишних пробелов и точек.\n" +
-		"- Для match укажи в \"matches\" словарь имя_поля -> значение_варианта."
-
-	var userPrompt strings.Builder
-	userPrompt.WriteString(fmt.Sprintf("Курс: %s\n\n", course))
-	if materials != "" {
-		userPrompt.WriteString("--- Материалы курса (конспекты/транскрипты) ---\n")
-		userPrompt.WriteString(materials)
-		userPrompt.WriteString("\n\n")
-	}
-	userPrompt.WriteString("--- Вопросы теста ---\n")
-	for _, q := range questions {
-		userPrompt.WriteString(fmt.Sprintf("Вопрос %d (тип: %s):\n%s\n", q.Slot, q.QType, q.Text))
-		if q.Prompt != "" {
-			userPrompt.WriteString(fmt.Sprintf("Подсказка: %s\n", q.Prompt))
-		}
-		if len(q.Choices) > 0 {
-			userPrompt.WriteString("Варианты ответа:\n")
-			for _, ch := range q.Choices {
-				userPrompt.WriteString(fmt.Sprintf("- [%s] %s\n", ch.Value, ch.Text))
-			}
-		}
-		if len(q.MatchOptions) > 0 {
-			userPrompt.WriteString("Соответствия:\n")
-			for _, mo := range q.MatchOptions {
-				userPrompt.WriteString(fmt.Sprintf("- %s (поле: %s)\n", mo.Question, mo.Name))
-				for _, opt := range mo.Choices {
-					userPrompt.WriteString(fmt.Sprintf("    opt [%s]: %s\n", opt.Value, opt.Text))
-				}
-			}
-		}
-		userPrompt.WriteString("\n")
-	}
-
-	res, err := llm.Ask(ctx, chain, sysPrompt, userPrompt.String())
-	if err != nil {
-		return nil, res, fmt.Errorf("ask llm: %w", err)
-	}
-	respText := res.Text
-
-	cleanJSON := strings.TrimSpace(respText)
-	if strings.HasPrefix(cleanJSON, "```") {
-		cleanJSON = strings.TrimPrefix(cleanJSON, "```json")
-		cleanJSON = strings.TrimPrefix(cleanJSON, "```")
-		cleanJSON = strings.TrimSuffix(cleanJSON, "```")
-		cleanJSON = strings.TrimSpace(cleanJSON)
-	}
-
-	var parsed llmSolveResponse
-	if err := json.Unmarshal([]byte(cleanJSON), &parsed); err != nil {
-		return nil, res, fmt.Errorf("ответ ИИ не JSON: %w", err)
-	}
-
-	out := make(map[int]moodle.QuizAnswer, len(parsed.Answers))
-	for _, a := range parsed.Answers {
-		// Сопоставляем ответ с вопросом
-		for _, q := range questions {
-			if q.Slot == a.Slot {
-				ans := moodle.QuizAnswer{
-					Text:    strings.TrimSpace(a.Text),
-					Choice:  strings.TrimSpace(a.Choice),
-					Choices: a.Choices,
-					Matches: a.Matches,
-				}
-				// Если для radio передан текст варианта вместо индекса
-				if ans.Choice != "" && len(q.Choices) > 0 && !q.Choices[0].IsMulti {
-					for _, ch := range q.Choices {
-						if strings.EqualFold(strings.TrimSpace(ch.Text), ans.Choice) {
-							ans.Choice = ch.Value
-							break
-						}
-					}
-				}
-				out[a.Slot] = ans
-				break
-			}
-		}
-	}
-
-	return out, res, nil
 }
 
 func formatAnswerText(q moodle.QuizQuestion, ans moodle.QuizAnswer) string {

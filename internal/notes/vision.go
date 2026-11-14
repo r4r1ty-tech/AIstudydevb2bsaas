@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
@@ -27,6 +28,12 @@ type visionReq struct {
 	Model    string      `json:"model"`
 	Messages []visionMsg `json:"messages"`
 }
+
+// Gemini через OpenAI-совместимый вход AI Studio.
+const (
+	GeminiOpenAIURL   = "https://generativelanguage.googleapis.com/v1beta/openai"
+	GeminiVisionModel = "gemini-3.6-flash"
+)
 
 type visionProvider struct {
 	name  string
@@ -62,6 +69,14 @@ func visionProviders(cfg *config.Config) []visionProvider {
 			model = "grok-2-vision-1212"
 		}
 		out = append(out, visionProvider{name: "grok", key: k, base: base, model: model})
+	}
+	// Gemini (бесплатный AI Studio) тоже видит картинки; ключи по очереди —
+	// у бесплатных быстро кончается лимит.
+	for i, k := range llm.ParseKeys(cfg.GeminiAPIKeys...) {
+		if i >= 4 {
+			break
+		}
+		out = append(out, visionProvider{name: "gemini/" + k.Label, key: k.Secret, base: GeminiOpenAIURL, model: GeminiVisionModel})
 	}
 	logx.Debugf("notes", "visionProviders: count=%d", len(out))
 	for i, p := range out {
@@ -148,14 +163,45 @@ func describeOne(ctx context.Context, prov visionProvider, path string, n int) (
 	case ".webp":
 		mime = "image/webp"
 	}
-	logx.Debugf("notes", "describeOne: mime=%s base64_len=%d", mime, base64.StdEncoding.EncodedLen(len(raw)))
+	return describeBytes(ctx, prov, raw, mime, fmt.Sprintf("Это слайд %d университетской лекции. Выпиши весь текст, формулы и смысл схемы. Формулы — только в LaTeX: в строке $...$, отдельной строкой $$...$$. По-русски, без вступлений.", n))
+}
+
+// DescribeImage — текст картинки (рисунок из вопроса теста) первым
+// ответившим vision-поставщиком. Ни одного ключа — ошибка.
+func DescribeImage(ctx context.Context, cfg *config.Config, raw []byte, mime, prompt string) (string, error) {
+	provs := visionProviders(cfg)
+	if len(provs) == 0 {
+		return "", fmt.Errorf("нет ключа vision (GROQ_API_KEY / GROK_API_KEY)")
+	}
+	if len(raw) < 32 {
+		return "", fmt.Errorf("пустой файл")
+	}
+	if !strings.HasPrefix(mime, "image/") {
+		mime = "image/png"
+	}
+	var errs []string
+	for _, p := range provs {
+		t, err := describeBytes(ctx, p, raw, mime, prompt)
+		if err == nil && t != "" {
+			return t, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("пусто")
+		}
+		errs = append(errs, err.Error())
+	}
+	return "", fmt.Errorf("vision: %s", strings.Join(errs, "; "))
+}
+
+func describeBytes(ctx context.Context, prov visionProvider, raw []byte, mime, prompt string) (string, error) {
+	n := 0
 	dataURL := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(raw)
 	payload, err := json.Marshal(visionReq{
 		Model: prov.model,
 		Messages: []visionMsg{{
 			Role: "user",
 			Content: []any{
-				map[string]any{"type": "text", "text": fmt.Sprintf("Это слайд %d университетской лекции. Выпиши весь текст, формулы и смысл схемы. Формулы — только в LaTeX: в строке $...$, отдельной строкой $$...$$. По-русски, без вступлений.", n)},
+				map[string]any{"type": "text", "text": prompt},
 				map[string]any{"type": "image_url", "image_url": map[string]string{"url": dataURL}},
 			},
 		}},
