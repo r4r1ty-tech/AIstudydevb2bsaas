@@ -6,7 +6,9 @@ package vault
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -21,6 +23,7 @@ var ErrBadCiphertext = errors.New("vault: bad ciphertext")
 
 type Vault struct {
 	aead cipher.AEAD
+	key  []byte
 }
 
 // New собирает хранилище из 32-байтового ключа.
@@ -36,7 +39,7 @@ func New(key []byte) (*Vault, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vault: gcm: %w", err)
 	}
-	return &Vault{aead: aead}, nil
+	return &Vault{aead: aead, key: append([]byte(nil), key...)}, nil
 }
 
 // Load берёт ключ из env (base64), иначе из файла; файла нет — создаёт его.
@@ -128,4 +131,12 @@ func (v *Vault) Open(sealed string) (string, error) {
 		return "", ErrBadCiphertext
 	}
 	return string(plain), nil
+}
+
+// Derive выводит из ключа хранилища отдельный ключ под назначение label
+// (HMAC-SHA256), чтобы один секрет не использовался для разных целей напрямую.
+func (v *Vault) Derive(label string) []byte {
+	m := hmac.New(sha256.New, v.key)
+	m.Write([]byte(label))
+	return m.Sum(nil)
 }

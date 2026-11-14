@@ -109,6 +109,7 @@ func New(cfg *config.Config, st *store.Store, loc *time.Location) (*Bot, error) 
 	dispatcher.AddHandler(handlers.NewCommand("start", b.onStart))
 	dispatcher.AddHandler(handlers.NewCommand("cancel", b.onCancel))
 	dispatcher.AddHandler(handlers.NewCommand("panel", b.onPanel))
+	dispatcher.AddHandler(handlers.NewCommand("pass", b.onPass))
 	dispatcher.AddHandler(handlers.NewCommand("test", b.onTest))
 	dispatcher.AddHandler(handlers.NewCommand("help", b.onHelp))
 	dispatcher.AddHandler(handlers.NewCommand("today", b.onToday))
@@ -295,6 +296,7 @@ func (b *Bot) publishProfile() {
 	logx.Debugf("tg", "publishProfile: enter")
 	cmds := []gotgbot.BotCommand{
 		{Command: "start", Description: "Пары и статус"},
+		{Command: "pass", Description: "Пароль в панель"},
 		{Command: "today", Description: "Пары на сегодня"},
 		{Command: "week", Description: "Пары на неделю"},
 		{Command: "tasks", Description: "Что сдать в Moodle"},

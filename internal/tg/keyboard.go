@@ -17,6 +17,7 @@ func mainKeyboard() gotgbot.ReplyKeyboardMarkup {
 		Keyboard: [][]gotgbot.KeyboardButton{
 			{{Text: btnToday}, {Text: btnTasks}},
 			{{Text: btnNotes}, {Text: btnSettings}},
+			{{Text: btnPanelPass}},
 		},
 		IsPersistent:          true,
 		ResizeKeyboard:        true,

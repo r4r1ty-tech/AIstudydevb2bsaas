@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | — | Bot API-токен. Нужен `tg` и `panel` |
 | `ADMIN_TELEGRAM_ID` | `1074442235` | Админ: `/panel`, `/test`, пуш-уведомления |
-| `PANEL_PASSWORD` | — | Пароль API панели (заголовок `X-Panel-Password` или `Authorization: Bearer`) |
+| `PANEL_PASSWORD` | — | Общий пароль API панели — вход **админом** (заголовок `X-Panel-Password` или `Authorization: Bearer`). Остальные входят личным часовым паролем из бота, см. «Вход в панель» |
 | `PANEL_ALLOW_IPS` | — | IP и CIDR через запятую, которым открыта панель; остальным 403. Пусто — без фильтра. Без `PANEL_PASSWORD` API отвечает только при непустом списке. Кривой элемент закрывает панель для всех |
 | `PANEL_TRUST_PROXY` | `0` | `1` — IP клиента берётся из правого элемента `X-Forwarded-For`, но только если запрос пришёл с loopback (то есть от Caddy на этой же машине) |
 | `PANEL_TUNNEL` | `1` | `0` — `remote.sh` выключает `ssau-tunnel` (cloudflared) и не трогает `WEBAPP_URL_FILE`: панель за своим Caddy |
@@ -39,6 +39,14 @@
 | `LOG_FILE` | — | Если задан — писать лог ещё и в файл |
 
 Шаблон — [../env.example](../env.example). `deploy/remote.sh` при первом деплое дописывает недостающие `LECTURE_PAUSE`, `VOSK_*`, `LOG_LEVEL`, `LOG_FILE`, `WEBAPP_URL_FILE`.
+
+## Вход в панель
+
+У каждого из вайтлиста и у админа свой пароль: кнопка «🔑 Пароль в панель» внизу в боте (или `/pass`). Пароль — HMAC от ключа хранилища (`SECRET_KEY`/`SECRET_KEY_FILE`, `vault.Derive("panel-pass/v1")`), Telegram id и номера часа (`internal/panelpass`). Ничего не хранится: бот и панель считают его одинаково, и по паролю панель понимает, кто вошёл.
+
+- Меняется раз в час; принимается пароль текущего и прошлого часа, так что выданный живёт до двух часов (в сообщении бота — «действует до ЧЧ:ММ»). Истёк — панель сама попросит войти заново.
+- Вошедший видит и меняет только своё: пары, решения «заходить/нет», профиль, Moodle. Блок «Служебное» (`/api/people`, `/api/logs`, `/api/parser*`, `/api/test`) — только админу (`ADMIN_TELEGRAM_ID` или `PANEL_PASSWORD`), остальным 403.
+- Убрали человека из вайтлиста — его пароль перестаёт приниматься сразу. Сменить все пароли разом — новый `SECRET_KEY` (но тогда слетят и сохранённые пароли ЛК/Moodle).
 
 ## Панель за Caddy
 
@@ -86,8 +94,14 @@ PANEL_DEMO=1 LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/panel
   ```
 
   В Caddy там `admin off`, поэтому `systemctl reload caddy` падает — только `systemctl restart caddy`.
-- `.env`: `LISTEN_ADDR=127.0.0.1:8080`, `PANEL_TRUST_PROXY=1`, `PANEL_TUNNEL=0`, `WEBAPP_PUBLIC_URL=https://ssau.r4r1ty.fun`, `WEBAPP_URL_FILE=` пусто, `PANEL_ALLOW_IPS` — четыре хельсинкских выхода пула (`177.3.196.241,242,243,245`), сам ГлебПрод и ПродАлексей (`194.87.52.18`), плюс `PANEL_PASSWORD`.
+- `.env`: `LISTEN_ADDR=127.0.0.1:8080`, `PANEL_TRUST_PROXY=1`, `PANEL_TUNNEL=0`, `WEBAPP_PUBLIC_URL=https://ssau.r4r1ty.fun`, `WEBAPP_URL_FILE=` пусто, `PANEL_ALLOW_IPS` — четыре хельсинкских выхода пула (`177.3.196.241,242,243,245`), сам ГлебПрод и ПродАлексей (`194.87.52.18`), плюс `PANEL_PASSWORD` (вход админом; остальные — личным паролем из бота).
 - CI ходит ключом `gh-actions-ssau-deploy` (публичная часть в `/root/.ssh/authorized_keys`, приватная — секрет `VDS_SSH_KEY`).
+
+### Смена ключей: `ssau-keys`
+
+Ярлык «SSAU ключи» в меню (или `~/.local/bin/ssau-keys`, исходник `cmd/ssau-keys`) открывает терминал и спрашивает ключ ИИ (cheaperinference, `https://api.cheaperinference.com/v1`, модель по умолчанию `deepseek-v4.1-flash`) и токен Telegram-бота. Пустой ввод — не менять. Ключи проверяются (`/models` + пробный запрос, `getMe`), пишутся в `/opt/ssau-bot/.env` по SSH через `moyavds`, работающие сервисы перезапускаются, `LLM_*` уходят в секреты GitHub (иначе CI-деплой вернёт старый ключ), токен бота — ещё и в локальный `.env`.
+
+Пересборка: `go build -o ~/.local/bin/ssau-keys ./cmd/ssau-keys`.
 
 ## ЛК и Moodle
 

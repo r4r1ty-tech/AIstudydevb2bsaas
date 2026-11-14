@@ -16,6 +16,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/panelpass"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/vault"
 )
@@ -37,6 +38,10 @@ type Server struct {
 	allow         []netip.Prefix
 	allowErr      error
 	handler       http.Handler
+	// passKey — ключ личных часовых паролей (panelpass); nil — их нет.
+	passKey []byte
+	// viewer — кто вошёл (Telegram id); выставляется в копии Server на запрос.
+	viewer int64
 }
 
 // New — панель поверх настоящей базы. st может быть nil (тесты статики и пароля).
@@ -47,14 +52,20 @@ func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir
 		src = st
 	}
 	var md Moodle = moodleStub{}
-	if st != nil && cfg != nil && (cfg.SecretKey != "" || cfg.SecretKeyFile != "") {
+	var passKey []byte
+	if cfg != nil && (cfg.SecretKey != "" || cfg.SecretKeyFile != "") {
 		if v, err := vault.Load(cfg.SecretKey, cfg.SecretKeyFile); err != nil {
-			logx.Errorf("webapp", "New: vault: %v — Moodle в панели выключен", err)
+			logx.Errorf("webapp", "New: vault: %v — Moodle и личные пароли в панели выключены", err)
 		} else {
-			md = &storeMoodle{st: st, v: v, owner: cfg.AdminID, lkBase: cfg.LKBaseURL, moodleBase: cfg.MoodleBaseURL}
+			passKey = v.Derive(panelpass.Label)
+			if st != nil {
+				md = &storeMoodle{st: st, v: v, owner: cfg.AdminID, lkBase: cfg.LKBaseURL, moodleBase: cfg.MoodleBaseURL}
+			}
 		}
 	}
-	return buildServer(cfg, src, md, refresh, recordingsDir, nil, false)
+	s := buildServer(cfg, src, md, refresh, recordingsDir, nil, false)
+	s.passKey = passKey
+	return s
 }
 
 func buildServer(cfg *config.Config, src Source, moodle Moodle, refresh RefreshFunc, recordingsDir string, clock func() time.Time, demo bool) *Server {
@@ -189,33 +200,7 @@ func (s *Server) routes() http.Handler {
 		_, _ = w.Write(data)
 	})
 
-	api := http.NewServeMux()
-	// Пульт (вкладка «Служебное»).
-	api.HandleFunc("GET /api/now", s.handleNow)
-	api.HandleFunc("GET /api/people", s.handlePeople)
-	api.HandleFunc("POST /api/people/{id}", s.handlePeoplePatch)
-	api.HandleFunc("GET /api/lessons", s.handleLessons)
-	api.HandleFunc("POST /api/bbb", s.handleBBB)
-	api.HandleFunc("GET /api/parser", s.handleParser)
-	api.HandleFunc("POST /api/parser/refresh", s.handleParserRefresh)
-	api.HandleFunc("GET /api/logs", s.handleLogs)
-	api.HandleFunc("GET /api/settings", s.handleSettingsGet)
-	api.HandleFunc("GET /api/test", s.handleTestGet)
-	api.HandleFunc("POST /api/test", s.handleTestPost)
-	// Личная панель владельца.
-	api.HandleFunc("GET /api/day", s.handleDay)
-	api.HandleFunc("POST /api/day", s.handleDayMode)
-	api.HandleFunc("GET /api/week", s.handleWeek)
-	api.HandleFunc("POST /api/intent", s.handleIntent)
-	api.HandleFunc("GET /api/deadlines", s.handleDeadlines)
-	api.HandleFunc("POST /api/moodle/login", s.handleMoodleLogin)
-	api.HandleFunc("POST /api/moodle/logout", s.handleMoodleLogout)
-	api.HandleFunc("GET /api/notes", s.handleNotes)
-	api.HandleFunc("GET /api/me", s.handleMeGet)
-	api.HandleFunc("POST /api/me", s.handleMePost)
-	api.HandleFunc("GET /api/rooms", s.handleRooms)
-
-	mux.Handle("/api/", s.requireAccess(api))
+	mux.Handle("/api/", s.requireAccess())
 	logx.Debugf("webapp", "routes: done")
 	return AllowIPs(s.allow, s.cfg.PanelTrustProxy, logRequests(mux))
 }
@@ -306,33 +291,104 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	logx.Debugf("webapp", "handleIndex: served %d bytes", len(data))
 }
 
-// apiAllowed — правило входа в API: пароль задан и совпал; или пароля нет,
-// но панель закрыта непустым PANEL_ALLOW_IPS (чужие IP уже отсёк AllowIPs);
-// или демо. Ни пароля, ни списка IP — отказ.
-func (s *Server) apiAllowed(r *http.Request) bool {
-	if s.demo {
-		return true
+// apiMux — маршруты API для копии сервера, в которой уже известен viewer.
+func (s *Server) apiMux() http.Handler {
+	api := http.NewServeMux()
+	admin := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !s.viewerIsAdmin() {
+				logx.Warnf("panel", "admin only: tg=%d %s %s", s.viewer, r.Method, r.URL.Path)
+				writeErr(w, http.StatusForbidden, "только для админа")
+				return
+			}
+			h(w, r)
+		}
 	}
-	want := ""
-	if s.cfg != nil {
-		want = s.cfg.PanelPassword
-	}
-	if want != "" {
-		return passwordOK(passwordFromRequest(r), want)
-	}
-	return len(s.allow) > 0
+	// Пульт (блок «Служебное») — только админ.
+	api.HandleFunc("GET /api/now", s.handleNow)
+	api.HandleFunc("GET /api/people", admin(s.handlePeople))
+	api.HandleFunc("POST /api/people/{id}", admin(s.handlePeoplePatch))
+	api.HandleFunc("GET /api/lessons", s.handleLessons)
+	api.HandleFunc("POST /api/bbb", s.handleBBB)
+	api.HandleFunc("GET /api/parser", admin(s.handleParser))
+	api.HandleFunc("POST /api/parser/refresh", admin(s.handleParserRefresh))
+	api.HandleFunc("GET /api/logs", admin(s.handleLogs))
+	api.HandleFunc("GET /api/settings", s.handleSettingsGet)
+	api.HandleFunc("GET /api/test", admin(s.handleTestGet))
+	api.HandleFunc("POST /api/test", admin(s.handleTestPost))
+	// Личная панель того, кто вошёл.
+	api.HandleFunc("GET /api/day", s.handleDay)
+	api.HandleFunc("POST /api/day", s.handleDayMode)
+	api.HandleFunc("GET /api/week", s.handleWeek)
+	api.HandleFunc("POST /api/intent", s.handleIntent)
+	api.HandleFunc("GET /api/deadlines", s.handleDeadlines)
+	api.HandleFunc("POST /api/moodle/login", s.handleMoodleLogin)
+	api.HandleFunc("POST /api/moodle/logout", s.handleMoodleLogout)
+	api.HandleFunc("GET /api/notes", s.handleNotes)
+	api.HandleFunc("GET /api/me", s.handleMeGet)
+	api.HandleFunc("POST /api/me", s.handleMePost)
+	api.HandleFunc("GET /api/rooms", s.handleRooms)
+	return api
 }
 
-func (s *Server) requireAccess(next http.Handler) http.Handler {
+// asViewer — копия сервера от лица id: личные данные и Moodle — его.
+func (s *Server) asViewer(id int64) *Server {
+	c := *s
+	c.viewer = id
+	if sm, ok := s.moodle.(*storeMoodle); ok {
+		m := *sm
+		m.owner = id
+		c.moodle = &m
+	}
+	return &c
+}
+
+func (s *Server) viewerIsAdmin() bool {
+	return s.cfg != nil && (s.viewer == 0 || s.viewer == s.cfg.AdminID)
+}
+
+// panelIDs — кому положен личный пароль: вайтлист и админ.
+func (s *Server) panelIDs() []int64 {
+	ids := append([]int64(nil), s.cfg.Whitelist...)
+	if s.cfg.AdminID != 0 {
+		ids = append(ids, s.cfg.AdminID)
+	}
+	return ids
+}
+
+// whoIs — кто стоит за запросом. Порядок: демо (админ), общий PANEL_PASSWORD
+// (админ), личный часовой пароль из бота (его владелец), панель без паролей,
+// закрытая списком IP (админ). Иначе — отказ.
+func (s *Server) whoIs(r *http.Request) (int64, bool) {
+	admin := s.cfg.AdminID
+	if s.demo {
+		return admin, true
+	}
+	got := passwordFromRequest(r)
+	if want := s.cfg.PanelPassword; want != "" && passwordOK(got, want) {
+		return admin, true
+	}
+	if id, ok := panelpass.Who(s.passKey, s.panelIDs(), got, s.clock()); ok {
+		return id, true
+	}
+	if s.cfg.PanelPassword == "" && len(s.passKey) == 0 && len(s.allow) > 0 {
+		return admin, true
+	}
+	return 0, false
+}
+
+func (s *Server) requireAccess() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logx.Debugf("webapp", "requireAccess: %s %s demo=%v allow=%d", r.Method, r.URL.Path, s.demo, len(s.allow))
-		if !s.apiAllowed(r) {
+		id, ok := s.whoIs(r)
+		if !ok {
 			logx.Warnf("webapp", "requireAccess: auth failed %s %s", r.Method, r.URL.Path)
 			logx.Warnf("panel", "bad password %s", r.URL.Path)
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		next.ServeHTTP(w, r)
+		logx.Debugf("webapp", "requireAccess: tg=%d %s %s", id, r.Method, r.URL.Path)
+		s.asViewer(id).apiMux().ServeHTTP(w, r)
 	})
 }
 
