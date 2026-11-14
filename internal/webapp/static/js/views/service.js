@@ -6,8 +6,11 @@ import { icon } from "../icons.js";
 import { bytes, stamp } from "../format.js";
 import { app, busy, errorBlock } from "../ui.js";
 import { toast } from "../toast.js";
+import { attemptsHTML, keyLabel, secs } from "../ai.js";
 
 const TABS = [
+  ["ai", "ИИ и ключи"],
+  ["quiz", "Тесты Moodle"],
   ["test", "Тест"],
   ["now", "Сейчас"],
   ["people", "Люди"],
@@ -45,8 +48,34 @@ function lessonLine(l) {
   </div>`;
 }
 
+const RUN_STATUS = { solved: ["решён", "chip-acc"], failed: ["сбой", "chip-coral"], parsed: ["без ИИ", "chip-amber"] };
+
+function runHead(r) {
+  const [label, cls] = RUN_STATUS[r.status] || [r.status, "chip-ghost"];
+  const used = (r.pages || []).map((p) => p.used).filter(Boolean);
+  return html`<div class="row"><span class="chip ${cls}">${label}</span><span class="mono">${stamp(r.at)}</span>
+      <span>${r.who || r.telegram_id}</span><span class="muted">${secs(r.took_ms || 0)}</span></div>
+    <b>${r.title || `тест ${r.cmid}`}</b><span class="muted">${r.course || ""} · cmid ${r.cmid}</span>
+    ${used.length ? html`<span>Модель: <span class="mono">${[...new Set(used)].join(", ")}</span></span>` : ""}
+    ${r.grade ? html`<span>Оценка: <b>${r.grade}</b></span>` : ""}
+    ${r.error ? html`<span class="muted" style="overflow-wrap:anywhere">Ошибка: ${r.error}</span>` : ""}`;
+}
+
+function runFullHTML(r) {
+  return html`<div class="svc-row">${runHead(r)}
+    <p class="eyebrow-mini">Цепочка</p><span class="mono" style="overflow-wrap:anywhere">${(r.chain || []).join(" → ") || "—"}</span>
+    ${(r.pages || []).map((p, i) => html`<p class="eyebrow-mini">Страница ${i + 1}</p>${attemptsHTML(p.attempts)}
+      ${p.error ? html`<span class="muted">Ошибка: ${p.error}</span>` : ""}
+      ${p.answers && Object.keys(p.answers).length ? html`<dl class="kv">${Object.entries(p.answers).map(([slot, a]) => html`<dt>Вопрос ${slot}</dt><dd>${a}</dd>`)}</dl>` : ""}
+      ${p.raw ? html`<p class="eyebrow-mini">Сырой ответ ИИ</p><pre class="svc-pre">${p.raw}</pre>` : ""}`)}
+    <div class="btn-row">
+      <button type="button" class="btn btn-sm" data-svc-act="quiz-resolve" data-cmid="${r.cmid}" data-tg="${r.telegram_id}">${icon("refresh")}Перерешать</button>
+      <button type="button" class="btn btn-sm btn-ghost" data-svc-act="quiz-back">Назад к списку</button>
+    </div></div>`;
+}
+
 export function mountService(root) {
-  let tab = "test";
+  let tab = "ai";
   let timer = 0;
   let alive = true;
 
@@ -56,7 +85,30 @@ export function mountService(root) {
     <div class="service-body" id="svc-panel" role="tabpanel" aria-labelledby="svc-t-${tab}"></div>`);
   const body = root.querySelector("#svc-panel");
 
+  function aiPeopleHTML(d) {
+    return html`<p class="field-hint">Каждый выбирает себе модель и ключ в «Ещё → ИИ для тестов». Тут — все ключи и чей выбор какой.</p>
+      <p class="eyebrow-mini">Ключи</p>
+      ${d.providers.map((p) => html`<div class="svc-row"><b>${p.name}</b>
+        <div class="row">${p.keys.map((k) => html`<span class="chip">${k.n}. ${keyLabel(k)}</span>`)}</div>
+        <span class="muted">модели: ${p.models.join(", ") || "—"}</span></div>`)}
+      <p class="eyebrow-mini">Люди</p>
+      ${d.people.map((x) => html`<div class="svc-row"><div class="row"><b>${x.name}</b><span class="mono">${x.telegram_id}</span>${x.admin ? html`<span class="chip chip-acc">админ</span>` : ""}</div>
+        <span>${x.choice && x.choice.provider ? `${x.choice.provider} / ${x.choice.model || "модель по умолчанию"} / ключ ${x.choice.key || "любой"}` : "общая цепочка"}</span>
+        <span class="mono muted" style="overflow-wrap:anywhere">первым: ${x.first || "—"}</span></div>`)}`;
+  }
+
   const loaders = {
+    async ai() {
+      return aiPeopleHTML(await api("api/admin/llm/people"));
+    },
+    async quiz() {
+      const d = await api("api/admin/quiz-runs?limit=50");
+      if (!d.runs.length) return html`<p class="muted">Решатель ещё ничего не запускал.</p>`;
+      return html`<p class="field-hint">Последние прогоны решателя у всех. «Подробнее» — попытки по моделям, ответы и сырой ответ ИИ.</p>
+        ${d.runs.map((r) => html`<div class="svc-row">${runHead(r)}
+          <div class="btn-row"><button type="button" class="btn btn-sm" data-svc-act="quiz-open" data-name="${r.name}">Подробнее</button>
+          <button type="button" class="btn btn-sm btn-ghost" data-svc-act="quiz-resolve" data-cmid="${r.cmid}" data-tg="${r.telegram_id}">${icon("refresh")}Перерешать</button></div></div>`)}`;
+    },
     async test() {
       const j = await api("api/test");
       if (testActive(j)) {
@@ -210,6 +262,17 @@ export function mountService(root) {
           if (e.body && e.body.at !== undefined) setHTML(body, parserHTML(e.body));
           throw e;
         }
+      } else if (act === "quiz-open") {
+        busy(a, true);
+        const r = await api(`api/admin/quiz-runs/${encodeURIComponent(a.dataset.name)}`);
+        setHTML(body, runFullHTML(r));
+      } else if (act === "quiz-back") {
+        show("quiz");
+      } else if (act === "quiz-resolve") {
+        busy(a, true);
+        const r = await api("api/admin/quiz/resolve", { method: "POST", body: { cmid: Number(a.dataset.cmid), telegram_id: Number(a.dataset.tg) } });
+        toast(r.message || "Перерешаю");
+        busy(a, false);
       } else if (act === "off-today" || act === "clear-off") {
         const id = a.closest("[data-person]").dataset.person;
         busy(a, true);

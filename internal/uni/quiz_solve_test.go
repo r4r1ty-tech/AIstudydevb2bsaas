@@ -11,9 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/quizlog"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
 
@@ -381,4 +383,187 @@ func setupStore(t *testing.T) (*store.Store, error) {
 	t.Helper()
 	dir := t.TempDir()
 	return store.Open(filepath.Join(dir, "bot.db"))
+}
+
+// ИИ не ответил: в Moodle ничего не уходит, попытка не завершается,
+// человеку — «проблема с тестом», в журнале отладки — failed.
+func TestQuizSolveLLMDownKeepsAttemptOpen(t *testing.T) {
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"overloaded"}`, http.StatusServiceUnavailable)
+	}))
+	defer llmSrv.Close()
+
+	var moodleSrv *httptest.Server
+	var processCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/mod/quiz/view.php", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.ReplaceAll(fakeQuizViewHTML, "BASE", moodleSrv.URL)))
+	})
+	mux.HandleFunc("/mod/quiz/startattempt.php", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, moodleSrv.URL+"/mod/quiz/attempt.php?attempt=555&cmid=777", http.StatusSeeOther)
+	})
+	mux.HandleFunc("/mod/quiz/attempt.php", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(strings.ReplaceAll(fakeAttemptHTML, "BASE", moodleSrv.URL)))
+	})
+	mux.HandleFunc("/mod/quiz/processattempt.php", func(w http.ResponseWriter, r *http.Request) {
+		processCalls++
+		http.Redirect(w, r, moodleSrv.URL+"/mod/quiz/review.php?attempt=555&cmid=777", http.StatusSeeOther)
+	})
+	moodleSrv = httptest.NewServer(mux)
+	defer moodleSrv.Close()
+
+	f := newFake(t)
+	sy, st, sent := setup(t, f)
+	sy.MoodleBase = moodleSrv.URL
+	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
+	acc, _ := st.GetAccount(10, model.AccountMoodle)
+	dbPath := filepath.Join(t.TempDir(), "bot.db")
+	// без бесплатных ключей цепочка — один вариант LLM_* (фейк, всегда 503)
+	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", DBPath: dbPath}
+
+	item := model.MoodleItem{CMID: 777, Course: "Теория информации", Kind: model.MoodleQuiz, Title: "Тест", Status: model.MoodleTodo,
+		URL: moodleSrv.URL + "/mod/quiz/view.php?id=777"}
+	prev := item
+	prev.Todo = "Тест сейчас не открыт для попыток"
+	cli, err := sy.moodleClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{prev}, []model.MoodleItem{item})
+
+	if processCalls != 0 {
+		t.Fatalf("в Moodle ушло %d запросов processattempt, ждали 0", processCalls)
+	}
+	if v, ok, _ := st.GetSetting(fmt.Sprintf("quiz_solved:%d:%d", acc.TelegramID, item.CMID)); ok && v != "" {
+		t.Fatal("тест отмечен решённым")
+	}
+	if all := strings.Join(*sent, "\n"); !strings.Contains(all, "Проблема с тестом") {
+		t.Fatalf("нет сообщения о проблеме: %s", all)
+	}
+	// следующий обычный обход (тест уже был открыт): пробуем снова, молча
+	notes := len(*sent)
+	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{item}, []model.MoodleItem{item})
+	if processCalls != 0 || len(*sent) != notes {
+		t.Fatalf("повтор: processattempt=%d, новых сообщений %d", processCalls, len(*sent)-notes)
+	}
+	if v, _, _ := st.GetSetting(fmt.Sprintf("quiz_fail:%d:%d", acc.TelegramID, item.CMID)); v != "2" {
+		t.Fatalf("счётчик неудач = %q, ждали 2", v)
+	}
+	runs, err := quizlog.List(quizlog.Dir(dbPath), 1)
+	if err != nil || len(runs) != 1 || runs[0].Status != quizlog.Failed || len(runs[0].Pages) == 0 || len(runs[0].Pages[0].Attempts) != 1 {
+		t.Fatalf("журнал: %+v %v", runs, err)
+	}
+}
+
+// «Пройти» из панели: просроченный тест, который синк сам не трогает, решается.
+func TestQuizForceOverdue(t *testing.T) {
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"answers\":[{\"slot\":1,\"choice\":\"0\"},{\"slot\":2,\"text\":\"бит\"}]}"}}]}`))
+	}))
+	defer llmSrv.Close()
+	var moodleSrv *httptest.Server
+	var finished bool
+	mux := http.NewServeMux()
+	page := func(tpl string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(strings.ReplaceAll(tpl, "BASE", moodleSrv.URL)))
+		}
+	}
+	mux.HandleFunc("/mod/quiz/view.php", page(fakeQuizViewHTML))
+	mux.HandleFunc("/mod/quiz/attempt.php", page(fakeAttemptHTML))
+	mux.HandleFunc("/mod/quiz/summary.php", page(fakeSummaryHTML))
+	mux.HandleFunc("/mod/quiz/review.php", page(fakeReviewHTML))
+	mux.HandleFunc("/mod/quiz/startattempt.php", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, moodleSrv.URL+"/mod/quiz/attempt.php?attempt=555&cmid=777", http.StatusSeeOther)
+	})
+	mux.HandleFunc("/mod/quiz/processattempt.php", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
+			http.Redirect(w, r, moodleSrv.URL+"/mod/quiz/summary.php?attempt=555&cmid=777", http.StatusSeeOther)
+			return
+		}
+		finished = true
+		http.Redirect(w, r, moodleSrv.URL+"/mod/quiz/review.php?attempt=555&cmid=777", http.StatusSeeOther)
+	})
+	moodleSrv = httptest.NewServer(mux)
+	defer moodleSrv.Close()
+
+	f := newFake(t)
+	sy, st, sent := setup(t, f)
+	sy.MoodleBase = moodleSrv.URL
+	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m"}
+	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
+	acc, _ := st.GetAccount(10, model.AccountMoodle)
+	past := time.Now().Add(-48 * time.Hour)
+	item := model.MoodleItem{CMID: 777, Course: "Теория информации", Kind: model.MoodleQuiz, Title: "Просроченный", Status: model.MoodleTodo, Due: &past}
+	cli, _ := sy.moodleClient()
+
+	// без флага — синк просроченный тест не трогает
+	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{item}, []model.MoodleItem{item})
+	if finished {
+		t.Fatal("просроченный тест решён без кнопки")
+	}
+	_ = st.SetSetting(QuizForceKey(10, 777), "1")
+	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{item}, []model.MoodleItem{item})
+	if !finished {
+		t.Fatalf("«Пройти» не довело до конца; сообщения: %v", *sent)
+	}
+	if v, _, _ := st.GetSetting(QuizForceKey(10, 777)); v != "" {
+		t.Fatal("флаг «пройти» не снят")
+	}
+	if !strings.Contains(strings.Join(*sent, "\n"), "автоматически решён") {
+		t.Fatalf("нет отчёта: %v", *sent)
+	}
+}
+
+// Ответы не сохранились в Moodle — попытка не завершается, тест не отмечен решённым.
+func TestQuizSubmitErrorKeepsAttemptOpen(t *testing.T) {
+	llmSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"content":"{\"answers\":[{\"slot\":1,\"choice\":\"0\"},{\"slot\":2,\"text\":\"бит\"}]}"}}]}`))
+	}))
+	defer llmSrv.Close()
+	var moodleSrv *httptest.Server
+	var finished bool
+	mux := http.NewServeMux()
+	page := func(tpl string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(strings.ReplaceAll(tpl, "BASE", moodleSrv.URL)))
+		}
+	}
+	mux.HandleFunc("/mod/quiz/view.php", page(fakeQuizViewHTML))
+	mux.HandleFunc("/mod/quiz/attempt.php", page(fakeAttemptHTML))
+	mux.HandleFunc("/mod/quiz/startattempt.php", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, moodleSrv.URL+"/mod/quiz/attempt.php?attempt=555&cmid=777", http.StatusSeeOther)
+	})
+	mux.HandleFunc("/mod/quiz/processattempt.php", func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		finished = true
+	})
+	moodleSrv = httptest.NewServer(mux)
+	defer moodleSrv.Close()
+
+	f := newFake(t)
+	sy, st, sent := setup(t, f)
+	sy.MoodleBase = moodleSrv.URL
+	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m"}
+	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
+	acc, _ := st.GetAccount(10, model.AccountMoodle)
+	item := model.MoodleItem{CMID: 777, Course: "Теория информации", Kind: model.MoodleQuiz, Title: "Тест", Status: model.MoodleTodo}
+	prev := item
+	prev.Todo = "Тест сейчас не открыт для попыток"
+	cli, _ := sy.moodleClient()
+	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{prev}, []model.MoodleItem{item})
+
+	if finished {
+		t.Fatal("попытка завершена, хотя ответы не сохранились")
+	}
+	if v, ok, _ := st.GetSetting(fmt.Sprintf("quiz_solved:%d:%d", acc.TelegramID, item.CMID)); ok && v != "" {
+		t.Fatal("тест отмечен решённым")
+	}
+	all := strings.Join(*sent, "\n")
+	if !strings.Contains(all, "Проблема с тестом") || !strings.Contains(all, "не сохранились") {
+		t.Fatalf("нет внятного сообщения: %s", all)
+	}
 }

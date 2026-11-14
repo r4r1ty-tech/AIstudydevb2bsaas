@@ -31,28 +31,38 @@ const (
 )
 
 type Config struct {
-	BotToken         string
-	AdminID          int64
-	WebAppURL        string
-	WebAppURLFile    string
-	DBPath           string
-	GroupID          int64
-	GroupCode        string
-	ListenAddr       string
-	Timezone         string
-	RecordingsDir    string
-	ChromeBin        string
-	ChromeUserDir    string
-	ProxyFile        string
-	BBBDryRun        bool
-	LecturePause     bool
-	PanelPassword    string
-	PanelAllowIPs    string // PANEL_ALLOW_IPS: IP и CIDR через запятую; пусто — без фильтра
-	PanelTrustProxy  bool   // PANEL_TRUST_PROXY: брать клиента из X-Forwarded-For, если запрос пришёл с loopback
-	PanelDemo        bool   // PANEL_DEMO: панель на тестовых данных из памяти, без бота и базы
-	LLMAPIKey        string
-	LLMAPIURL        string
-	LLMModel         string
+	BotToken        string
+	AdminID         int64
+	WebAppURL       string
+	WebAppURLFile   string
+	DBPath          string
+	GroupID         int64
+	GroupCode       string
+	ListenAddr      string
+	Timezone        string
+	RecordingsDir   string
+	ChromeBin       string
+	ChromeUserDir   string
+	ProxyFile       string
+	BBBDryRun       bool
+	LecturePause    bool
+	PanelPassword   string
+	PanelAllowIPs   string // PANEL_ALLOW_IPS: IP и CIDR через запятую; пусто — без фильтра
+	PanelTrustProxy bool   // PANEL_TRUST_PROXY: брать клиента из X-Forwarded-For, если запрос пришёл с loopback
+	PanelDemo       bool   // PANEL_DEMO: панель на тестовых данных из памяти, без бота и базы
+	LLMAPIKey       string
+	LLMAPIURL       string
+	LLMModel        string
+	// GeminiAPIKeys — ключи Google AI Studio (GEMINI_API_KEYS через запятую):
+	// бесплатная цепочка для тестов и конспектов всех.
+	GeminiAPIKeys []string
+	// OpenCodeAPIKey / OpenCodeAPIKeys — ключи OpenCode Zen (OPENCODE_API_KEY,
+	// OPENCODE_API_KEYS через запятую), запасной провайдер. Ключ можно подписать
+	// владельцем: «Зуев:oc_sk_…» (то же для GEMINI_API_KEYS).
+	OpenCodeAPIKey  string
+	OpenCodeAPIKeys []string
+	// AdminLoginSuffix — аккаунт универа с логином на этот хвост тоже админ (ADMIN_LOGIN_SUFFIX).
+	AdminLoginSuffix string
 	AssemblyAPIKey   string
 	AssemblyAPIURL   string
 	FishStudioAPIKey string
@@ -104,6 +114,10 @@ func Load() (*Config, error) {
 		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
 		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
 		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
+		GeminiAPIKeys:    listEnv("GEMINI_API_KEYS"),
+		OpenCodeAPIKey:   strEnv("OPENCODE_API_KEY", ""),
+		OpenCodeAPIKeys:  listEnv("OPENCODE_API_KEYS"),
+		AdminLoginSuffix: strEnv("ADMIN_LOGIN_SUFFIX", "123"),
 		AssemblyAPIKey:   strEnv("ASSEMBLYAI_API_KEY", ""),
 		AssemblyAPIURL:   strEnv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com"),
 		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),
@@ -214,6 +228,17 @@ func legacyEnv(key, old string) string {
 		logx.Warnf("config", "%s не задан, беру старое %s — переименуй в .env", key, old)
 	}
 	return v
+}
+
+// listEnv — значения через запятую, пустые выкинуты.
+func listEnv(key string) []string {
+	var out []string
+	for _, v := range strings.Split(os.Getenv(key), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func strEnv(key, fallback string) string {

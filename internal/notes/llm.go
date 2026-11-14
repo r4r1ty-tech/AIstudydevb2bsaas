@@ -1,29 +1,16 @@
 package notes
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
-	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
-type chatReq struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-}
-
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
+// chatResp — ответ OpenAI-совместимого chat/completions (нужен vision.go).
 type chatResp struct {
 	Choices []struct {
 		Message struct {
@@ -34,20 +21,10 @@ type chatResp struct {
 
 func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int, transcript, slides string) (string, error) {
 	logx.Debugf("notes", "Summarize: start discipline=%q lecture=%d transcript_chars=%d slides_chars=%d cfg_nil=%t", discipline, n, len(transcript), len(slides), cfg == nil)
-	if cfg == nil || strings.TrimSpace(cfg.LLMAPIKey) == "" {
-		logx.Errorf("notes", "Summarize: нет LLM_API_KEY")
-		return "", fmt.Errorf("нет LLM_API_KEY")
+	if len(llm.DefaultChain(cfg)) == 0 {
+		logx.Errorf("notes", "Summarize: нет ключей ИИ (GEMINI_API_KEYS / OPENCODE_API_KEY / LLM_*)")
+		return "", fmt.Errorf("нет ключей ИИ")
 	}
-	if strings.TrimSpace(cfg.LLMAPIURL) == "" {
-		logx.Errorf("notes", "Summarize: нет LLM_API_URL")
-		return "", fmt.Errorf("нет LLM_API_URL")
-	}
-	model := strings.TrimSpace(cfg.LLMModel)
-	if model == "" {
-		logx.Errorf("notes", "Summarize: нет LLM_MODEL")
-		return "", fmt.Errorf("нет LLM_MODEL")
-	}
-	logx.Debugf("notes", "Summarize: model=%s url=%s key_len=%d", model, cfg.LLMAPIURL, len(cfg.LLMAPIKey))
 	sys := "Ты составляешь подробный конспект университетской лекции на русском, Markdown. " +
 		"В САМОМ НАЧАЛЕ — отдельный блок «## Организационное»: что и к какому сроку сдавать, дедлайны, " +
 		"требования по лабам/курсовым/контрольным, тесты, Moodle, форма отчётности, переносы пар — " +
@@ -70,59 +47,14 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	return content, nil
 }
 
-// Ask отправляет системный и пользовательский промпт к OpenAI-совместимому API модели.
+// Ask — общая бесплатная цепочка провайдеров (internal/llm): gemini, потом
+// opencode; LLM_* (cheaperinference) — только если больше ничего не настроено.
 func Ask(ctx context.Context, cfg *config.Config, sysPrompt, userPrompt string) (string, error) {
-	if cfg == nil || strings.TrimSpace(cfg.LLMAPIKey) == "" {
-		return "", fmt.Errorf("нет LLM_API_KEY")
-	}
-	if strings.TrimSpace(cfg.LLMAPIURL) == "" {
-		return "", fmt.Errorf("нет LLM_API_URL")
-	}
-	model := strings.TrimSpace(cfg.LLMModel)
-	if model == "" {
-		return "", fmt.Errorf("нет LLM_MODEL")
-	}
-
-	payload, err := json.Marshal(chatReq{
-		Model: model,
-		Messages: []chatMessage{
-			{Role: "system", Content: sysPrompt},
-			{Role: "user", Content: userPrompt},
-		},
-	})
+	res, err := llm.Ask(ctx, llm.DefaultChain(cfg), sysPrompt, userPrompt)
 	if err != nil {
-		return "", fmt.Errorf("marshal payload: %w", err)
+		return "", err
 	}
-	endpoint := chatEndpoint(cfg.LLMAPIURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+cfg.LLMAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	cli := &http.Client{Timeout: 15 * time.Minute}
-	res, err := cli.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("llm request failed: %w", err)
-	}
-	defer res.Body.Close()
-
-	b, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-	if err != nil {
-		return "", fmt.Errorf("llm: ответ оборвался: %w", err)
-	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("llm HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
-	}
-	var out chatResp
-	if err := json.Unmarshal(b, &out); err != nil {
-		return "", fmt.Errorf("llm unmarshal (%d bytes): %w", len(b), err)
-	}
-	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
-		return "", fmt.Errorf("llm: пустой ответ")
-	}
-	return strings.TrimSpace(out.Choices[0].Message.Content), nil
+	return res.Text, nil
 }
 
 // chatEndpoint принимает любой OpenAI-совместимый base URL: и с /v1, и без.

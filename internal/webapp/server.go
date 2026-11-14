@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/access"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
@@ -42,6 +43,8 @@ type Server struct {
 	passKey []byte
 	// viewer — кто вошёл (Telegram id); выставляется в копии Server на запрос.
 	viewer int64
+	// st — настоящая база (nil в демо): настройки, аккаунты, Kick для админки.
+	st *store.Store
 }
 
 // New — панель поверх настоящей базы. st может быть nil (тесты статики и пароля).
@@ -65,6 +68,7 @@ func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir
 	}
 	s := buildServer(cfg, src, md, refresh, recordingsDir, nil, false)
 	s.passKey = passKey
+	s.st = st
 	return s
 }
 
@@ -305,7 +309,7 @@ func (s *Server) apiMux() http.Handler {
 		}
 	}
 	// Пульт (блок «Служебное») — только админ.
-	api.HandleFunc("GET /api/now", s.handleNow)
+	api.HandleFunc("GET /api/now", admin(s.handleNow))
 	api.HandleFunc("GET /api/people", admin(s.handlePeople))
 	api.HandleFunc("POST /api/people/{id}", admin(s.handlePeoplePatch))
 	api.HandleFunc("GET /api/lessons", s.handleLessons)
@@ -328,6 +332,18 @@ func (s *Server) apiMux() http.Handler {
 	api.HandleFunc("GET /api/me", s.handleMeGet)
 	api.HandleFunc("POST /api/me", s.handleMePost)
 	api.HandleFunc("GET /api/rooms", s.handleRooms)
+	// ИИ для тестов: свой выбор провайдера, модели и ключа — у каждого.
+	api.HandleFunc("GET /api/llm", s.handleLLMGet)
+	api.HandleFunc("GET /api/llm/models", s.handleLLMModels)
+	api.HandleFunc("POST /api/llm/choice", s.handleLLMChoice)
+	api.HandleFunc("POST /api/llm/test", s.handleLLMTest)
+	// «Пройти» у теста в «Сдать»: решить свой тест сейчас, даже просроченный.
+	api.HandleFunc("POST /api/quiz/force", s.handleQuizForce)
+	// Админ: кто какую модель выбрал, журнал решателя у всех, перерешать.
+	api.HandleFunc("GET /api/admin/llm/people", admin(s.handleLLMPeople))
+	api.HandleFunc("GET /api/admin/quiz-runs", admin(s.handleQuizRuns))
+	api.HandleFunc("GET /api/admin/quiz-runs/{name}", admin(s.handleQuizRun))
+	api.HandleFunc("POST /api/admin/quiz/resolve", admin(s.handleQuizResolve))
 	return api
 }
 
@@ -343,22 +359,37 @@ func (s *Server) asViewer(id int64) *Server {
 	return &c
 }
 
+// viewerIsAdmin — ADMIN_TELEGRAM_ID или аккаунт универа с логином на
+// ADMIN_LOGIN_SUFFIX (internal/access).
 func (s *Server) viewerIsAdmin() bool {
-	return s.cfg != nil && (s.viewer == 0 || s.viewer == s.cfg.AdminID)
+	if s.cfg == nil {
+		return false
+	}
+	if s.viewer == s.cfg.AdminID && s.viewer != 0 {
+		return true
+	}
+	if s.st == nil {
+		return false
+	}
+	return access.IsAdmin(s.cfg, s.st, s.viewer)
 }
 
 // panelIDs — кому положен личный пароль: вайтлист и админ.
 func (s *Server) panelIDs() []int64 {
-	ids := append([]int64(nil), s.cfg.Whitelist...)
-	if s.cfg.AdminID != 0 {
-		ids = append(ids, s.cfg.AdminID)
+	var ids []int64
+	seen := map[int64]bool{}
+	for _, id := range append(append([]int64(nil), s.cfg.Whitelist...), s.cfg.AdminID) {
+		if id != 0 && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
 	}
 	return ids
 }
 
 // whoIs — кто стоит за запросом. Порядок: демо (админ), общий PANEL_PASSWORD
-// (админ), личный часовой пароль из бота (его владелец), панель без паролей,
-// закрытая списком IP (админ). Иначе — отказ.
+// (админ), личный часовой пароль из бота (его владелец), панель без паролей и
+// без ключа хранилища, закрытая списком IP (админ). Иначе — отказ.
 func (s *Server) whoIs(r *http.Request) (int64, bool) {
 	admin := s.cfg.AdminID
 	if s.demo {
@@ -371,7 +402,11 @@ func (s *Server) whoIs(r *http.Request) (int64, bool) {
 	if id, ok := panelpass.Who(s.passKey, s.panelIDs(), got, s.clock()); ok {
 		return id, true
 	}
-	if s.cfg.PanelPassword == "" && len(s.passKey) == 0 && len(s.allow) > 0 {
+	// Только по IP — лишь если ключа хранилища нет в конфиге совсем. Ключ
+	// настроен, но не загрузился — личные пароли не работают, и пускать всех
+	// с разрешённых IP админом нельзя (fail-closed).
+	if s.cfg.PanelPassword == "" && len(s.passKey) == 0 && len(s.allow) > 0 &&
+		s.cfg.SecretKey == "" && s.cfg.SecretKeyFile == "" {
 		return admin, true
 	}
 	return 0, false

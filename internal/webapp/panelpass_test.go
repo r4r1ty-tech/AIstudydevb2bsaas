@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestPersonalPasswordIdentifiesUser(t *testing.T) {
 	if set.IsAdmin {
 		t.Fatal("друг видит себя админом")
 	}
-	for _, path := range []string{"/api/people", "/api/logs", "/api/parser", "/api/test"} {
+	for _, path := range []string{"/api/people", "/api/logs", "/api/parser", "/api/test", "/api/now"} {
 		if c := callPw(s, http.MethodGet, path, pw).Code; c != http.StatusForbidden {
 			t.Fatalf("%s для друга: %d, ждали 403", path, c)
 		}
@@ -98,5 +99,31 @@ func TestPersonalPasswordRejected(t *testing.T) {
 		if c := callPw(s, http.MethodGet, "/api/me", pw).Code; c != http.StatusUnauthorized {
 			t.Fatalf("пароль %q: %d, ждали 401", pw, c)
 		}
+	}
+}
+
+// Ключ хранилища настроен, но не загрузился: по одному IP админом не пускаем.
+func TestBrokenVaultFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "secret.key")
+	if err := os.WriteFile(bad, []byte("не base64!!\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "bot.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	s := New(&config.Config{
+		ListenAddr: config.DefaultListen, Timezone: config.DefaultTimezone,
+		AdminID: config.DefaultAdminID, Whitelist: append([]int64(nil), config.DefaultWhitelist...),
+		SecretKeyFile: bad, PanelAllowIPs: "192.0.2.0/24",
+	}, st, nil, "")
+	r := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	r.RemoteAddr = "192.0.2.10:5555"
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, r)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("сломанный ключ + IP: %d, ждали 401", rec.Code)
 	}
 }

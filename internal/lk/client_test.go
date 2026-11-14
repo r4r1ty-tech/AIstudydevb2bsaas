@@ -167,3 +167,16 @@ func TestWeekOf(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFullName(t *testing.T) {
+	page := []byte(`self.__next_f.push([1,"3d:[\"$\",\"$L6a\",null,{\"name\":\"Алексей\",\"secondname\":\"Сергеевич\",\"fullName\":\"Белкин  Алексей Сергеевич\",\"avatarSrc\":\"\"}]"])`)
+	if got, err := parseFullName(page); err != nil || got != "Белкин Алексей Сергеевич" {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := parseFullName([]byte(`<form><input name="password"></form>`)); err != ErrUnauthorized {
+		t.Fatalf("страница входа: %v", err)
+	}
+	if _, err := parseFullName([]byte(`<html></html>`)); err == nil {
+		t.Fatal("без fullName нет ошибки")
+	}
+}

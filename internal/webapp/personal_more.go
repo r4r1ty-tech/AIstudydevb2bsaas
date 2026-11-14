@@ -112,8 +112,9 @@ type moodleErrorResponse struct {
 	Moodle MoodleStatus `json:"moodle"`
 }
 
-// handleMoodleLogin. Пароль только передаётся дальше в Moodle: не пишется в
-// базу, в лог и в ответ. Ошибку разбора тела тоже не логируем — там пароль.
+// handleMoodleLogin. Пароль проверяется входом в Moodle и сохраняется в
+// accounts только зашифрованным (vault, AES-GCM); в лог и в ответ не попадает.
+// Ошибку разбора тела тоже не логируем — там пароль.
 func (s *Server) handleMoodleLogin(w http.ResponseWriter, r *http.Request) {
 	var req moodleLoginRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {

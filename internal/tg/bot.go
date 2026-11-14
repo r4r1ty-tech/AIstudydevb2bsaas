@@ -17,6 +17,7 @@ import (
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/callbackquery"
 	"github.com/PaulSonOfLars/gotgbot/v2/ext/handlers/filters/message"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/access"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
@@ -141,13 +142,13 @@ func (b *Bot) NotifyAdmin(ctx context.Context, text string) error {
 
 func (b *Bot) now() time.Time { return time.Now().In(b.loc) }
 
-// allowed — вайтлист или админ; чужим бот молчит.
+// allowed — вайтлист или админ (в т.ч. по логину универа на ADMIN_LOGIN_SUFFIX); чужим бот молчит.
 func (b *Bot) allowed(ctx *ext.Context) *gotgbot.User {
 	if ctx == nil || ctx.EffectiveUser == nil {
 		return nil
 	}
 	u := ctx.EffectiveUser
-	if !b.cfg.IsAllowed(u.Id) && !b.cfg.IsAdmin(u.Id) {
+	if !b.cfg.IsAllowed(u.Id) && !access.IsAdmin(b.cfg, b.st, u.Id) {
 		logx.Warnf("tg", "allowed: rejected tg=%d username=%q", u.Id, u.Username)
 		return nil
 	}
@@ -210,9 +211,13 @@ func (b *Bot) syncWebAppURL() {
 
 // panelIDs — все, кому положена панель: вайтлист и админ.
 func (b *Bot) panelIDs() []int64 {
-	ids := append([]int64(nil), b.cfg.Whitelist...)
-	if b.cfg.AdminID != 0 {
-		ids = append(ids, b.cfg.AdminID)
+	var ids []int64
+	seen := map[int64]bool{}
+	for _, id := range append(append([]int64(nil), b.cfg.Whitelist...), b.cfg.AdminID) {
+		if id != 0 && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
 	}
 	return ids
 }
