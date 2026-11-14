@@ -284,7 +284,7 @@ func (s *Server) handleQuizForceAll(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, d := range list {
 			cmid, perr := strconv.ParseInt(d.ID, 10, 64)
-			if d.Kind != DeadlineQuiz || d.Status == DeadlineSubmitted || perr != nil || cmid <= 0 {
+			if d.Kind != DeadlineQuiz || d.Status == DeadlineSubmitted || d.Closed || perr != nil || cmid <= 0 {
 				continue
 			}
 			if err := s.markQuizForce(id, cmid); err != nil {

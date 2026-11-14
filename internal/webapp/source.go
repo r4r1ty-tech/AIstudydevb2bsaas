@@ -74,6 +74,8 @@ type Deadline struct {
 	URL     string    `json:"url"`
 	Section string    `json:"section,omitempty"`
 	Todo    string    `json:"todo,omitempty"` // что сделать: условия, попытки, описание
+	// Closed — тест закрыт для попыток и не пройден (model.MoodleItem.Closed).
+	Closed bool `json:"closed"`
 }
 
 const (

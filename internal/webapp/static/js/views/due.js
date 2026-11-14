@@ -1,6 +1,6 @@
 // «Сдать»: дедлайны из Moodle по группам срочности.
 import { api } from "../api.js";
-import { html, setHTML } from "../dom.js";
+import { html, setHTML, str } from "../dom.js";
 import { icon } from "../icons.js";
 import { ago, duration, now, syncClock, whenLabel } from "../format.js";
 import { app, busy, empty, errorBlock, head, skeleton } from "../ui.js";
@@ -11,12 +11,38 @@ const GROUPS = [
   { id: "soon", title: "Сегодня и завтра", ico: "hourglass" },
   { id: "week", title: "На этой неделе", ico: "calendar" },
   { id: "later", title: "Позже", ico: "clock" },
+  { id: "closed", title: "Закрыты, не пройдены", ico: "door" },
 ];
 
-function statusChip(s, kind) {
+function statusChip(s, kind, closed) {
   if (s === "submitted") return html`<span class="chip chip-acc">${icon("check")}Сдано</span>`;
   if (s === "draft") return html`<span class="chip chip-amber">${icon("file")}${kind === "quiz" ? "Попытка не завершена" : "Черновик, не отправлено"}</span>`;
+  if (closed) return html`<span class="chip chip-ghost">${icon("door")}Закрыт</span>`;
   return html`<span class="chip chip-ghost">${icon("x")}Не сдано</span>`;
+}
+
+// Текст письма преподавателю. Панель только готовит текст для копирования:
+// ничего никуда не отправляет.
+function letterText(items, fio) {
+  const sign = fio ? `\n\n${fio}` : "";
+  if (items.length === 1) {
+    const d = items[0];
+    const course = d.course ? ` по курсу «${d.course}»` : "";
+    return `Здравствуйте!\n\nПрошу открыть повторную попытку или продлить срок для теста «${d.title}»${course}. Сейчас тест закрыт для попыток, а пройти его не получилось.\n\nСпасибо!${sign}`;
+  }
+  const list = items.map((d) => `— «${d.title}»${d.course ? `, курс «${d.course}»` : ""}`).join("\n");
+  return `Здравствуйте!\n\nПрошу открыть повторную попытку или продлить срок для тестов, которые сейчас закрыты и не пройдены:\n${list}\n\nСпасибо!${sign}`;
+}
+
+function askPanel(items, fio) {
+  const links = items.filter((d) => d.url);
+  return html`<div class="card card-pad stack ask-panel" role="region" aria-label="Письмо преподавателю">
+    <div class="row"><span class="card-title">Письмо преподавателю</span><button type="button" class="btn btn-sm btn-ghost" data-ask-close>${icon("x")}Закрыть</button></div>
+    <p class="field-hint">Текст можно поправить. Панель ничего не отправляет: скопируйте и отправьте сами.</p>
+    ${fio ? "" : html`<p class="field-hint">Имя в профиле не задано: подпишите письмо сами.</p>`}
+    <textarea class="input" rows="${Math.min(14, 7 + items.length)}" aria-label="Текст письма">${letterText(items, fio)}</textarea>
+    <div class="btn-row"><button type="button" class="btn btn-primary btn-sm" data-copy-letter>${icon("file")}Скопировать</button>${links.map((d) => html`<a class="btn btn-sm" href="${d.url}" target="_blank" rel="noopener noreferrer">${icon("ext")}${links.length > 1 ? `Moodle: ${d.title}` : "Открыть в Moodle"}</a>`)}</div>
+  </div>`;
 }
 
 function item(d) {
@@ -30,11 +56,12 @@ function item(d) {
     <div class="due-foot">
       <div class="row">
         <span class="chip">${icon(d.kind === "quiz" ? "quiz" : "assign")}${d.kind === "quiz" ? "Тест" : "Задание"}</span>
-        ${statusChip(d.status, d.kind)}
+        ${statusChip(d.status, d.kind, d.closed)}
       </div>
       ${d.url ? html`<a class="link-btn" href="${d.url}" target="_blank" rel="noopener noreferrer">Открыть в Moodle${icon("ext", "icon-sm")}</a>` : ""}
     </div>
     ${d.kind === "quiz" && d.status !== "submitted" ? html`<div class="btn-row"><button type="button" class="btn btn-primary btn-sm" data-quiz-force="${d.id}">${icon("refresh")}Пройти</button>
+      ${d.closed ? html`<button type="button" class="btn btn-sm" data-ask-open="${d.id}">${icon("file")}Попросить открыть</button>` : ""}
       <span class="field-hint">бот сам решит тест, даже просроченный, если Moodle ещё пускает</span></div>` : ""}
     ${d.todo ? html`<details class="fold"><summary>${icon("file")}Что сделать${icon("chev", "chev")}</summary><div class="fold-body"><ul class="due-todo">${d.todo.split("\n").filter(Boolean).map((t) => html`<li>${t}</li>`)}</ul></div></details>` : ""}
   </article>`;
@@ -42,6 +69,7 @@ function item(d) {
 
 export function mountDue(root, ctx) {
   let alive = true;
+  let closedList = []; // закрытые тесты текущей выдачи: для кнопок «Попросить открыть»
   setHTML(root, skeleton());
 
   async function load() {
@@ -70,13 +98,14 @@ export function mountDue(root, ctx) {
     }
     const by = {};
     for (const x of d.deadlines) (by[x.group] = by[x.group] || []).push(x);
+    closedList = by.closed || [];
     // «Без срока» не горит: в счётчики не идёт, лежит отдельным блоком.
     const open = d.deadlines.filter((x) => x.group !== "done" && x.group !== "nodue").length;
     const nodue = by.nodue || [];
     const c = d.counts || {};
     const groups = GROUPS.filter((g) => by[g.id] && by[g.id].length);
     // Несданные тесты — те же, что получат «Пройти» у себя в карточке (сервер считает так же).
-    const queued = d.deadlines.filter((x) => x.kind === "quiz" && x.status !== "submitted");
+    const queued = d.deadlines.filter((x) => x.kind === "quiz" && x.status !== "submitted" && !x.closed);
     setHTML(root, html`${head({ eyebrow: html`Moodle · ${m.synced_at ? `обновлено ${ago(m.synced_at)}` : "подключён"}`, title: "Сдать" })}
       <div class="due-summary">
         <button type="button" class="due-stat${c.overdue ? " is-coral" : ""}" data-jump="overdue" ${c.overdue ? "" : "disabled"} aria-label="Просрочено: ${c.overdue || 0}. Показать"><b>${c.overdue || 0}</b><span>просрочено</span></button>
@@ -87,6 +116,7 @@ export function mountDue(root, ctx) {
       ${groups.length ? "" : empty({ ico: "check", title: nodue.length ? "Горящих сроков нет" : "Всё сдано", text: nodue.length ? "Со сроками всё сдано. Ниже — задания без срока." : "Открытых сроков нет. Новые появятся здесь сами." })}
       ${groups.map((g) => html`<section class="due-group ${g.id}" id="due-${g.id}" aria-labelledby="dg-${g.id}">
         <h2 class="due-group-title" id="dg-${g.id}">${icon(g.ico)}${g.title} <span class="count mono">· ${by[g.id].length}</span></h2>
+        ${g.id === "closed" ? html`<div class="btn-row"><button type="button" class="btn btn-sm" data-ask-group>${icon("file")}Попросить открыть все</button><span class="field-hint">один текст на все закрытые тесты</span></div>` : ""}
         ${by[g.id].map(item)}
       </section>`)}
       ${nodue.length ? html`<details class="fold due-nodue"><summary>${icon("file")}Без срока · ${nodue.length}${icon("chev", "chev")}</summary><div class="fold-body"><p class="field-hint">Срок в Moodle не указан — не горит, но сдать всё равно нужно.</p>${nodue.map(item)}</div></details>` : ""}
@@ -122,6 +152,47 @@ export function mountDue(root, ctx) {
     h.focus({ preventScroll: true });
   }
 
+  // Письмо преподавателю: ФИО берём из профиля (api/me), текст только для копирования.
+  function showPanel(host, items, fio) {
+    root.querySelectorAll(".ask-panel").forEach((el) => el.remove());
+    const t = document.createElement("template");
+    t.innerHTML = str(askPanel(items, fio));
+    const panel = t.content.firstElementChild;
+    host.insertAdjacentElement("afterend", panel);
+    panel.scrollIntoView({ block: "nearest" });
+    panel.querySelector("textarea").focus({ preventScroll: true });
+  }
+
+  async function askOpen(btn, items) {
+    busy(btn, true);
+    let fio = "";
+    try {
+      const me = await api("api/me");
+      fio = (me.fio || "").trim();
+    } catch (e) {
+      busy(btn, false);
+      if (e.status !== 401 && alive) toast(e.message, "error");
+      return;
+    }
+    busy(btn, false);
+    if (!alive) return;
+    showPanel(btn.closest("article") || btn.parentElement, items, fio);
+  }
+
+  async function copyLetter(btn) {
+    const ta = btn.closest(".ask-panel").querySelector("textarea");
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(ta.value);
+      ok = true;
+    } catch {
+      ta.focus();
+      ta.select();
+      try { ok = document.execCommand("copy"); } catch { ok = false; }
+    }
+    toast(ok ? "Скопировано" : "Не вышло скопировать: выделите текст вручную", ok ? "ok" : "error");
+  }
+
   root.addEventListener("click", async (ev) => {
     const qa = ev.target.closest("[data-quiz-force-all]");
     if (qa) {
@@ -138,6 +209,26 @@ export function mountDue(root, ctx) {
         busy(qa, false);
         toast(e.message, "error");
       }
+      return;
+    }
+    const ao = ev.target.closest("[data-ask-open]");
+    if (ao) {
+      const d = closedList.find((x) => x.id === ao.dataset.askOpen);
+      if (d) await askOpen(ao, [d]);
+      return;
+    }
+    const ag = ev.target.closest("[data-ask-group]");
+    if (ag) {
+      await askOpen(ag, closedList);
+      return;
+    }
+    if (ev.target.closest("[data-ask-close]")) {
+      ev.target.closest(".ask-panel").remove();
+      return;
+    }
+    const cp = ev.target.closest("[data-copy-letter]");
+    if (cp) {
+      await copyLetter(cp);
       return;
     }
     const qf = ev.target.closest("[data-quiz-force]");
