@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/lk"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
@@ -27,6 +28,7 @@ var ErrNoAccount = errors.New("uni: no lk account")
 
 var (
 	tick          = time.Minute
+	kickTick      = 5 * time.Second
 	moodleEvery   = 30 * time.Minute
 	moodleFull    = 6 * time.Hour
 	retryAfterErr = 10 * time.Minute
@@ -45,6 +47,8 @@ type Syncer struct {
 
 	LKBase     string // для тестов
 	MoodleBase string
+
+	Cfg *config.Config
 
 	mu       sync.Mutex
 	lastFull map[int64]time.Time
@@ -288,7 +292,11 @@ func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) e
 	err = s.withSession(ctx, acc, c, moodle.ErrBadLogin, moodle.ErrUnauthorized, func() error {
 		var err error
 		items, err = s.collectMoodle(ctx, c, prev, full)
-		return err
+		if err != nil {
+			return err
+		}
+		s.detectAndHandleOpenedQuizzes(ctx, acc, c, prev, items)
+		return nil
 	})
 	if err != nil {
 		return err
@@ -441,6 +449,9 @@ func (s *Syncer) announceNew(ctx context.Context, id int64, prev, cur []model.Mo
 	now := s.now()
 	n := 0
 	for _, it := range cur {
+		if it.Kind == model.MoodleQuiz {
+			continue // открывшиеся тесты обрабатываются в detectAndHandleOpenedQuizzes
+		}
 		if old[it.CMID] || it.Finished() || it.Due == nil || it.Due.Before(now) {
 			continue
 		}

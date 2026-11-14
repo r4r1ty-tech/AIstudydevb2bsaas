@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -33,7 +34,7 @@ var (
 	ErrUnauthorized = errors.New("moodle: session expired")
 )
 
-var sesskeyRe = regexp.MustCompile(`"sesskey":"([A-Za-z0-9]+)"`)
+var sesskeyRe = regexp.MustCompile(`"sesskey":"([^"]+)"`)
 
 type Client struct {
 	s *websess.Session
@@ -332,25 +333,129 @@ func (c *Client) Timeline(ctx context.Context, from, to time.Time) ([]Event, err
 	return all, nil
 }
 
-// page — GET HTML-страницы Moodle с проверкой, что нас не выкинуло на вход.
-func (c *Client) page(ctx context.Context, path string) (*goquery.Document, error) {
-	resp, body, err := c.s.Get(ctx, path, "text/html")
+// Sesskey возвращает текущий токен sesskey сессии.
+func (c *Client) Sesskey(ctx context.Context) (string, error) {
+	return c.key(ctx)
+}
+
+// FormField — пара имя-значение для отправки multipart/form-data.
+type FormField struct {
+	Name  string
+	Value string
+}
+
+// PostForm выполняет POST с телом application/x-www-form-urlencoded,
+// переходит по редиректам (включая 303), обновляет sesskey и возвращает документ и финальный URL.
+func (c *Client) PostForm(ctx context.Context, path string, values url.Values) (*goquery.Document, string, error) {
+	req, err := c.s.Request(ctx, http.MethodPost, path, strings.NewReader(values.Encode()))
 	if err != nil {
-		return nil, fmt.Errorf("moodle: GET %s: %w", path, err)
+		return nil, "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Referer", c.s.URL(path))
+
+	resp, body, err := c.s.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("moodle: post form %s: %w", path, err)
 	}
 	if onLoginPage(resp) {
 		c.setSesskey("")
-		return nil, ErrUnauthorized
+		return nil, "", ErrUnauthorized
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("moodle: GET %s: status %d", path, resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("moodle: post form %s: status %d", path, resp.StatusCode)
 	}
 	if key := findSesskey(body); key != "" {
 		c.setSesskey(key)
 	}
+	finalURL := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("moodle: parse %s: %w", path, err)
+		return nil, finalURL, fmt.Errorf("moodle: parse %s: %w", path, err)
 	}
-	return doc, nil
+	return doc, finalURL, nil
+}
+
+// PostMultipart выполняет POST с телом multipart/form-data,
+// переходит по редиректам (303), обновляет sesskey и возвращает документ и финальный URL.
+func (c *Client) PostMultipart(ctx context.Context, path string, fields []FormField) (*goquery.Document, string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, f := range fields {
+		if err := writer.WriteField(f.Name, f.Value); err != nil {
+			return nil, "", fmt.Errorf("moodle: write multipart field %s: %w", f.Name, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("moodle: close multipart: %w", err)
+	}
+
+	req, err := c.s.Request(ctx, http.MethodPost, path, &body)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Referer", c.s.URL(path))
+
+	resp, respBody, err := c.s.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("moodle: post multipart %s: %w", path, err)
+	}
+	if onLoginPage(resp) {
+		c.setSesskey("")
+		return nil, "", ErrUnauthorized
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("moodle: post multipart %s: status %d", path, resp.StatusCode)
+	}
+	if key := findSesskey(respBody); key != "" {
+		c.setSesskey(key)
+	}
+	finalURL := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(respBody))
+	if err != nil {
+		return nil, finalURL, fmt.Errorf("moodle: parse %s: %w", path, err)
+	}
+	return doc, finalURL, nil
+}
+
+// PageWithURL выполняет GET HTML-страницы Moodle и возвращает документ и финальный URL.
+func (c *Client) PageWithURL(ctx context.Context, path string) (*goquery.Document, string, error) {
+	resp, body, err := c.s.Get(ctx, path, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	if err != nil {
+		return nil, "", fmt.Errorf("moodle: GET %s: %w", path, err)
+	}
+	if onLoginPage(resp) {
+		c.setSesskey("")
+		return nil, "", ErrUnauthorized
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return nil, "", fmt.Errorf("moodle: GET %s: status %d", path, resp.StatusCode)
+	}
+	if key := findSesskey(body); key != "" {
+		c.setSesskey(key)
+	}
+	finalURL := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, finalURL, fmt.Errorf("moodle: parse %s: %w", path, err)
+	}
+	return doc, finalURL, nil
+}
+
+// page — GET HTML-страницы Moodle с проверкой, что нас не выкинуло на вход.
+func (c *Client) page(ctx context.Context, path string) (*goquery.Document, error) {
+	doc, _, err := c.PageWithURL(ctx, path)
+	return doc, err
 }

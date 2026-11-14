@@ -30,4 +30,14 @@ func TestSlugAndRel(t *testing.T) {
 	if PDFFileName("Матан", 2) != "Матан-лекция-2.pdf" {
 		t.Fatalf("pdf name: %q", PDFFileName("Матан", 2))
 	}
+
+	root := t.TempDir()
+	slidesPath := SlidesDir(root, "Матан", 2)
+	wantSlides := filepath.Join(root, "Матан", "лекция-2", "slides")
+	if slidesPath != wantSlides {
+		t.Fatalf("SlidesDir(root, disc, num) = %q, want %q", slidesPath, wantSlides)
+	}
+	if HasSlides(slidesPath) {
+		t.Fatal("empty slidesDir should have no slides")
+	}
 }

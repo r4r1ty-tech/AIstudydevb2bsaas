@@ -121,3 +121,10 @@ func TestMergeOnlyEmptySegmentsErrors(t *testing.T) {
 		t.Fatalf("empty segment should be removed: %v", segs)
 	}
 }
+
+func TestSegmentPath(t *testing.T) {
+	t.Parallel()
+	if got := SegmentPath("/r/p", 42); got != filepath.Join("/r/p", "audio-42.ogg") {
+		t.Fatalf("SegmentPath = %q", got)
+	}
+}

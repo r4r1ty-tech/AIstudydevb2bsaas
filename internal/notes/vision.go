@@ -98,9 +98,9 @@ func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (
 		}
 	}
 	sort.Strings(files)
-	if len(files) > 40 {
-		logx.Debugf("notes", "DescribeSlides: truncating slides %d -> 40", len(files))
-		files = files[:40]
+	if len(files) > 60 {
+		logx.Debugf("notes", "DescribeSlides: truncating slides %d -> 60", len(files))
+		files = files[:60]
 	}
 	logx.Debugf("notes", "DescribeSlides: image files=%d", len(files))
 	var b strings.Builder
@@ -118,8 +118,7 @@ func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (
 			last = err
 		}
 		if last != nil {
-			logx.Errorf("notes", "DescribeSlides: slide %d all providers failed: %v", i+1, last)
-			fmt.Fprintf(&b, "Слайд %d: ошибка (%v)\n", i+1, last)
+			logx.Warnf("notes", "DescribeSlides: slide %d all providers failed: %v", i+1, last)
 			continue
 		}
 		logx.Debugf("notes", "DescribeSlides: slide %d ok chars=%d", i+1, len(text))

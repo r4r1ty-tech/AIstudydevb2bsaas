@@ -10,8 +10,8 @@ Runbook для агента (и человека). Цель — прогнать
 
 ## 0. Границы
 
-- Тестируем 4 процесса: `tg`, `rasp`, `panel`, `bbb`. `bbb` дергает Chromium, PulseAudio,
-  ffmpeg и Vosk — это и есть предмет большинства кейсов.
+- Тестируем 4 процесса: `tg`, `rasp`, `panel`, `bbb`. `bbb` дергает `DirectJoiner` (HTTP + DDP + Pion WebRTC),
+  `ffmpeg` (декодер PCM) и Vosk — это и есть предмет большинства кейсов.
 - `panel` не обязан быть снаружи: можно ходить `curl` по `localhost:8080` с VDS, либо по
   туннелю (`ssh ssau webapp-url`).
 - Секреты не читаем и не логируем. `cat .env` недоступен — только `ssh ssau env-keys`.
@@ -48,7 +48,7 @@ Runbook для агента (и человека). Цель — прогнать
 ```bash
 ssh ssau status          # ssau-tg/rasp/panel/bbb/tunnel
 ssh ssau units           # is-active
-ssh ssau disk            # место: Chromium+Vosk+записи жрут диск
+ssh ssau disk            # место: Vosk+записи+паки жрут диск
 ```
 
 Всё должно быть `active`. Если нет — `ssh ssau restart <unit>` (спросит подтверждение).
@@ -71,23 +71,16 @@ gofmt -l cmd internal
 go build ./...
 go vet ./...
 CGO_ENABLED=0 go test ./...          # то же, что CI
-BBB_DRY_RUN=1 go run ./cmd/bbb       # Chromium не трогаем: DryJoiner всегда "room"
+BBB_DRY_RUN=1 go run ./cmd/bbb       # сеть BBB не трогаем: DryJoiner всегда "room"
 ```
 
 `BBB_DRY_RUN=1` удобен для проверки логики `ensureTestN`, но **не** проверяет реальную
-классификацию страницы, лобби и запись — это только TC-20…TC-28 в живой комнате.
+работу с Greenlight/DDP/SFU, лобби и запись — это только TC-20…TC-28 в живой комнате.
 
-Сквозной тест звука (Chromium играет тон → `ssau_rec.monitor` → ffmpeg → PCM не тишина)
-создаёт sink и меняет default sink, поэтому гоняется только на **отдельном** PulseAudio,
-не на продовом `/run/user/0`:
+Локальный сквозной тест протокола BBB и аудио-тракта (`DirectJoiner` + `pion/webrtc/v4` + `OpusRec` → `ffmpeg` → 16 кГц PCM без PulseAudio) запускается на mock-серверах:
 
 ```bash
-T=$(mktemp -d); mkdir -p $T/xdg $T/home; chmod 700 $T/xdg
-export HOME=$T/home XDG_RUNTIME_DIR=$T/xdg PULSE_SERVER=unix:$T/xdg/pulse/native
-env -u DBUS_SESSION_BUS_ADDRESS pulseaudio -n --daemonize=yes --exit-idle-time=-1 \
-  -L module-native-protocol-unix -L "module-null-sink sink_name=dummy"
-SSAU_AUDIO_E2E=1 go test ./internal/bbb -run TestRecordTabAudioReachesFFmpeg -v
-pulseaudio --kill
+go test -v -race ./internal/capture/... ./internal/bbb/... -run 'TestOpus|TestDirect'
 ```
 
 ### 2.4. Telegram
@@ -261,19 +254,19 @@ ssh ssau recordings      # при желании удалить recordings/test 
 - **Логи:** `test guest name=...`.
 
 #### TC-20. Dummy-заход
-- **Проверяет:** `onTestCallback tx:dummy`, `tickTest`, `ensureTestN`, `Joiner.Join`,
-  `classifySeat`, `PublishPresence`.
+- **Проверяет:** `onTestCallback tx:dummy`, `tickTest`, `ensureTestN`, `DirectJoiner.Join`,
+  `PublishPresence`.
 - **Шаги:** задать ссылку → «Болванчик».
-- **Ожидаемо:** Chromium заходит гостем, статус `joining → room|lobby`, админ получает
+- **Ожидаемо:** бот заходит гостем (Greenlight + Meteor DDP), статус `joining → room|lobby`, админ получает
   `testInRoomText` («болванчик без звука») или сообщение про лобби.
 - **Логи (bbb):** `test join want=dummy`, `test seated state=room|lobby`,
   при ошибке `test join fail: ...`.
 - **Логи (tg):** `test callback want=dummy`, `test live card sent`.
 - **БД:** `settings.test_join.status`, событие `join` «тест dummy».
 
-#### TC-21. Dummy: страница/сессия живы
+#### TC-21. Dummy: сессия жива
 - **Проверяет:** `watchTest`.
-- **Ожидаемо:** статус не скачет; если вкладка упала — `stopTest dead` и уведомление.
+- **Ожидаемо:** статус не скачет; если DDP/WS сессия оборвалась — `stopTest dead` и уведомление.
 - **Логи:** `watchTest: InLobby`, `watchTest: InRoom`, `stopTest reason=dead`.
 
 #### TC-22. Лобби → комната
@@ -284,11 +277,11 @@ ssh ssau recordings      # при желании удалить recordings/test 
 - **Логи:** `test seated state=lobby`, затем `syncTestLive` edit.
 
 #### TC-23. Listen-заход + запись
-- **Проверяет:** `tx:listen`, `attachTestRecorder`, `capture.Start`, `capture.SegmentPath`,
+- **Проверяет:** `tx:listen`, `attachTestRecorder`, `startSessionRecorder`, `capture.StartOpus`, `capture.SegmentPath`,
   `startSpotter`, `hogs.Hold`.
 - **Шаги:** из карточки «Со звуком» (или смена режима, TC-26).
-- **Ожидаемо:** в комнате, идёт запись; в `recordings/test/` появляется `audio-<nano>.ogg`.
-- **Логи:** `test join want=listen`, `rec seg ...`, `capture`, `ffmpeg pid=... -> ...`,
+- **Ожидаемо:** в комнате, подключен `bbb-webrtc-sfu` (`listen-only`), идёт запись; в `recordings/test/` появляется `audio-<nano>.ogg`.
+- **Логи:** `test join want=listen`, `rec seg ...`, `capture: opus rec ...`,
   `test seated state=room`.
 - **Проверка:** `ssh ssau recordings` — растущий `recordings/test/audio-*.ogg`.
 
@@ -336,7 +329,7 @@ ssh ssau recordings      # при желании удалить recordings/test 
 #### TC-29. Пауза теста во время пары
 - **Проверяет:** `pauseTest`, `resumeTest`.
 - **Предусловие:** тест активен (room/lobby) и стартует/идёт лекционная пара.
-- **Ожидаемо:** тест остановлен, `status=error`, `message="идёт пара: Chrome занят лекцией"`,
+- **Ожидаемо:** тест остановлен, `status=error`, `message="идёт пара: воркер занят лекцией"`,
   одно пуш-уведомление админу.
 - **Логи:** `bbb: test paused: lecture in progress`, `pauseTest: active=true`.
 - **Важно:** проверить, что уведомление пришло **один раз** (флаг `testPaused`).
@@ -434,6 +427,6 @@ ssh ssau recordings      # удалить recordings/test при необход�
 - Тестовая запись (`recordings/test/`) **не** проходит пайплайн конспектов — это только
   лекционные паки (`lecture_packs`). TC-33 отдельный.
 - Лобби-таймаут >2 мин шлётся только для пар (`watchLobby`), не для теста.
-- Пока идёт пара, тест принудительно останавливается (один Chromium) — не баг.
+- Пока идёт пара, тест принудительно останавливается (приоритет лекции в `bbb`) — не баг.
 - Vosk/STT/vision требуют ключей и модели; без них соответствующие кейсы дают WARN,
   а не падение.

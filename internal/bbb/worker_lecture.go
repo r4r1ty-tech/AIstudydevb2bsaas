@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
@@ -62,10 +64,11 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 		return sess, false
 	}
 	abs := filepath.Join(w.recRoot(), pack.Dir)
+	slidesDir := archive.SlidesDir(w.recRoot(), lesson.Discipline, pack.Number)
 	seg := capture.SegmentPath(abs, time.Now().UnixNano())
-	first, err := startRecorder(ctx, seg)
+	first, err := startSessionRecorder(ctx, sess, seg)
 	if err != nil {
-		logx.Errorf("bbb", "ffmpeg: %v", err)
+		logx.Errorf("bbb", "rec start: %v", err)
 		notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"» не стартовала: "+err.Error())
 		return sess, false
 	}
@@ -74,7 +77,7 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 		start: func() (recorder, error) {
 			next := capture.SegmentPath(abs, time.Now().UnixNano())
 			logx.Infof("bbb", "rec segment %s (restart)", filepath.Base(next))
-			return startRecorder(ctx, next)
+			return startSessionRecorder(ctx, sess, next)
 		},
 		onDied: func(err error, restarted bool) {
 			if restarted {
@@ -98,20 +101,61 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 	}); err != nil {
 		logx.Debugf("bbb", "attachRecorder: add event: %v", err)
 	}
+
+	var slidesCaptured atomic.Bool
+	slidesCtx, slidesCancel := context.WithCancel(ctx)
+	var slidesWG sync.WaitGroup
+	slidesWG.Add(1)
+	go func() {
+		defer slidesWG.Done()
+		ticker := time.NewTicker(45 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-slidesCtx.Done():
+				return
+			case <-ticker.C:
+				n, err := sess.GrabSlides(slidesCtx, slidesDir)
+				if err != nil {
+					logx.Debugf("bbb", "background GrabSlides lesson=%d: %v", lesson.ID, err)
+				}
+				if n > 0 {
+					slidesCaptured.Store(true)
+					w.MarkSlides(lesson.ID, slidesDir)
+				}
+			}
+		}
+	}()
+
 	// Словарь — по всей подгруппе: Vosk не перезапускается, а «Зайти» могут
 	// нажать уже после старта записи. Адресатов onWake считает на момент хита.
 	go w.startSpotter(ctx, rec, lesson, w.subgroupUsers(lesson, time.Now()))
 	st := w.Store
 	return &closeHook{Session: sess, fn: func() {
+		slidesCancel()
+		slidesWG.Wait()
+
+		// Финальный сбор слайдов перед закрытием сессии
+		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		n, err := sess.GrabSlides(fctx, slidesDir)
+		fcancel()
+		if err != nil {
+			logx.Debugf("bbb", "final GrabSlides lesson=%d: %v", lesson.ID, err)
+		}
+		if n > 0 {
+			slidesCaptured.Store(true)
+			w.MarkSlides(lesson.ID, slidesDir)
+		}
+
 		logx.Infof("bbb", "recording stopped pack=%d dir=%s", pack.Number, pack.Dir)
 		if err := rec.Stop(); err != nil {
 			logx.Warnf("bbb", "stop rec %s: %v", pack.Dir, err)
 		}
-		n, merr := capture.MergeSegments(context.Background(), abs, archive.AudioFile(abs))
+		nSegs, merr := capture.MergeSegments(context.Background(), abs, archive.AudioFile(abs))
 		if merr != nil {
 			logx.Warnf("bbb", "merge %s: %v", pack.Dir, merr)
 		} else {
-			logx.Infof("bbb", "audio merged %s segs=%d", pack.Dir, n)
+			logx.Infof("bbb", "audio merged %s segs=%d", pack.Dir, nSegs)
 		}
 		if merr != nil {
 			return
@@ -121,11 +165,53 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 			logx.Debugf("bbb", "attachRecorder: pack %d reload: %v", pack.ID, err)
 			return
 		}
-		p.Status = model.PackRecorded
+		if archive.HasSlides(slidesDir) || slidesCaptured.Load() {
+			p.Status = model.PackSlides
+		} else {
+			p.Status = model.PackRecorded
+		}
 		if err := st.SavePack(p); err != nil {
 			logx.Errorf("bbb", "attachRecorder: save recorded pack=%s: %v", p.Dir, err)
 		}
 	}}, true
+}
+
+// MarkSlides marks that slides have been captured for a lecture pack.
+func (w *Worker) MarkSlides(lessonID int64, slidesDir string) {
+	if w == nil || w.Store == nil {
+		return
+	}
+	p, err := w.Store.PackByLesson(lessonID)
+	if err != nil || p == nil {
+		logx.Debugf("bbb", "MarkSlides: pack not found lesson=%d: %v", lessonID, err)
+		return
+	}
+	if p.Status != model.PackDone && p.Status != model.PackNotes && p.Status != model.PackRecording {
+		p.Status = model.PackSlides
+		if err := w.Store.SavePack(p); err != nil {
+			logx.Errorf("bbb", "MarkSlides: save pack: %v", err)
+		}
+	}
+	if err := w.Store.AddEvent(model.Event{
+		At:       time.Now(),
+		Type:     model.EventSlides,
+		LessonID: lessonID,
+		Message:  archive.Rel(p.Discipline, p.Number),
+	}); err != nil {
+		logx.Debugf("bbb", "MarkSlides: add event: %v", err)
+	}
+	logx.Infof("bbb", "MarkSlides: lesson=%d dir=%s", lessonID, slidesDir)
+}
+
+func (w *Worker) allLecturesFinishedToday() bool {
+	if w == nil || w.Store == nil {
+		return false
+	}
+	all, err := w.Store.ListLessons()
+	if err != nil {
+		return false
+	}
+	return archive.AllLecturesFinished(all, time.Now())
 }
 
 func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
@@ -155,7 +241,9 @@ func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
 		defer w.jobWG.Done()
 		defer w.endJob()
 		w.harvestDay(ctx, day)
-		w.setSetting(slidesDoneKey+day, "1")
+		if all, err := w.Store.ListLessons(); err == nil && archive.AllLecturesFinished(all, time.Now()) {
+			w.setSetting(slidesDoneKey+day, "1")
+		}
 	}()
 }
 
@@ -177,32 +265,44 @@ func (w *Worker) maybeNotes(ctx context.Context, now time.Time) {
 	go func() {
 		defer w.jobWG.Done()
 		defer w.endJob()
+		loc := w.Loc
+		if loc == nil {
+			loc = time.UTC
+		}
+		today := time.Now().In(loc).Format("2006-01-02")
 		for _, day := range days {
 			if ctx.Err() != nil {
 				return
 			}
 			if w.buildNotesDay(ctx, day) {
+				if day == today && !w.allLecturesFinishedToday() {
+					logx.Debugf("bbb", "maybeNotes: day=%s done for now, but more lectures today", day)
+					continue
+				}
 				w.setSetting(notesDoneKey+day, "1")
 			}
 		}
 	}()
 }
 
-// openNoteDays: вчерашний день и более ранние дни с паками, у которых
-// notes_done ещё не стоит — конспект, упавший вчера, догоняется сегодня.
+// openNoteDays: проверяет прошедшие незакрытые дни, а также сегодняшний день,
+// если на сегодня уже есть паки и день ещё не помечен как notes_done.
 func (w *Worker) openNoteDays(now time.Time) []string {
-	last := archive.NotesDay(now)
-	if last == "" {
-		return nil
+	loc := w.Loc
+	if loc == nil {
+		loc = time.UTC
 	}
+	today := now.In(loc).Format("2006-01-02")
+	yesterday := archive.NotesDay(now)
+	first := now.In(loc).AddDate(0, 0, -noteCatchUpDays).Format("2006-01-02")
+
 	var days []string
+	seen := map[string]bool{}
 	if packs, err := w.Store.ListPacks(); err != nil {
 		logx.Errorf("bbb", "openNoteDays: list packs: %v", err)
 	} else {
-		first := now.AddDate(0, 0, -noteCatchUpDays).Format("2006-01-02")
-		seen := map[string]bool{}
 		for _, p := range packs {
-			if p.Date < first || p.Date >= last || seen[p.Date] {
+			if p.Date < first || p.Date > today || seen[p.Date] {
 				continue
 			}
 			seen[p.Date] = true
@@ -212,8 +312,9 @@ func (w *Worker) openNoteDays(now time.Time) []string {
 		}
 		sort.Strings(days)
 	}
-	if !w.settingOn(notesDoneKey + last) {
-		days = append(days, last)
+	if yesterday != "" && !seen[yesterday] && !w.settingOn(notesDoneKey+yesterday) {
+		days = append(days, yesterday)
+		sort.Strings(days)
 	}
 	return days
 }
@@ -229,7 +330,10 @@ func (w *Worker) harvestDay(ctx context.Context, day string) {
 	for i := range packs {
 		p := packs[i]
 		if p.Status == model.PackRecorded {
-			w.harvestSlides(ctx, &p)
+			slidesDir := archive.SlidesDir(filepath.Join(w.recRoot(), p.Dir))
+			if !archive.HasSlides(slidesDir) {
+				w.harvestSlides(ctx, &p)
+			}
 		}
 	}
 }
@@ -252,6 +356,13 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 			case stuckEmpty:
 				continue
 			default:
+				done = false
+				continue
+			}
+		}
+		// Если лекция ещё идёт (Finish > now), не собираем конспект раньше времени
+		if lesson, err := w.Store.LessonByID(p.LessonID); err == nil && lesson != nil {
+			if !lesson.Finish.IsZero() && now.Before(lesson.Finish) {
 				done = false
 				continue
 			}

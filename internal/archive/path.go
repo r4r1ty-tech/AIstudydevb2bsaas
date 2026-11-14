@@ -68,10 +68,41 @@ func TranscriptFile(dir string) string {
 	return p
 }
 
-func SlidesDir(dir string) string {
-	p := filepath.Join(dir, "slides")
+func SlidesDir(first string, rest ...any) string {
+	if len(rest) == 2 {
+		discipline, _ := rest[0].(string)
+		var n int
+		switch v := rest[1].(type) {
+		case int:
+			n = v
+		case int64:
+			n = int(v)
+		}
+		p := filepath.Join(Abs(first, discipline, n), "slides")
+		logx.Debugf("archive", "SlidesDir: %s", p)
+		return p
+	}
+	p := filepath.Join(first, "slides")
 	logx.Debugf("archive", "SlidesDir: %s", p)
 	return p
+}
+
+// HasSlides reports whether dir exists and contains at least one slide image (.png/.jpg/.jpeg/.webp).
+func HasSlides(dir string) bool {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		name := strings.ToLower(e.Name())
+		if strings.HasSuffix(name, ".png") || strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") || strings.HasSuffix(name, ".webp") {
+			return true
+		}
+	}
+	return false
 }
 
 func NotesMD(dir string) string {

@@ -26,7 +26,7 @@ func main() {
 			notify.Admin(ctx, cfg, "ключ шифрования не загрузился, ЛК и Moodle не синкаются: "+err.Error())
 		} else {
 			sy := &uni.Syncer{
-				Store: st, Vault: v, Loc: loc, GroupID: cfg.GroupID, AdminID: cfg.AdminID,
+				Store: st, Vault: v, Cfg: cfg, Loc: loc, GroupID: cfg.GroupID, AdminID: cfg.AdminID,
 				LKBase: cfg.LKBaseURL, MoodleBase: cfg.MoodleBaseURL,
 				Notify: func(ctx context.Context, id int64, text string) { notify.HTML(ctx, cfg, id, text) },
 			}

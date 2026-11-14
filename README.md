@@ -7,7 +7,7 @@
 | `tg` | `ssau-tg.service` | Telegram: вайтлист, онбординг, T-15, память ссылок BBB, кнопка Mini App |
 | `rasp` | `ssau-rasp.service` | Парсер расписания `ssau.ru/rasp` + cron 7/15/19/22 |
 | `panel` | `ssau-panel.service` | HTTPS Mini App + JSON API. Единственный, кто слушает порт |
-| `bbb` | `ssau-bbb.service` | Гостевой join в BBB через Chromium, listen-only, запись, вейкворды |
+| `bbb` | `ssau-bbb.service` | Гостевой join в BBB без браузера (HTTP + DDP + Pion WebRTC), запись, слайды, вейкворды |
 
 Полный замысел, решения и этапы — [PLAN.md](PLAN.md). Устройство и потоки данных — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Эксплуатация, конфиг, логи и деплой — [docs/OPERATIONS.md](docs/OPERATIONS.md). Проверка функций в тестовой комнате BBB — [docs/TESTING.md](docs/TESTING.md).
 
@@ -20,7 +20,7 @@ rasp cron ────────┼──► sqlite (WAL)
                   │
 panel (Mini App) ─┤
                   │
-bbb (Chromium) ───┘
+bbb (DDP+WebRTC) ─┘
 ```
 
 Связка — sqlite, не gRPC. `ssau.target` поднимает все четыре. Папки `internal/*` — общая библиотека, в проде сами по себе не бегают.
@@ -35,7 +35,7 @@ go build -o bin/panel ./cmd/panel
 go build -o bin/bbb ./cmd/bbb
 ```
 
-Для локальной разработки достаточно токена бота: парсер `rasp` ходит на публичную страницу без ключей, а `BBB_DRY_RUN=1` подменяет Chromium заглушкой.
+Для локальной разработки достаточно токена бота: парсер `rasp` ходит на публичную страницу без ключей, а `BBB_DRY_RUN=1` подменяет реальный BBB-клиент (`DirectJoiner`) заглушкой.
 
 ## Тесты
 
@@ -46,7 +46,7 @@ go test ./... -cover          # покрытие по пакетам
 go vet ./...
 ```
 
-Юнит-тесты лежат рядом с кодом (`*_test.go`). Тесты не требуют сети: внешние API подменяются `httptest`, Chromium — заглушками (`DryJoiner`).
+Юнит-тесты лежат рядом с кодом (`*_test.go`). Тесты не требуют сети: внешние API подменяются `httptest`, BBB-клиент — заглушками (`DryJoiner`).
 
 ## CI/CD
 

@@ -1,0 +1,708 @@
+package moodle
+
+import (
+	"context"
+	"fmt"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/PuerkitoBio/goquery"
+)
+
+var (
+	attemptIDRe    = regexp.MustCompile(`attempt=(\d+)`)
+	qubaSlotIDRe   = regexp.MustCompile(`(?:question-|q)(\d+)[:-](\d+)`)
+	seqCheckNameRe = regexp.MustCompile(`q(\d+):(\d+)_:sequencecheck`)
+)
+
+// QuizInfo — данные о тесте со страницы /mod/quiz/view.php?id=<cmid>.
+type QuizInfo struct {
+	CMID                int64         `json:"cmid"`
+	CanStart            bool          `json:"can_start"`
+	InProgressAttemptID int64         `json:"in_progress_attempt_id,omitempty"`
+	Rules               []string      `json:"rules,omitempty"`
+	Feedback            string        `json:"feedback,omitempty"`
+	Attempts            []QuizAttempt `json:"attempts,omitempty"`
+}
+
+// QuizAttempt — запись из таблицы попыток на странице view.php.
+type QuizAttempt struct {
+	Number    int    `json:"number"`
+	State     string `json:"state"`
+	Grade     string `json:"grade,omitempty"`
+	ReviewURL string `json:"review_url,omitempty"`
+}
+
+// AttemptPage — страница попытки прохождения теста /mod/quiz/attempt.php.
+type AttemptPage struct {
+	CMID      int64          `json:"cmid"`
+	AttemptID int64          `json:"attempt_id"`
+	Page      int            `json:"page"`
+	NextPage  int            `json:"nextpage"` // -1 при переходе к сводке/завершению
+	Slots     []int          `json:"slots"`
+	TimeLeft  string         `json:"time_left,omitempty"`
+	Questions []QuizQuestion `json:"questions"`
+}
+
+// QuizQuestion — разобранный блок вопроса .que.
+type QuizQuestion struct {
+	Slot              int           `json:"slot"`
+	QubaID            int64         `json:"quba_id"`
+	QType             string        `json:"qtype"`     // multichoice, shortanswer, numerical, match, truefalse
+	Behaviour         string        `json:"behaviour"` // adaptive, deferredfeedback
+	State             string        `json:"state"`     // notyetanswered, complete, correct, incorrect
+	SequenceCheck     int           `json:"sequence_check"`
+	Text              string        `json:"text"`
+	Prompt            string        `json:"prompt,omitempty"`
+	Choices           []QuizChoice  `json:"choices,omitempty"`
+	InputName         string        `json:"input_name,omitempty"`
+	InputValue        string        `json:"input_value,omitempty"`
+	MatchOptions      []MatchOption `json:"match_options,omitempty"`
+	HasSubmitButton   bool          `json:"has_submit_button"`
+	SubmitButtonName  string        `json:"submit_button_name,omitempty"`
+	SubmitButtonValue string        `json:"submit_button_value,omitempty"`
+}
+
+// QuizChoice — вариант ответа для multichoice и truefalse.
+type QuizChoice struct {
+	Name    string `json:"name"`
+	Value   string `json:"value"`
+	Text    string `json:"text"`
+	Checked bool   `json:"checked"`
+	IsMulti bool   `json:"is_multi"`
+}
+
+// MatchOption — строка в вопросе на соответствие (que match).
+type MatchOption struct {
+	Name          string         `json:"name"`
+	Question      string         `json:"question"`
+	SelectedValue string         `json:"selected_value,omitempty"`
+	Choices       []SelectOption `json:"choices"`
+}
+
+// SelectOption — опция выбора из <select>.
+type SelectOption struct {
+	Value string `json:"value"`
+	Text  string `json:"text"`
+}
+
+// QuizAnswer — ответ на вопрос теста для отправки.
+type QuizAnswer struct {
+	Text    string            `json:"text,omitempty"`
+	Choice  string            `json:"choice,omitempty"`
+	Choices []string          `json:"choices,omitempty"`
+	Matches map[string]string `json:"matches,omitempty"`
+}
+
+// QuizResult — итоговый результат завершённого теста.
+type QuizResult struct {
+	CMID          int64            `json:"cmid"`
+	AttemptID     int64            `json:"attempt_id"`
+	Status        string           `json:"status"`
+	Grade         string           `json:"grade"`
+	Feedback      string           `json:"feedback,omitempty"`
+	ReviewAllowed bool             `json:"review_allowed"`
+	Questions     []QuestionResult `json:"questions,omitempty"`
+}
+
+// QuestionResult — статус и балл за конкретный вопрос после завершения.
+type QuestionResult struct {
+	Slot   int    `json:"slot"`
+	Status string `json:"status"`
+	Grade  string `json:"grade,omitempty"`
+}
+
+// InspectQuiz парсит /mod/quiz/view.php?id=<cmid> и извлекает информацию о тесте.
+func (c *Client) InspectQuiz(ctx context.Context, cmid int64) (*QuizInfo, error) {
+	doc, _, err := c.PageWithURL(ctx, fmt.Sprintf("/mod/quiz/view.php?id=%d", cmid))
+	if err != nil {
+		return nil, fmt.Errorf("moodle: inspect quiz %d: %w", cmid, err)
+	}
+
+	info := &QuizInfo{CMID: cmid}
+
+	// Ищем незавершённую попытку (в процессе)
+	doc.Find("table.quizreviewsummary tr, table.quizattemptsummary tr").Each(func(_ int, tr *goquery.Selection) {
+		t := strings.ToLower(clean(tr.Text()))
+		if strings.Contains(t, "в процессе") || strings.Contains(t, "in progress") || strings.Contains(t, "не завершено") {
+			if href := tr.Find("a[href*='attempt.php']").AttrOr("href", ""); href != "" {
+				if m := attemptIDRe.FindStringSubmatch(href); len(m) == 2 {
+					id, _ := strconv.ParseInt(m[1], 10, 64)
+					if id > 0 {
+						info.InProgressAttemptID = id
+					}
+				}
+			}
+		}
+	})
+	if info.InProgressAttemptID == 0 {
+		if btnHref := doc.Find("a.btn[href*='attempt.php'], .quizstartbuttondiv a[href*='attempt.php']").AttrOr("href", ""); btnHref != "" {
+			if m := attemptIDRe.FindStringSubmatch(btnHref); len(m) == 2 {
+				id, _ := strconv.ParseInt(m[1], 10, 64)
+				if id > 0 {
+					info.InProgressAttemptID = id
+				}
+			}
+		}
+	}
+
+	canStart := doc.Find(".quizstartbuttondiv").Length() > 0 ||
+		doc.Find("form[action*='startattempt.php']").Length() > 0 ||
+		doc.Find("form[action*='attempt.php'], a[href*='attempt.php']").Length() > 0 ||
+		info.InProgressAttemptID > 0
+	info.CanStart = canStart
+
+	// Правила
+	doc.Find(".quizinfo p").Each(func(_ int, p *goquery.Selection) {
+		if t := clean(p.Text()); t != "" {
+			info.Rules = append(info.Rules, t)
+		}
+	})
+
+	// Отзыв / итоговая оценка
+	info.Feedback = clean(doc.Find("#feedback").Text())
+
+	// Таблица прошлых попыток
+	doc.Find("table.quizreviewsummary tbody tr, table.quizattemptsummary tbody tr").Each(func(i int, tr *goquery.Selection) {
+		if tr.Find("th").Length() > 0 && tr.Find("td").Length() == 0 {
+			return
+		}
+		var state, grade, reviewURL string
+		tr.Find("td").Each(func(_ int, td *goquery.Selection) {
+			cl := td.AttrOr("class", "")
+			txt := clean(td.Text())
+			switch {
+			case strings.Contains(cl, "state") || strings.Contains(strings.ToLower(txt), "заверш") || strings.Contains(strings.ToLower(txt), "процесс"):
+				state = txt
+			case strings.Contains(cl, "grade") || strings.Contains(txt, "из") || strings.Contains(txt, "/"):
+				grade = txt
+			}
+			if a := td.Find("a[href*='review.php']"); a.Length() > 0 {
+				reviewURL = a.AttrOr("href", "")
+			}
+		})
+		if state != "" || grade != "" || reviewURL != "" {
+			info.Attempts = append(info.Attempts, QuizAttempt{
+				Number:    i + 1,
+				State:     state,
+				Grade:     grade,
+				ReviewURL: reviewURL,
+			})
+		}
+	})
+
+	return info, nil
+}
+
+// StartOrResumeAttempt начинает новую попытку либо возвращает страницу активной незавершённой попытки.
+func (c *Client) StartOrResumeAttempt(ctx context.Context, cmid int64) (*AttemptPage, error) {
+	info, err := c.InspectQuiz(ctx, cmid)
+	if err != nil {
+		return nil, err
+	}
+
+	if info.InProgressAttemptID > 0 {
+		return c.GetAttemptPage(ctx, cmid, info.InProgressAttemptID, 0)
+	}
+
+	if !info.CanStart {
+		return nil, fmt.Errorf("moodle: quiz %d is not available to start", cmid)
+	}
+
+	sesskey, err := c.Sesskey(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	vals := url.Values{
+		"cmid":    []string{strconv.FormatInt(cmid, 10)},
+		"sesskey": []string{sesskey},
+		"_qf__mod_quiz_form_preflight_check_form": []string{"1"},
+		"submitbutton": []string{"Начать попытку"},
+	}
+
+	doc, finalURL, err := c.PostForm(ctx, "/mod/quiz/startattempt.php", vals)
+	if err != nil {
+		return nil, fmt.Errorf("moodle: start attempt cmid=%d: %w", cmid, err)
+	}
+
+	attemptID := int64(0)
+	if m := attemptIDRe.FindStringSubmatch(finalURL); len(m) == 2 {
+		attemptID, _ = strconv.ParseInt(m[1], 10, 64)
+	}
+	if attemptID == 0 {
+		if raw := doc.Find("input[name=attempt]").AttrOr("value", ""); raw != "" {
+			attemptID, _ = strconv.ParseInt(raw, 10, 64)
+		}
+	}
+	if attemptID == 0 {
+		return nil, fmt.Errorf("moodle: start attempt cmid=%d: attempt ID not found in %s", cmid, finalURL)
+	}
+
+	return parseAttemptPage(doc, cmid, attemptID)
+}
+
+// GetAttemptPage запрашивает страницу попытки attempt.php с номером page.
+func (c *Client) GetAttemptPage(ctx context.Context, cmid, attemptID int64, page int) (*AttemptPage, error) {
+	path := fmt.Sprintf("/mod/quiz/attempt.php?attempt=%d&cmid=%d", attemptID, cmid)
+	if page > 0 {
+		path += fmt.Sprintf("&page=%d", page)
+	}
+	doc, _, err := c.PageWithURL(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("moodle: get attempt page cmid=%d attempt=%d: %w", cmid, attemptID, err)
+	}
+	return parseAttemptPage(doc, cmid, attemptID)
+}
+
+func parseAttemptPage(doc *goquery.Document, cmid, attemptID int64) (*AttemptPage, error) {
+	page := &AttemptPage{
+		CMID:      cmid,
+		AttemptID: attemptID,
+		NextPage:  -1,
+	}
+
+	if tp := doc.Find("input[name=thispage]").AttrOr("value", ""); tp != "" {
+		page.Page, _ = strconv.Atoi(tp)
+	}
+	if np := doc.Find("input[name=nextpage]").AttrOr("value", ""); np != "" {
+		page.NextPage, _ = strconv.Atoi(np)
+	}
+	if slotsStr := doc.Find("input[name=slots]").AttrOr("value", ""); slotsStr != "" {
+		for _, s := range strings.Split(slotsStr, ",") {
+			s = strings.TrimSpace(s)
+			if n, err := strconv.Atoi(s); err == nil {
+				page.Slots = append(page.Slots, n)
+			}
+		}
+	}
+	page.TimeLeft = clean(doc.Find("#quiz-time-left, #quiz-timer").First().Text())
+
+	doc.Find(".que").Each(func(_ int, que *goquery.Selection) {
+		q := parseQuestion(que)
+		if q.Slot > 0 {
+			page.Questions = append(page.Questions, q)
+		}
+	})
+
+	return page, nil
+}
+
+func parseQuestion(que *goquery.Selection) QuizQuestion {
+	q := QuizQuestion{}
+
+	idAttr := que.AttrOr("id", "")
+	if m := qubaSlotIDRe.FindStringSubmatch(idAttr); len(m) == 3 {
+		q.QubaID, _ = strconv.ParseInt(m[1], 10, 64)
+		q.Slot, _ = strconv.Atoi(m[2])
+	}
+
+	classes := strings.Fields(que.AttrOr("class", ""))
+	for _, cl := range classes {
+		switch cl {
+		case "multichoice", "shortanswer", "numerical", "match", "truefalse", "essay", "calculated", "ddwtos", "multianswer":
+			q.QType = cl
+		case "adaptive", "deferredfeedback", "immediatefeedback", "interactive", "adaptivenopenalty":
+			q.Behaviour = cl
+		case "notyetanswered", "complete", "correct", "incorrect", "partiallycorrect", "invalidanswer", "answersaved":
+			q.State = cl
+		}
+	}
+	if q.QType == "" && len(classes) >= 2 {
+		q.QType = classes[1]
+	}
+
+	// Sequence check
+	seqInput := que.Find("input[name$='_:sequencecheck']").First()
+	if seqInput.Length() > 0 {
+		if m := seqCheckNameRe.FindStringSubmatch(seqInput.AttrOr("name", "")); len(m) == 3 {
+			if q.QubaID == 0 {
+				q.QubaID, _ = strconv.ParseInt(m[1], 10, 64)
+			}
+			if q.Slot == 0 {
+				q.Slot, _ = strconv.Atoi(m[2])
+			}
+		}
+		q.SequenceCheck, _ = strconv.Atoi(seqInput.AttrOr("value", "1"))
+	}
+
+	// Текст вопроса со склейкой битовых строк
+	q.Text = extractQText(que.Find(".qtext"))
+	q.Prompt = clean(que.Find(".prompt").Text())
+
+	// Варианты для multichoice и truefalse
+	checkboxes := que.Find(".answer input[type=checkbox]")
+	radios := que.Find(".answer input[type=radio]")
+	if checkboxes.Length() > 0 {
+		checkboxes.Each(func(_ int, in *goquery.Selection) {
+			name := in.AttrOr("name", "")
+			val := in.AttrOr("value", "1")
+			_, checked := in.Attr("checked")
+			txt := findChoiceLabel(in)
+			q.Choices = append(q.Choices, QuizChoice{
+				Name:    name,
+				Value:   val,
+				Text:    txt,
+				Checked: checked,
+				IsMulti: true,
+			})
+		})
+	} else if radios.Length() > 0 {
+		radios.Each(func(_ int, in *goquery.Selection) {
+			name := in.AttrOr("name", "")
+			val := in.AttrOr("value", "")
+			_, checked := in.Attr("checked")
+			txt := findChoiceLabel(in)
+			q.InputName = name
+			q.Choices = append(q.Choices, QuizChoice{
+				Name:    name,
+				Value:   val,
+				Text:    txt,
+				Checked: checked,
+				IsMulti: false,
+			})
+		})
+	}
+
+	// Поля ввода для shortanswer / numerical
+	if textInput := que.Find(".answer input[type=text], .answer input[type=number]").First(); textInput.Length() > 0 {
+		q.InputName = textInput.AttrOr("name", "")
+		q.InputValue = textInput.AttrOr("value", "")
+	}
+
+	// Вопросы на соответствие match
+	que.Find(".answer table tr").Each(func(_ int, tr *goquery.Selection) {
+		subQ := clean(tr.Find("td.text").First().Text())
+		sel := tr.Find("select").First()
+		if sel.Length() == 0 {
+			return
+		}
+		opt := MatchOption{
+			Name:          sel.AttrOr("name", ""),
+			Question:      subQ,
+			SelectedValue: sel.Find("option[selected]").AttrOr("value", ""),
+		}
+		sel.Find("option").Each(func(_ int, o *goquery.Selection) {
+			val := o.AttrOr("value", "")
+			txt := clean(o.Text())
+			if val != "" && txt != "" {
+				opt.Choices = append(opt.Choices, SelectOption{Value: val, Text: txt})
+			}
+		})
+		if opt.Name != "" {
+			q.MatchOptions = append(q.MatchOptions, opt)
+		}
+	})
+
+	// Кнопка проверки в режиме adaptive
+	if submitBtn := que.Find("button[name$='_-submit'], input[type=submit][name$='_-submit']").First(); submitBtn.Length() > 0 {
+		q.HasSubmitButton = true
+		q.SubmitButtonName = submitBtn.AttrOr("name", "")
+		q.SubmitButtonValue = submitBtn.AttrOr("value", "1")
+	}
+
+	return q
+}
+
+func findChoiceLabel(in *goquery.Selection) string {
+	id := in.AttrOr("id", "")
+	if id != "" {
+		if lbl := in.Closest(".que").Find(fmt.Sprintf("label[for='%s']", id)).First(); lbl.Length() > 0 {
+			if r := lbl.Find("[data-region='answer-label']").First(); r.Length() > 0 {
+				return clean(r.Text())
+			}
+			lblClone := lbl.Clone()
+			lblClone.Find(".answernumber, .accesshide").Remove()
+			return clean(lblClone.Text())
+		}
+	}
+	parent := in.Closest(".r0, .r1, div, p")
+	if r := parent.Find("[data-region='answer-label']").First(); r.Length() > 0 {
+		return clean(r.Text())
+	}
+	parentClone := parent.Clone()
+	parentClone.Find("input, .answernumber, .accesshide").Remove()
+	return clean(parentClone.Text())
+}
+
+// isBitString определяет, состоит ли строка исключительно из 0 и 1 (с возможными пробелами).
+func isBitString(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 3 {
+		return false
+	}
+	for _, r := range s {
+		if r != '0' && r != '1' && r != ' ' {
+			return false
+		}
+	}
+	return true
+}
+
+// extractQText парсит текст вопроса .qtext и аккуратно склеивает соседние абзацы битовых строк.
+func extractQText(sel *goquery.Selection) string {
+	if sel.Length() == 0 {
+		return ""
+	}
+	var paragraphs []string
+	sel.Find("p").Each(func(_ int, p *goquery.Selection) {
+		t := clean(p.Text())
+		if t != "" {
+			paragraphs = append(paragraphs, t)
+		}
+	})
+	if len(paragraphs) == 0 {
+		return clean(sel.Text())
+	}
+
+	var b strings.Builder
+	prevIsBits := false
+	for i, p := range paragraphs {
+		currIsBits := isBitString(p)
+		if i > 0 {
+			if prevIsBits && currIsBits {
+				// Соседние абзацы битовых строк склеиваем без пробела и перевода строки
+			} else {
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString(p)
+		prevIsBits = currIsBits
+	}
+	return b.String()
+}
+
+// SubmitAnswers отправляет ответы формы #responseform на /mod/quiz/processattempt.php?cmid=<cmid>.
+// При checkSlot > 0 добавляет кнопку q<qubaid>:<slot>_-submit=1 для проверки конкретного вопроса.
+func (c *Client) SubmitAnswers(ctx context.Context, page *AttemptPage, answers map[int]QuizAnswer, checkSlot int) (*AttemptPage, error) {
+	sesskey, err := c.Sesskey(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	fields := []FormField{
+		{Name: "attempt", Value: strconv.FormatInt(page.AttemptID, 10)},
+		{Name: "thispage", Value: strconv.Itoa(page.Page)},
+		{Name: "timeup", Value: "0"},
+		{Name: "sesskey", Value: sesskey},
+		{Name: "mdlscrollto", Value: "0"},
+	}
+
+	nextPage := page.NextPage
+	if checkSlot > 0 {
+		nextPage = page.Page
+	}
+	fields = append(fields, FormField{Name: "nextpage", Value: strconv.Itoa(nextPage)})
+
+	slotStrs := make([]string, len(page.Slots))
+	for i, s := range page.Slots {
+		slotStrs[i] = strconv.Itoa(s)
+	}
+	fields = append(fields, FormField{Name: "slots", Value: strings.Join(slotStrs, ",")})
+
+	for _, q := range page.Questions {
+		fields = append(fields, FormField{
+			Name:  fmt.Sprintf("q%d:%d_:flagged", q.QubaID, q.Slot),
+			Value: "0",
+		})
+		fields = append(fields, FormField{
+			Name:  fmt.Sprintf("q%d:%d_:sequencecheck", q.QubaID, q.Slot),
+			Value: strconv.Itoa(q.SequenceCheck),
+		})
+
+		ans, hasAns := answers[q.Slot]
+
+		switch {
+		case len(q.Choices) > 0 && q.Choices[0].IsMulti:
+			// multichoice checkbox
+			for _, ch := range q.Choices {
+				// Всегда отправляется hidden=0
+				fields = append(fields, FormField{Name: ch.Name, Value: "0"})
+
+				checked := false
+				if hasAns {
+					for _, c := range ans.Choices {
+						if c == ch.Value || c == ch.Name || c == ch.Text {
+							checked = true
+							break
+						}
+					}
+				} else {
+					checked = ch.Checked
+				}
+				if checked {
+					fields = append(fields, FormField{Name: ch.Name, Value: "1"})
+				}
+			}
+
+		case len(q.Choices) > 0 && !q.Choices[0].IsMulti:
+			// multichoice radio / truefalse
+			val := ""
+			if hasAns {
+				val = ans.Choice
+				if val == "" && len(ans.Choices) > 0 {
+					val = ans.Choices[0]
+				}
+				if val == "" && ans.Text != "" {
+					for _, ch := range q.Choices {
+						if ch.Text == ans.Text {
+							val = ch.Value
+							break
+						}
+					}
+				}
+			}
+			if val == "" {
+				for _, ch := range q.Choices {
+					if ch.Checked {
+						val = ch.Value
+						break
+					}
+				}
+			}
+			if val != "" {
+				fields = append(fields, FormField{Name: q.InputName, Value: val})
+			}
+
+		case q.InputName != "":
+			// shortanswer / numerical
+			val := q.InputValue
+			if hasAns && ans.Text != "" {
+				val = ans.Text
+			}
+			fields = append(fields, FormField{Name: q.InputName, Value: val})
+
+		case len(q.MatchOptions) > 0:
+			// match
+			for _, opt := range q.MatchOptions {
+				val := opt.SelectedValue
+				if hasAns && ans.Matches != nil {
+					if v, ok := ans.Matches[opt.Name]; ok {
+						val = v
+					}
+				}
+				fields = append(fields, FormField{Name: opt.Name, Value: val})
+			}
+		}
+	}
+
+	if checkSlot > 0 {
+		for _, q := range page.Questions {
+			if q.Slot == checkSlot && q.HasSubmitButton {
+				fields = append(fields, FormField{
+					Name:  q.SubmitButtonName,
+					Value: q.SubmitButtonValue,
+				})
+				break
+			}
+		}
+	} else {
+		fields = append(fields, FormField{Name: "next", Value: "Следующая страница"})
+	}
+
+	path := fmt.Sprintf("/mod/quiz/processattempt.php?cmid=%d", page.CMID)
+	doc, finalURL, err := c.PostMultipart(ctx, path, fields)
+	if err != nil {
+		return nil, fmt.Errorf("moodle: submit answers cmid=%d attempt=%d: %w", page.CMID, page.AttemptID, err)
+	}
+
+	if strings.Contains(finalURL, "summary.php") {
+		return &AttemptPage{
+			CMID:      page.CMID,
+			AttemptID: page.AttemptID,
+			Page:      -1,
+			NextPage:  -1,
+		}, nil
+	}
+
+	return parseAttemptPage(doc, page.CMID, page.AttemptID)
+}
+
+// FinishAttempt завершает попытку теста и извлекает итоговый балл и статус.
+func (c *Client) FinishAttempt(ctx context.Context, cmid, attemptID int64) (*QuizResult, error) {
+	// 1. Запрашиваем summary.php для обновления sesskey
+	_, _, err := c.PageWithURL(ctx, fmt.Sprintf("/mod/quiz/summary.php?attempt=%d&cmid=%d", attemptID, cmid))
+	if err != nil {
+		return nil, fmt.Errorf("moodle: finish attempt summary cmid=%d attempt=%d: %w", cmid, attemptID, err)
+	}
+
+	sesskey, err := c.Sesskey(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	vals := url.Values{
+		"attempt":       []string{strconv.FormatInt(attemptID, 10)},
+		"finishattempt": []string{"1"},
+		"timeup":        []string{"0"},
+		"slots":         []string{""},
+		"cmid":          []string{strconv.FormatInt(cmid, 10)},
+		"sesskey":       []string{sesskey},
+	}
+
+	doc, finalURL, err := c.PostForm(ctx, "/mod/quiz/processattempt.php", vals)
+	if err != nil {
+		return nil, fmt.Errorf("moodle: finish attempt cmid=%d attempt=%d: %w", cmid, attemptID, err)
+	}
+
+	res := &QuizResult{
+		CMID:      cmid,
+		AttemptID: attemptID,
+		Status:    "Завершено",
+	}
+
+	if strings.Contains(finalURL, "review.php") {
+		res.ReviewAllowed = true
+		doc.Find("table.quizreviewsummary tr").Each(func(_ int, tr *goquery.Selection) {
+			th := strings.ToLower(clean(tr.Find("th").Text()))
+			td := clean(tr.Find("td").Text())
+			switch {
+			case strings.Contains(th, "состояние") || strings.Contains(th, "state"):
+				if td != "" {
+					res.Status = td
+				}
+			case strings.Contains(th, "оценка") || strings.Contains(th, "grade") || strings.Contains(th, "баллы"):
+				if td != "" {
+					res.Grade = td
+				}
+			}
+		})
+		res.Feedback = clean(doc.Find("#feedback").Text())
+
+		doc.Find(".que").Each(func(_ int, que *goquery.Selection) {
+			slot := 0
+			if m := qubaSlotIDRe.FindStringSubmatch(que.AttrOr("id", "")); len(m) == 3 {
+				slot, _ = strconv.Atoi(m[2])
+			}
+			state := clean(que.Find(".info .state").Text())
+			grade := clean(que.Find(".info .grade").Text())
+			if slot > 0 {
+				res.Questions = append(res.Questions, QuestionResult{
+					Slot:   slot,
+					Status: state,
+					Grade:  grade,
+				})
+			}
+		})
+	} else {
+		// Редирект на view.php (просмотр запрещён)
+		res.ReviewAllowed = false
+		res.Feedback = clean(doc.Find("#feedback").Text())
+
+		doc.Find("table.quizreviewsummary tbody tr, table.quizattemptsummary tbody tr").Each(func(_ int, tr *goquery.Selection) {
+			tr.Find("td").Each(func(_ int, td *goquery.Selection) {
+				txt := clean(td.Text())
+				if strings.Contains(txt, "из") || strings.Contains(txt, "%") {
+					res.Grade = txt
+				}
+			})
+		})
+		if res.Grade == "" && res.Feedback != "" {
+			res.Grade = res.Feedback
+		}
+	}
+
+	return res, nil
+}

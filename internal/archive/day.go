@@ -48,26 +48,30 @@ func ShouldHarvest(lessons []model.Lesson, now time.Time, grace time.Duration) b
 		grace = HarvestGrace
 	}
 	today := now.Format("2006-01-02")
-	var any bool
-	var last time.Time
 	for _, l := range lessons {
 		if !l.Online || !model.IsLecture(l.Type) || l.Date != today {
 			continue
 		}
-		any = true
-		if l.Finish.After(last) {
-			last = l.Finish
+		if !l.Finish.IsZero() && !now.Before(l.Finish.Add(grace)) {
+			logx.Debugf("archive", "ShouldHarvest: lecture %s finished at %s + grace %s <= now %s -> true", l.Type, l.Finish, grace, now)
+			return true
+		}
+	}
+	logx.Debugf("archive", "ShouldHarvest: no finished lectures with grace today=%s -> false", today)
+	return false
+}
+
+// AllLecturesFinished reports whether all online lectures scheduled for today
+// have finished before now. If there are no online lectures today, it returns true.
+func AllLecturesFinished(lessons []model.Lesson, now time.Time) bool {
+	today := now.Format("2006-01-02")
+	for _, l := range lessons {
+		if !l.Online || !model.IsLecture(l.Type) || l.Date != today {
+			continue
 		}
 		if now.Before(l.Finish) {
-			logx.Debugf("archive", "ShouldHarvest: lecture %s not finished (finish=%s)", l.Type, l.Finish)
 			return false
 		}
 	}
-	if !any || last.IsZero() {
-		logx.Debugf("archive", "ShouldHarvest: no lectures today=%s any=%v last=%s", today, any, last)
-		return false
-	}
-	out := !now.Before(last.Add(grace))
-	logx.Debugf("archive", "ShouldHarvest: last=%s grace=%s -> %v", last, grace, out)
-	return out
+	return true
 }
