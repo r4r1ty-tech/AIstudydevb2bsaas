@@ -1,12 +1,25 @@
 # План: бот на онлайн-лекции SSAU
 
-> **Состояние на 2026-11-14 — ниже исторический план, часть решений пересмотрена.** Актуальное устройство — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), эксплуатация — [docs/OPERATIONS.md](docs/OPERATIONS.md). Главное, что поменялось:
+> **Состояние на 2026-11-14 — ниже исторический план, часть решений пересмотрена и выполнена.** Актуальное устройство — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), эксплуатация — [docs/OPERATIONS.md](docs/OPERATIONS.md), тестирование — [docs/TESTING.md](docs/TESTING.md). Главное, что поменялось:
 > - **Бот — только личный пароль в панель и уведомления.** Онбординга, карточек T-15, live-карточек, меню, `/connect`, `/test`, `/panel` в боте больше нет; всё это — в панели (первый вход, решения «заходить/нет» по парам, аккаунт универа, тест BBB в «Служебном»). Молчание = заходить.
-> - **Вход в панель — личный часовой пароль из бота** (HMAC от ключа, id и часа): по нему панель знает, кто вошёл, и показывает его данные; «Служебное» — только админу. Проверки Telegram `initData` нет.
+> - **Вход в панель — личный часовой пароль из бота** (HMAC от ключа, id и часа) с обменом на долгую куку `panel_session` (`web_sessions`) и защитой `/api/login` от перебора (`loginLimiter`). Проверки Telegram `initData` нет.
 > - **Прод:** VDS ГлебПрод `13.143.234.228`, панель `https://ssau.r4r1ty.fun` за Caddy с Let's Encrypt (туннель не нужен), доступ по `PANEL_ALLOW_IPS` (выходы VPN-пула).
-> - **ИИ:** бесплатная цепочка Google AI Studio (несколько подписанных ключей) → OpenCode Zen для тестов Moodle и конспектов; у каждого свой выбор провайдера, модели и ключа; `LLM_API_*` — только админу.
-> - **Moodle:** авторешение открывшихся тестов, кнопка «Пройти» (в т.ч. для просроченных), журнал решателя у админа; при сбое ИИ попытка не завершается. ФИО — из ЛК.
-> - **Админ:** `ADMIN_TELEGRAM_ID` или логин универа на `ADMIN_LOGIN_SUFFIX` (`528`).
+> - **ИИ и личные ключи:** общая бесплатная цепочка `PoolChain` (Google AI Studio + OpenCode Zen `glm-5.3-flash-free`, без `cheaper`) с лимитом 2 параллельных вызова на ключ и cooldown на 429 (`KeyPool`); пользователи могут добавлять свои ключи в панель (`llm_keys`, `share_pool`) и смотреть суточный расход/лимиты (`llm_usage`). Межпроцессный мост `access.InitLLMBridge` подключён в `bbb`, `rasp` и `panel`.
+> - **Медиа и конспекты:** одна запись и один пак на встречу (`MeetingKey`, `pack_lessons`, `ClaimPackForNotes` 45-мин lease, таргетированная рассылка `announceNotes`), 4-стадийный кэш `.build_cache.json`, STT через бесплатный пул Gemini с фоллбэком на AssemblyAI/Fish/Groq, vision батчами по 6 слайдов + текстовый слой `slides.json` (`FirstShownAt`), печать PDF с `Setpgid`.
+> - **Moodle:** параллельное решение тестов (`MOODLE_WORKERS`, `TryLockQuiz`, 4 воркера страниц с последовательной отправкой, быстрый режим при нехватке времени, параллельный vision картинок, `QuizChainWithVault`, SSRF-фильтр `openPage`), «Пройти» и «Пройти все», журнал решателя у админа.
+> - **Админ и изоляция:** админ определяется строго по `ADMIN_TELEGRAM_ID` (и входу по `PANEL_PASSWORD`; `ADMIN_LOGIN_SUFFIX` прав не даёт); пары ИОТ изолированы по `Lesson.Owner`, ссылки UI проходят через `safeHref`, `PANEL_DEMO=1` изолирован `sanitizeDemoConfig`.
+
+### Выполненные задачи (1–7) и текущее состояние
+
+| Задача | Содержание | Статус |
+| --- | --- | --- |
+| 1 | Изоляция расшаренных и платных цепочек, `KeyPool` (семафор 2/ключ, cooldown на 429, `ErrAllCooldown`), `PoolChain` | Выполнено |
+| 2 | Единая запись и один пак на встречу (`MeetingKey`, `pack_lessons`, `migrateDeduplicatePacks`, `chooseRecorder`, `ClaimPackForNotes` 45м, таргетированная `announceNotes`) | Выполнено |
+| 3 | Мультимодальность в `internal/llm` (`AskParts`/`AskImage`/`AskAudio`), STT через Gemini-пул (10м чанки/8с перекрытие) + платные фоллбэки, батч-vision + фоллбэк на `slides.json` | Выполнено |
+| 4 | 4-стадийный инкрементальный кэш `.build_cache.json`, `FirstShownAt`/`Text` в `slides.json`, изоляция процесса Chromium (`Setpgid`), надёжный захват аудио/слайдов | Выполнено |
+| 5 | Личные ключи ИИ в панели (`llm_keys`, `llm_usage`, `vault`, `/api/llm/keys*`, `/api/llm/limits`, `share_pool`), `InitLLMBridge` в `bbb`/`rasp`/`panel` | Выполнено |
+| 6 | Параллельный решатель Moodle (`MOODLE_WORKERS=4`, `kicked`-приоритет, `TryLockQuiz`, `TimeLeft` + `FastMode`, 4 воркера страниц + ascending submit, `sequential` nav, параллельный vision, SSRF-защита `openPage`, `QuizChainWithVault`, `collectCourseMaterials`) | Выполнено |
+| 7 | Безопасность и надёжность: строго `ADMIN_TELEGRAM_ID` (убрано повышение по суффиксу `528`), изоляция ИОТ по `Owner`, `PANEL_DEMO` санитайзер, `safeHref`, `/api/login` rate-limiter, `wg.Wait()` при остановке `rasp` | Выполнено |
 
 Личный инструмент на ~5 человек одной группы. Не публичный SaaS.
 
@@ -319,26 +332,24 @@ Chromium (две группы вкладок, PulseAudio `ssau_rec`) полно�
 - Сбор слайдов идёт **прямо во время лекции** через активную DDP-сессию рекордера (инкрементально каждые 45 с и перед выходом из комнаты, сохраняя все показанные презентации до 60 слайдов; `maybeHarvest` после пары остался резервным фоллбэком). Конспект (`transcript.txt`, vision слайдов до 60 шт., `notes.md`, `notes.pdf`) собирается сразу после окончания лекции в тот же день. Chromium (`CHROME_BIN`) нужен только на этапе печати `notes.pdf` (`print-to-pdf`).
 
 **После пары**
-- STT: AssemblyAI → Fish → Groq Whisper. Vision слайдов: Groq (qwen) → Grok. LLM: любой OpenAI-совместимый `chat/completions`, `LLM_MODEL` обязателен. PDF: goldmark + KaTeX + `chromium --headless --print-to-pdf`.
-- Распознавание текста слайдов уже есть (VLM, не OCR) — этап 12 сделан частично, нужен по качеству.
-- В публичный `LectionsSSAU` уходят `transcript.txt` (вся речь пары) и `notes.pdf`. После публикации `audio.ogg` удаляется сразу, остальное через 24 ч — локального архива не остаётся.
+- STT: сначала бесплатный пул Gemini (`transcribeGemini`, чанками по 10 мин), затем платные фоллбэки AssemblyAI → Fish → Groq Whisper. Vision слайдов: `PoolChain` батчами по 6 слайдов (до 60), далее Groq/Grok при пустом пуле и поштучный фоллбэк на текстовый слой `slides.json`. LLM: OpenAI-совместимый `chat/completions`. PDF: goldmark + KaTeX + `chromium --headless --print-to-pdf` (в группе `Setpgid`).
+- Пайплайн `notes.Build` ведёт 4-стадийный инкрементальный кэш `.build_cache.json` и `.slides_desc.txt`, защищён 45-минутным lease `ClaimPackForNotes`.
+- В публичный `LectionsSSAU` уходят `transcript.txt` и `notes.pdf`. Рассылка уведомлений в Telegram (`announceNotes`) таргетируется по `PackLessonIDs` и `Lesson.For(u)` (ИОТ и подгруппы). После публикации `audio.ogg` удаляется сразу, остальное через 24 ч.
 - Ключи `ASSEMBLYAI/FISH/GROQ/GROK` деплой не ставит — только руками в `.env` на VDS. Без `GITHUB_TOKEN` публикация молча выключена.
 
 **Панель и бот**
-- Экраны «Сегодня / Неделя / Сдать / Конспекты / Ещё»; пульт (Тест, Сейчас, Люди, Парсер, Логи) — в «Ещё → Служебное», опрос раз в 4 с.
-- Вход в панель — пароль `PANEL_PASSWORD` или список `PANEL_ALLOW_IPS`; **проверки Telegram initData нет**, «только админ» на сервере не проверяется — любой с паролем видит весь `/api`. `PANEL_DEMO=1` обходит пароль.
-- HTTPS: только cloudflared quick tunnel (`deploy/tunnel.sh` сам переписывает URL, бот подхватывает за 20 с). ngrok и Caddy в деплое нет. `LISTEN_ADDR=:8080` слушает все интерфейсы по http; за туннелем фильтр по IP видит только loopback без `PANEL_TRUST_PROXY=1`.
-- Аккаунт универа подключается и в панели, и в боте (`/connect`, пароль удаляется из чата). В боте ещё `/tasks`, кнопка «Сдать», напоминания за 24 и 3 ч. Тексты бота местами говорят про «три кнопки».
-- Онбординг в Telegram: ФИО → подгруппа → вейкворды (с «Пропустить»). Правила ФИО разные: бот 2–4 слова до 80 символов, панель от 2 слов, API до 64.
-- `ssau.target` поднимает пять юнитов (четыре процесса + туннель).
+- Экраны «Сегодня / Неделя / Сдать / Конспекты / Ещё»; в «Ещё» есть «Мои ключи ИИ» (`/api/llm/keys*`, `share_pool`, `/api/llm/limits`); пульт (ИИ и ключи, Тесты Moodle, Тест, Сейчас, Люди, Пары, Парсер, Логи) — в «Ещё → Служебное» строго для `ADMIN_TELEGRAM_ID` / `PANEL_PASSWORD`, опрос раз в 4 с.
+- Вход в панель — личный часовой пароль / `PANEL_PASSWORD` с обменом на куку `panel_session` (`POST /api/login`, rate-limit 5 ошибок за 10 мин) + `PANEL_ALLOW_IPS`. `PANEL_DEMO=1` санирует все ключи и токены (`sanitizeDemoConfig`).
+- Пары ИОТ (`Lesson.Owner`) изолированы через `Lesson.For` и `lessonVisible`; ссылки в UI фильтруются `safeHref`.
 
-## Известные баги (из сверки)
+## Закрытые баги (из прошлой сверки)
 
-1. Пак только из слайдов (речи нет) не публикуется: `Transcript` указывает на несуществующий `transcript.txt`, публикация падает и повторяется каждые 5 минут без лимита.
-2. Пустая запись при наличии слайдов всё равно уходит в vision и LLM и рассылается как готовый конспект (доки обещают обратное).
-3. Слайды с 41-го по 60-й молча отбрасываются перед vision.
-4. Неудачный сбор слайдов не повторяется (`slides_done` ставится всегда).
-5. Повтор конспекта заново платит за STT и vision — готовый `transcript.txt` не используется как кэш.
+Все 5 пунктов старой сверки устранены в ходе задач 1–7:
+1. Паки с пустым/тихим аудио закрываются как `empty` (`capture.Probe`) без попыток публикации и зацикливания.
+2. Повторная сборка конспекта не тратит лишний STT/vision/LLM благодаря 4-стадийному `.build_cache.json` (`AudioDurationSec`/`AudioSize`, `SlidesHash`, `SummarizeInputHash`, `PDFNotesHash`).
+3. Vision обрабатывает до 60 слайдов (`maxVisionSlides = 60`) батчами по 6, с фоллбэком на текстовый слой `slides.json`.
+4. Сбор слайдов и `slides.json` идёт инкрементально на паре и через фоллбэк `maybeHarvest`, без потери при сбое.
+5. Дублирующие записи/паки на одну лекцию устранены через `MeetingKey`, `pack_lessons`, `migrateDeduplicatePacks` и `chooseRecorder`.
 
 ## Этапы
 

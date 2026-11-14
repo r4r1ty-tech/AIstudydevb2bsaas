@@ -6,8 +6,12 @@ import (
 	"html"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -19,7 +23,69 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/moodle"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/quizlog"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/websearch"
 )
+
+const (
+	quizPageWorkers      = 4
+	quizTimeReserve      = 75 * time.Second
+	quizFastModeTimeLeft = 3 * time.Minute
+	quizWaveBudget       = 45 * time.Second
+)
+
+var (
+	timeLeftColonRe = regexp.MustCompile(`\b(\d+):(\d{1,2})(?::(\d{1,2}))?\b`)
+	timeLeftUnitRe  = regexp.MustCompile(`(\d+)\s*([a-zа-яё]+)`)
+)
+
+// parseTimeLeft разбирает остаток времени из таймера Moodle (#quiz-time-left / #quiz-timer).
+func parseTimeLeft(raw string) (time.Duration, bool) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	if s == "" {
+		return 0, false
+	}
+	if m := timeLeftColonRe.FindStringSubmatch(s); len(m) == 4 {
+		a, err1 := strconv.Atoi(m[1])
+		b, err2 := strconv.Atoi(m[2])
+		if err1 == nil && err2 == nil {
+			if m[3] != "" {
+				sec, err3 := strconv.Atoi(m[3])
+				if err3 == nil && b < 60 && sec < 60 {
+					return time.Duration(a)*time.Hour + time.Duration(b)*time.Minute + time.Duration(sec)*time.Second, true
+				}
+			} else if b < 60 {
+				return time.Duration(a)*time.Minute + time.Duration(b)*time.Second, true
+			}
+		}
+	}
+	var total time.Duration
+	matched := false
+	for _, m := range timeLeftUnitRe.FindAllStringSubmatch(s, -1) {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		unit := m[2]
+		switch {
+		case unit == "д" || unit == "d" || strings.HasPrefix(unit, "дн") || strings.HasPrefix(unit, "ден") || strings.HasPrefix(unit, "day"):
+			total += time.Duration(n) * 24 * time.Hour
+			matched = true
+		case unit == "ч" || unit == "h" || strings.HasPrefix(unit, "час") || strings.HasPrefix(unit, "hr") || strings.HasPrefix(unit, "hour"):
+			total += time.Duration(n) * time.Hour
+			matched = true
+		case unit == "м" || unit == "m" || strings.HasPrefix(unit, "мин") || strings.HasPrefix(unit, "min"):
+			total += time.Duration(n) * time.Minute
+			matched = true
+		case unit == "с" || unit == "s" || strings.HasPrefix(unit, "сек") || strings.HasPrefix(unit, "sec"):
+			total += time.Duration(n) * time.Second
+			matched = true
+		}
+	}
+	if !matched {
+		return 0, false
+	}
+	return total, true
+}
 
 func (s *Syncer) getCfg() *config.Config {
 	if s.Cfg != nil {
@@ -35,8 +101,11 @@ func (s *Syncer) getCfg() *config.Config {
 // detectAndHandleOpenedQuizzes проверяет, какие тесты стали открытыми для попыток,
 // уведомляет пользователя и запускает парсинг или авторешение через LLM.
 func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Account, c *moodle.Client, prev, cur []model.MoodleItem) {
-	wakeKickVal, ok, _ := s.Store.GetSetting(WakeKickKey)
-	wakeKicked := ok && wakeKickVal != ""
+	wakeKicked := isWakeKicked(ctx)
+	if !wakeKicked && s.Store != nil {
+		wakeKickVal, ok, _ := s.Store.GetSetting(WakeKickKey)
+		wakeKicked = ok && wakeKickVal != ""
+	}
 
 	// «Пройти» из панели: решаем сейчас, даже если тест просрочен или
 	// по нашим эвристикам «не открыт» — пусть Moodle сам скажет, можно ли.
@@ -127,6 +196,13 @@ func (s *Syncer) takeForced(id int64, prev, cur []model.MoodleItem) []model.Mood
 // forced — «Пройти» из панели: почему не вышло, человеку сообщаем всегда.
 func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.Client, it model.MoodleItem, forced bool) {
 	tag := quizTag{TG: acc.TelegramID, CMID: it.CMID, Page: quizNoPage}
+	quizLockID := fmt.Sprintf("%d", it.CMID)
+	if !s.TryLockQuiz(acc.TelegramID, quizLockID) {
+		logx.Infof("uni", "quiz %s: выход: тест уже решается в другой горутине, пропуск", tag)
+		return
+	}
+	defer s.UnlockQuiz(acc.TelegramID, quizLockID)
+
 	logx.Infof("uni", "quiz %s: вход: курс=%q название=%q forced=%v", tag, it.Course, it.Title, forced)
 	solvedKey := fmt.Sprintf("quiz_solved:%d:%d", acc.TelegramID, it.CMID)
 	if v, ok, err := s.Store.GetSetting(solvedKey); err == nil && ok && v != "" {
@@ -177,10 +253,13 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		refuse("попытка не началась: " + err.Error())
 		return
 	}
+	attemptStarted := time.Now()
 
 	pages := []*moodle.AttemptPage{attempt}
 	cur := attempt
 	var pageErr error
+	sequentialNav := false
+	seenPages := map[int]bool{cur.Page: true}
 	for cur.NextPage > 0 {
 		next, err := c.GetAttemptPage(ctx, it.CMID, cur.AttemptID, cur.NextPage)
 		if err != nil {
@@ -188,6 +267,12 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 			pageErr = fmt.Errorf("не загрузилась страница %d попытки: %w", cur.NextPage+1, err)
 			break
 		}
+		if next.Page != cur.NextPage || next.Page < 0 || seenPages[next.Page] {
+			logx.Infof("uni", "quiz %s: последовательная навигация (ожидалась страница %d, пришла %d)", tag, cur.NextPage, next.Page)
+			sequentialNav = true
+			break
+		}
+		seenPages[next.Page] = true
 		pages = append(pages, next)
 		cur = next
 	}
@@ -195,7 +280,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	cfg := s.getCfg()
 	var chain []llm.Target
 	if cfg != nil {
-		chain = access.QuizChain(cfg, s.Store, acc.TelegramID)
+		chain = access.QuizChainWithVault(cfg, s.Store, s.Vault, acc.TelegramID)
 	}
 	hasLLM := len(chain) > 0
 	run := &quizlog.Run{At: s.now(), TelegramID: acc.TelegramID, CMID: it.CMID, Course: it.Course, Title: it.Title}
@@ -208,8 +293,8 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	for _, p := range pages {
 		questions += len(p.Questions)
 	}
-	logx.Infof("uni", "quiz %s: страниц %d, вопросов %d, цепочка ИИ (%d): [%s], ошибка загрузки страниц: %v",
-		tag, len(pages), questions, len(chain), strings.Join(chainNames, " > "), pageErr)
+	logx.Infof("uni", "quiz %s: страниц %d (sequential=%v), вопросов %d, цепочка ИИ (%d): [%s], ошибка загрузки страниц: %v",
+		tag, len(pages), sequentialNav, questions, len(chain), strings.Join(chainNames, " > "), pageErr)
 	started := time.Now()
 	saveRun := func() {
 		run.TookMS = time.Since(started).Milliseconds()
@@ -274,90 +359,58 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		return
 	}
 
-	// Авторешение теста через LLM. Сначала решаем все страницы и только если
-	// на каждую пришли ответы — отправляем и завершаем попытку. Иначе попытка
-	// остаётся открытой (пустые ответы в Moodle не уходят), человеку — сообщение.
+	// Бюджет времени по таймеру Moodle: оставляем резерв quizTimeReserve на сохранение ответов.
+	timeLeft, hasTimeLeft := parseTimeLeft(attempt.TimeLeft)
+	var deadline time.Time
+	initialFast := false
+	if hasTimeLeft {
+		if timeLeft <= quizFastModeTimeLeft {
+			initialFast = true
+		}
+		if timeLeft > quizTimeReserve {
+			deadline = attemptStarted.Add(timeLeft - quizTimeReserve)
+		} else {
+			initialFast = true
+		}
+		logx.Infof("uni", "quiz %s: таймер %q (%s), быстрый_режим=%v, резерв=%s",
+			tag, attempt.TimeLeft, timeLeft, initialFast, quizTimeReserve)
+	}
+	solveCtx := ctx
+	var solveCancel context.CancelFunc = func() {}
+	if !deadline.IsZero() {
+		solveCtx, solveCancel = context.WithDeadline(ctx, deadline)
+	}
+	defer solveCancel()
+
+	// Авторешение теста через LLM. В свободной навигации страницы решаются параллельно
+	// и отправляются в Moodle по возрастанию индекса сразу по мере готовности, чтобы
+	// при сбое или нехватке времени уже решённый прогресс не пропал.
 	materials := s.collectCourseMaterials(tag, it.Course)
-	allAnswers := make(map[int]moodle.QuizAnswer)
-	pageAnswers := make([]map[int]moodle.QuizAnswer, len(pages))
-	usedModels := map[string]bool{}
-	var solveErr error
-
 	ws := s.webSearcher()
-	for i, p := range pages {
-		ptag := tag
-		ptag.Page = p.Page
-		answers, res, pl, err := s.solvePage(ctx, ptag, c, ws, chain, it.Course, materials, p.Questions)
-		pl.Page = p.Page
-		if res.Used != nil {
-			pl.Used = res.Used.String()
-			usedModels[res.Used.Provider+"/"+res.Used.Model] = true
-		}
-		if err == nil && len(p.Questions) > 0 && len(answers) == 0 {
-			err = fmt.Errorf("ИИ не дал ни одного ответа")
-		}
-		if err != nil {
-			pl.Error = err.Error()
-			logx.Warnf("uni", "quiz %s: решение страницы: %v", ptag, err)
-			if solveErr == nil {
-				solveErr = err
-			}
-		}
-		logx.Debugf("uni", "quiz %s: страница решена: ответов %d из %d, модель %s, ошибка=%v",
-			ptag, len(answers), len(p.Questions), pl.Used, err)
-		pl.Answers = map[int]string{}
-		for _, q := range p.Questions {
-			if a, ok := answers[q.Slot]; ok {
-				pl.Answers[q.Slot] = formatAnswerText(q, a)
-			}
-		}
-		run.Pages = append(run.Pages, pl)
-		pageAnswers[i] = answers
-		for slot, ans := range answers {
-			allAnswers[slot] = ans
-		}
+
+	var (
+		allAnswers map[int]moodle.QuizAnswer
+		usedModels map[string]bool
+		sentCount  int
+		runErr     error
+	)
+	if sequentialNav {
+		pages, allAnswers, usedModels, sentCount, runErr = s.solveAndSubmitSeqNav(
+			ctx, solveCtx, tag, c, ws, chain, it.Course, materials, attempt, initialFast, deadline, run,
+		)
+	} else {
+		allAnswers, usedModels, sentCount, runErr = s.solveAndSubmitFreeNav(
+			ctx, solveCtx, solveCancel, tag, c, ws, chain, it.Course, materials, pages, initialFast, deadline, run,
+		)
 	}
 
-	if solveErr != nil {
+	if runErr != nil {
 		run.Status = quizlog.Failed
-		run.Error = solveErr.Error()
+		run.Error = runErr.Error()
 		saveRun()
-		logx.Infof("uni", "quiz %s: выход: ошибка решения — %v", tag, solveErr)
-		s.reportQuizFailure(ctx, acc.TelegramID, it, solveErr, false)
+		logx.Infof("uni", "quiz %s: выход: ошибка — %v", tag, runErr)
+		s.reportQuizFailure(ctx, acc.TelegramID, it, runErr, sentCount > 0)
 		return
-	}
-
-	for i, p := range pages {
-		answers := pageAnswers[i]
-
-		// Если есть адаптивный вопрос с кнопкой проверки
-		checkSlot := 0
-		for _, q := range p.Questions {
-			if q.HasSubmitButton {
-				checkSlot = q.Slot
-				break
-			}
-		}
-		if checkSlot > 0 {
-			if updated, err := c.SubmitAnswers(ctx, p, answers, checkSlot); err == nil {
-				p = updated
-			}
-		}
-
-		if _, err := c.SubmitAnswers(ctx, p, answers, 0); err != nil {
-			ptag := tag
-			ptag.Page = p.Page
-			logx.Warnf("uni", "quiz %s: сохранение ответов страницы: %v", ptag, err)
-			// Ответы страницы не сохранились — не завершаем попытку, иначе
-			// Moodle засчитает её с пустыми ответами.
-			run.Status = quizlog.Failed
-			run.Error = fmt.Sprintf("ответы страницы %d не сохранились: %v", i+1, err)
-			saveRun()
-			logx.Infof("uni", "quiz %s: выход: ошибка — ответы страницы %d не сохранились: %v", tag, i+1, err)
-			s.reportQuizFailure(ctx, acc.TelegramID, it, fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", i+1, err), i > 0)
-			return
-		}
-		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, p.Page)
 	}
 
 	result, err := c.FinishAttempt(ctx, it.CMID, attempt.AttemptID)
@@ -412,6 +465,256 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	s.notify(ctx, acc.TelegramID, b.String())
 }
 
+type pageSolveResult struct {
+	idx     int
+	answers map[int]moodle.QuizAnswer
+	usedKey string
+	pl      quizlog.Page
+	err     error
+}
+
+func pageOptsForWave(initialFast bool, deadline time.Time, remPages, workers int) solvePageOpts {
+	fast := initialFast
+	if !fast && !deadline.IsZero() {
+		left := time.Until(deadline)
+		if workers < 1 {
+			workers = 1
+		}
+		wavesLeft := (remPages + workers - 1) / workers
+		if left < quizFastModeRemaining || left < time.Duration(wavesLeft)*quizWaveBudget {
+			fast = true
+		}
+	}
+	return solvePageOpts{
+		FastMode: fast,
+		Deadline: deadline,
+	}
+}
+
+func (s *Syncer) solveSinglePage(ctx context.Context, tag quizTag, idx int, p *moodle.AttemptPage, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, opts solvePageOpts) pageSolveResult {
+	ptag := tag
+	ptag.Page = p.Page
+	answers, res, pl, err := s.solvePageWithOpts(ctx, ptag, c, ws, chain, course, materials, p.Questions, opts)
+	pl.Page = p.Page
+	var usedKey string
+	if res.Used != nil {
+		pl.Used = res.Used.String()
+		usedKey = res.Used.Provider + "/" + res.Used.Model
+	}
+	if err == nil && len(p.Questions) > 0 && len(answers) == 0 {
+		err = fmt.Errorf("ИИ не дал ни одного ответа")
+	}
+	if err != nil {
+		pl.Error = err.Error()
+		logx.Warnf("uni", "quiz %s: решение страницы: %v", ptag, err)
+	}
+	logx.Debugf("uni", "quiz %s: страница решена: ответов %d из %d, модель %s, ошибка=%v",
+		ptag, len(answers), len(p.Questions), pl.Used, err)
+	pl.Answers = map[int]string{}
+	for _, q := range p.Questions {
+		if a, ok := answers[q.Slot]; ok {
+			pl.Answers[q.Slot] = formatAnswerText(q, a)
+		}
+	}
+	return pageSolveResult{
+		idx:     idx,
+		answers: answers,
+		usedKey: usedKey,
+		pl:      pl,
+		err:     err,
+	}
+}
+
+func submitPageAnswers(ctx context.Context, tag quizTag, c *moodle.Client, page *moodle.AttemptPage, answers map[int]moodle.QuizAnswer) (*moodle.AttemptPage, error) {
+	var checkSlots []int
+	for _, q := range page.Questions {
+		if q.HasSubmitButton {
+			checkSlots = append(checkSlots, q.Slot)
+		}
+	}
+	for _, slot := range checkSlots {
+		updated, err := c.SubmitAnswers(ctx, page, answers, slot)
+		if err != nil {
+			logx.Warnf("uni", "quiz %s: проверка вопроса slot=%d: %v", tag, slot, err)
+			return nil, fmt.Errorf("проверка вопроса %d: %w", slot, err)
+		}
+		if updated != nil {
+			page = updated
+		}
+	}
+	updated, err := c.SubmitAnswers(ctx, page, answers, 0)
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func collectRunPages(run *quizlog.Run, results []*pageSolveResult) {
+	for _, r := range results {
+		if r != nil {
+			run.Pages = append(run.Pages, r.pl)
+		}
+	}
+}
+
+func (s *Syncer) solveAndSubmitFreeNav(
+	ctx, solveCtx context.Context,
+	solveCancel context.CancelFunc,
+	tag quizTag,
+	c *moodle.Client,
+	ws *websearch.Searcher,
+	chain []llm.Target,
+	course, materials string,
+	pages []*moodle.AttemptPage,
+	initialFast bool,
+	deadline time.Time,
+	run *quizlog.Run,
+) (map[int]moodle.QuizAnswer, map[string]bool, int, error) {
+	allAnswers := make(map[int]moodle.QuizAnswer)
+	usedModels := make(map[string]bool)
+	n := len(pages)
+	if n == 0 {
+		return allAnswers, usedModels, 0, nil
+	}
+
+	workers := min(quizPageWorkers, n)
+	jobs := make(chan int, n)
+	for i := 0; i < n; i++ {
+		jobs <- i
+	}
+	close(jobs)
+
+	resultsCh := make(chan pageSolveResult, n)
+	var remaining atomic.Int64
+	remaining.Store(int64(n))
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if solveCtx.Err() != nil {
+					resultsCh <- pageSolveResult{
+						idx: idx,
+						pl:  quizlog.Page{Page: pages[idx].Page, Error: solveCtx.Err().Error()},
+						err: solveCtx.Err(),
+					}
+					continue
+				}
+				rem := int(remaining.Add(-1)) + 1
+				opts := pageOptsForWave(initialFast, deadline, rem, workers)
+				resultsCh <- s.solveSinglePage(solveCtx, tag, idx, pages[idx], c, ws, chain, course, materials, opts)
+			}
+		}()
+	}
+
+	results := make([]*pageSolveResult, n)
+	drainAndCollect := func() {
+		close(resultsCh)
+		for r := range resultsCh {
+			cp := r
+			results[r.idx] = &cp
+		}
+		collectRunPages(run, results)
+	}
+	nextToSubmit := 0
+	for nextToSubmit < n {
+		if results[nextToSubmit] == nil {
+			r := <-resultsCh
+			cp := r
+			results[r.idx] = &cp
+			continue
+		}
+		r := results[nextToSubmit]
+		if r.usedKey != "" {
+			usedModels[r.usedKey] = true
+		}
+		for slot, ans := range r.answers {
+			allAnswers[slot] = ans
+		}
+		if r.err != nil {
+			solveCancel()
+			wg.Wait()
+			drainAndCollect()
+			return allAnswers, usedModels, nextToSubmit, r.err
+		}
+
+		ptag := tag
+		ptag.Page = pages[nextToSubmit].Page
+		if _, subErr := submitPageAnswers(ctx, ptag, c, pages[nextToSubmit], r.answers); subErr != nil {
+			logx.Warnf("uni", "quiz %s: сохранение ответов страницы: %v", ptag, subErr)
+			solveCancel()
+			wg.Wait()
+			drainAndCollect()
+			return allAnswers, usedModels, nextToSubmit, fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", nextToSubmit+1, subErr)
+		}
+		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, pages[nextToSubmit].Page)
+		nextToSubmit++
+	}
+
+	wg.Wait()
+	drainAndCollect()
+	return allAnswers, usedModels, nextToSubmit, nil
+}
+
+func (s *Syncer) solveAndSubmitSeqNav(
+	ctx, solveCtx context.Context,
+	tag quizTag,
+	c *moodle.Client,
+	ws *websearch.Searcher,
+	chain []llm.Target,
+	course, materials string,
+	firstPage *moodle.AttemptPage,
+	initialFast bool,
+	deadline time.Time,
+	run *quizlog.Run,
+) ([]*moodle.AttemptPage, map[int]moodle.QuizAnswer, map[string]bool, int, error) {
+	var pages []*moodle.AttemptPage
+	allAnswers := make(map[int]moodle.QuizAnswer)
+	usedModels := make(map[string]bool)
+	seen := make(map[int]bool)
+
+	cur := firstPage
+	sentCount := 0
+	for idx := 0; ; idx++ {
+		if seen[cur.Page] {
+			return pages, allAnswers, usedModels, sentCount, fmt.Errorf("повторная страница %d при последовательной навигации", cur.Page)
+		}
+		seen[cur.Page] = true
+		pages = append(pages, cur)
+
+		opts := pageOptsForWave(initialFast, deadline, 1, 1)
+		r := s.solveSinglePage(solveCtx, tag, idx, cur, c, ws, chain, course, materials, opts)
+		run.Pages = append(run.Pages, r.pl)
+		if r.usedKey != "" {
+			usedModels[r.usedKey] = true
+		}
+		for slot, ans := range r.answers {
+			allAnswers[slot] = ans
+		}
+		if r.err != nil {
+			return pages, allAnswers, usedModels, sentCount, r.err
+		}
+
+		ptag := tag
+		ptag.Page = cur.Page
+		updated, subErr := submitPageAnswers(ctx, ptag, c, cur, r.answers)
+		if subErr != nil {
+			logx.Warnf("uni", "quiz %s: сохранение ответов страницы: %v", ptag, subErr)
+			return pages, allAnswers, usedModels, sentCount, fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", idx+1, subErr)
+		}
+		sentCount++
+		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, cur.Page)
+
+		if updated == nil || updated.Page < 0 || cur.NextPage < 0 {
+			break
+		}
+		cur = updated
+	}
+	return pages, allAnswers, usedModels, sentCount, nil
+}
+
 func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 	if s.Store == nil {
 		return ""
@@ -420,6 +723,11 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 	if err != nil {
 		logx.Warnf("uni", "quiz %s: список лекций: %v", tag, err)
 		return ""
+	}
+
+	recRoot := config.DefaultRecordings
+	if cfg := s.getCfg(); cfg != nil && cfg.RecordingsDir != "" {
+		recRoot = cfg.RecordingsDir
 	}
 
 	var b strings.Builder
@@ -432,19 +740,25 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 		}
 		notesRunes, transRunes := 0, 0
 		if p.Dir != "" {
-			notesPath := filepath.Join(p.Dir, "notes.md")
+			packDir := p.Dir
+			if !filepath.IsAbs(packDir) {
+				packDir = filepath.Join(recRoot, packDir)
+			}
+			notesPath := filepath.Join(packDir, "notes.md")
 			if data, err := os.ReadFile(notesPath); err == nil && len(data) > 0 {
 				b.WriteString(fmt.Sprintf("\n--- Конспект лекции %s №%d ---\n", p.Discipline, p.Number))
 				b.Write(data)
 				b.WriteString("\n")
 				notesRunes = utf8.RuneCount(data)
 			}
-			transPath := filepath.Join(p.Dir, "transcript.txt")
-			if data, err := os.ReadFile(transPath); err == nil && len(data) > 0 {
-				b.WriteString(fmt.Sprintf("\n--- Транскрипт лекции %s №%d ---\n", p.Discipline, p.Number))
-				b.Write(data)
-				b.WriteString("\n")
-				transRunes = utf8.RuneCount(data)
+			if utf8.RuneCountInString(b.String()) < maxTotalChars {
+				transPath := filepath.Join(packDir, "transcript.txt")
+				if data, err := os.ReadFile(transPath); err == nil && len(data) > 0 {
+					b.WriteString(fmt.Sprintf("\n--- Транскрипт лекции %s №%d ---\n", p.Discipline, p.Number))
+					b.Write(data)
+					b.WriteString("\n")
+					transRunes = utf8.RuneCount(data)
+				}
 			}
 		}
 		logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d: конспект %d симв., транскрипт %d симв.",
@@ -452,13 +766,13 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 		if notesRunes+transRunes > 0 {
 			used = append(used, fmt.Sprintf("%s №%d", p.Discipline, p.Number))
 		}
-		if b.Len() >= maxTotalChars {
+		if utf8.RuneCountInString(b.String()) >= maxTotalChars {
 			break
 		}
 	}
 	res := b.String()
-	if len(res) > maxTotalChars {
-		res = res[:maxTotalChars]
+	if runes := []rune(res); len(runes) > maxTotalChars {
+		res = string(runes[:maxTotalChars])
 	}
 	logx.Infof("uni", "quiz %s: материалы курса: %d симв. из пакетов [%s]", tag, utf8.RuneCountInString(res), strings.Join(used, ", "))
 	return res

@@ -61,7 +61,8 @@ type Config struct {
 	// владельцем: «Агеев:oc_sk_…» (то же для GEMINI_API_KEYS).
 	OpenCodeAPIKey  string
 	OpenCodeAPIKeys []string
-	// AdminLoginSuffix — аккаунт универа с логином на этот хвост тоже админ (ADMIN_LOGIN_SUFFIX).
+	// AdminLoginSuffix — устаревшее поле (ADMIN_LOGIN_SUFFIX): оставлено только
+	// для обратной совместимости конфига и больше не предоставляет прав администратора.
 	AdminLoginSuffix string
 	AssemblyAPIKey   string
 	AssemblyAPIURL   string

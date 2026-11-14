@@ -148,4 +148,32 @@
   - В проекте уже есть шифрованные куки Moodle в `accounts` (`internal/vault`), `internal/moodle`, `internal/notes/llm.go` (OpenAI-compatible `chat/completions`), веб-панель и Telegram-бот.
   - В режиме API-агента процесс сам держит состояние попытки в памяти, при необходимости ставит паузу перед `finish_attempt` и присылает в Telegram/Mini App карточку «Вот выбранные ответы — подтвердить отправку?».
   - На VDS (4 CPU / 4 GB RAM) это не требует лишних процессов и браузера (всё работает на чистом HTTP в Go).
-- **MCP-сервер — как опциональная обёртка поверх того же Go-пакета**, если захочется запускать прохождение тестов вручную из IDE/агента (Claude/Cursor/Antigravity) под своим локальным контролем. Движок квизов реализован в [`internal/moodle/quiz.go`](../internal/moodle/quiz.go), а встроенный решатель и реакция на открытие тестов — в [`internal/uni/quiz_solve.go`](../internal/uni/quiz_solve.go).
+- **MCP-сервер — как опциональная обёртка поверх того же Go-пакета**, если захочется запускать прохождение тестов вручную из IDE/агента (Claude/Cursor/Antigravity) под своим локальным контролем. Движок квизов реализован в [`internal/moodle/quiz.go`](../internal/moodle/quiz.go), а встроенный решатель и реакция на открытие тестов — в [`internal/uni/quiz_solve.go`](../internal/uni/quiz_solve.go), [`internal/uni/quiz_agent.go`](../internal/uni/quiz_agent.go) и [`internal/uni/run.go`](../internal/uni/run.go).
+
+---
+
+## 5. Параллельное и защищённое решение тестов (реализовано)
+
+1. **Очередь и воркеры (`internal/uni/run.go`):**
+   - Число параллельных воркеров задаётся переменной `MOODLE_WORKERS` (`MoodleWorkersLimit()`, по умолчанию `4`).
+   - `sortMoodleTasks` ставит задачи с `kicked` / `wakeKicked` (кнопка «Пройти» или вейкворд на паре) перед плановыми обходами.
+   - `TryLockQuiz` / `UnlockQuiz` (ключ `<tgID>:<quizID>`) гарантирует, что один и тот же тест не решается одновременно двумя тиками или воркерами.
+
+2. **Бюджет времени и быстрый режим (`internal/uni/quiz_solve.go`, `quiz_agent.go`):**
+   - `parseTimeLeft` читает таймер Moodle со страницы попытки; от конца отступается резерв `quizTimeReserve = 75s`.
+   - `pageOptsForWave` включает `FastMode`, если до окончания времени осталось меньше `quizFastModeTimeLeft = 3m` или расчёт волн показывает нехватку времени (`wavesLeft * quizWaveBudget`, где `quizWaveBudget = 45s`), либо во время решения до дедлайна остаётся меньше `quizFastModeRemaining = 60s`. В `FastMode` отключаются веб-поиск и дополнительные раунды уточнений (в обычном режиме их до `quizMaxRounds = 3`).
+
+3. **Параллельные страницы и последовательная отправка (`internal/uni/quiz_solve.go`):**
+   - Для тестов со свободной навигацией `solveAndSubmitFreeNav` решает до `quizPageWorkers = 4` страниц за волну параллельно, но вызывает `submitPageAnswers` строго последовательно по возрастанию индекса страницы, как только готовы очередные смежные страницы.
+   - При обнаружении `sequential`-навигации (`next.Page != cur.NextPage` или повтор страницы) решатель автоматически переключается на `solveAndSubmitSeqNav` (строго страница за страницей).
+
+4. **Параллельное распознавание картинок (`internal/uni/quiz_agent.go`):**
+   - `describeQuestionImages` обрабатывает до `quizMaxImages = 4` изображений на вопрос пулом из `quizImageWorkers = 4` воркеров через `notes.DescribeImage` и раскладывает описания обратно в детерминированном порядке вопросов и слотов.
+
+5. **Ключи ИИ и материалы курса:**
+   - Цепочка строится через `access.QuizChainWithVault(st, vault, cfg, tgID)` — не-админ изолирован только своими ключами (личные из `llm_keys` и подписанные фамилией из `.env`), админ имеет свой выбор -> `cheaper` -> пул.
+   - `collectCourseMaterials` подтягивает свежие `notes.md` и `transcript.txt` из `ListPacks` по совпадающей дисциплине (до `32 000` символов).
+
+6. **Защита от SSRF при чтении страниц из поиска (`internal/uni/quiz_agent.go`):**
+   - `openPage` проверяет URL через `validatePageURL` (разрешены только `http:` и `https:`, запрещены `localhost`, `.localhost`, `.local`, `.internal`, `.arpa` и приватные/loopback/link-local/multicast/CGNAT `100.64.0.0/10` адреса).
+   - `safeDialContext` и `CheckRedirect` (до `quizMaxRedirects = 5`) повторно резолвят и проверяют IP перед соединением и на каждом редиректе, блокируя DNS rebinding и доступ во внутреннюю сеть VDS.

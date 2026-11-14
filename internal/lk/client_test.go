@@ -180,3 +180,75 @@ func TestParseFullName(t *testing.T) {
 		t.Fatal("без fullName нет ошибки")
 	}
 }
+
+func TestLoginHTTPStatusErrorsNotBadLogin(t *testing.T) {
+	for _, code := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusNotFound} {
+		code := code
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/account/login", func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_, _ = w.Write([]byte(loginPage))
+					return
+				}
+				w.WriteHeader(code)
+				if code >= 500 {
+					_, _ = w.Write([]byte("Неверный логин — не должно маскировать 5xx"))
+				} else {
+					_, _ = w.Write([]byte("not found"))
+				}
+			})
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.Login(context.Background(), "student", "secret")
+			if err == nil {
+				t.Fatalf("status %d must fail", code)
+			}
+			if code >= 500 && errors.Is(err, ErrBadLogin) {
+				t.Fatalf("5xx status %d must not return ErrBadLogin: %v", code, err)
+			}
+			if code == http.StatusNotFound && errors.Is(err, ErrBadLogin) {
+				t.Fatalf("404 without bad-login body must not return ErrBadLogin: %v", err)
+			}
+		})
+	}
+}
+
+func TestWeekOfTimezoneAndNilLocAndEmptyDiscipline(t *testing.T) {
+	loc, _ := time.LoadLocation("Europe/Samara")
+	// 2026-09-06 21:30 UTC == 2026-09-07 01:30 Samara (понедельник 2-й недели).
+	utcLateSunday := time.Date(2026, 9, 6, 21, 30, 0, 0, time.UTC)
+	got, err := WeekOf("2026-08-31", utcLateSunday, loc)
+	if err != nil || got != 2 {
+		t.Fatalf("WeekOf(UTC->Samara) = (%d, %v), want (2, nil)", got, err)
+	}
+	// loc == nil не паникует.
+	if w, err := WeekOf("2026-08-31", time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC), nil); err != nil || w != 2 {
+		t.Fatalf("WeekOf(nil loc) = (%d, %v), want (2, nil)", w, err)
+	}
+
+	// Пустая дисциплина с невалидным weekday/time пропускается до их разбора.
+	var tt Timetable
+	rawTT := `{
+		"currentYear": {"id": 15, "startDate": "2026-08-31", "weeks": 52},
+		"lessons": [
+			{"id": 99, "weekday": {"id": 0}, "time": {"beginTime": "bad", "endTime": "bad"}, "weeks": [{"week": 1}]},
+			{"id": 100, "weekday": {"id": 1}, "time": {"beginTime": "09:45", "endTime": "11:20"}, "discipline": {"name": "Матан"}, "weeks": [{"week": 1}]}
+		]
+	}`
+	if err := json.Unmarshal([]byte(rawTT), &tt); err != nil {
+		t.Fatal(err)
+	}
+	ls, err := tt.ToLessons(1, 0, 0, nil)
+	if err != nil {
+		t.Fatalf("ToLessons: %v", err)
+	}
+	if len(ls) != 1 || ls[0].Discipline != "Матан" {
+		t.Fatalf("ожидалась 1 пара, получено %+v", ls)
+	}
+}

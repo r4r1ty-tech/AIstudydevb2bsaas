@@ -701,6 +701,7 @@ func (c *Client) FetchFile(ctx context.Context, src string) ([]byte, string, err
 		return nil, "", err
 	}
 	if onLoginPage(resp) {
+		c.setSesskey("")
 		return nil, "", ErrUnauthorized
 	}
 	if resp.StatusCode/100 != 2 {

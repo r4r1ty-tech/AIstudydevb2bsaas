@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -20,5 +21,13 @@ func TestParseProbe(t *testing.T) {
 	}
 	if _, _, err := parseProbe("Invalid data found when processing input"); err == nil {
 		t.Fatal("вывод без max_volume должен быть ошибкой")
+	}
+}
+
+func TestProbeNilContext(t *testing.T) {
+	// Вызов с nil context не должен паниковать.
+	_, _, err := Probe(nil, filepath.Join(t.TempDir(), "missing.ogg"))
+	if err == nil {
+		t.Fatal("ожидалась ошибка для несуществующего файла")
 	}
 }

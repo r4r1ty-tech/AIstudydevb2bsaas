@@ -59,9 +59,22 @@ func New(base string, timeout time.Duration) (*Session, error) {
 }
 
 // URL склеивает путь сайта: "/login/index.php" -> base + путь.
+// Не дублирует s.Base.Path, если path уже начинается с этого префикса.
 func (s *Session) URL(path string) string {
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		return path
+	}
+	basePath := strings.TrimRight(s.Base.Path, "/")
+	if basePath != "" && strings.HasPrefix(path, basePath) {
+		rest := path[len(basePath):]
+		if rest == "" || rest[0] == '/' || rest[0] == '?' || rest[0] == '#' {
+			u := *s.Base
+			u.Path = ""
+			u.RawPath = ""
+			u.RawQuery = ""
+			u.Fragment = ""
+			return strings.TrimRight(u.String(), "/") + path
+		}
 	}
 	return s.Base.String() + "/" + strings.TrimLeft(path, "/")
 }

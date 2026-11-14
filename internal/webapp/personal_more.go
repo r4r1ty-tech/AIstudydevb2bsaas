@@ -313,18 +313,16 @@ func (s *Server) handleNotes(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "store error")
 		return
 	}
-	byID := make(map[int64]model.Lesson, len(lessons))
-	for _, l := range lessons {
-		byID[l.ID] = l
-	}
+	byID := lessonsByID(lessons)
 	details, _ := s.src.(packDetails)
 	idx := map[string]int{}
-	resp := notesResponse{Subjects: []noteSubject{}, RepoURL: s.repoURL(), Total: len(packs)}
+	resp := notesResponse{Subjects: []noteSubject{}, RepoURL: s.repoURL()}
 	for _, p := range packs {
-		typ := "Лекция"
-		if l, ok := byID[p.LessonID]; ok && strings.TrimSpace(l.Type) != "" {
-			typ = l.Type
+		ok, typ := s.packVisible(p, byID)
+		if !ok {
+			continue
 		}
+		resp.Total++
 		v := noteView{
 			ID: p.ID, LessonID: p.LessonID, Number: p.Number, Date: p.Date,
 			Type: typ, Kind: lessonKind(typ), Status: noteStatus(p.Status), Stage: p.Status,
@@ -512,7 +510,7 @@ func (s *Server) handleRooms(w http.ResponseWriter, r *http.Request) {
 	idx := map[string]int{}
 	resp := roomsResponse{Rooms: []roomView{}}
 	for _, l := range lessons {
-		if !l.Online {
+		if !l.Online || !s.lessonVisible(l) {
 			continue
 		}
 		key := model.BBBRoomKey(l.Discipline, l.Teacher, l.Type)

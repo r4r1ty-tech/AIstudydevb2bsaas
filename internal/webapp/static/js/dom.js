@@ -110,3 +110,24 @@ export function patch(container, items) {
 export function setHTML(el, r) {
   el.innerHTML = str(r);
 }
+
+// safeHref разрешает только http:, https:, mailto:, якоря #... и относительные
+// пути /... (кроме //). Опасные (javascript:, data:, vbscript:) и битые схемы -> "".
+export function safeHref(u) {
+  if (u == null) return "";
+  const s = String(u).trim();
+  if (!s || /[\u0000-\u001f\u007f]/.test(s)) return "";
+  if (s.startsWith("#")) return s;
+  if (s.startsWith("/") && !s.startsWith("//") && !s.startsWith("/\\")) return s;
+  if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s)) return "";
+  try {
+    const base = typeof window !== "undefined" && window.location ? window.location.href : "https://localhost/";
+    const parsed = new URL(s, base);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "mailto:") {
+      return s;
+    }
+  } catch {
+    return "";
+  }
+  return "";
+}

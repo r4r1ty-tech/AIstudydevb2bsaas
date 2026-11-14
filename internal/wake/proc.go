@@ -70,6 +70,7 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
 		_ = stdin.Close()
 		return nil, err
 	}

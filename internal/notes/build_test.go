@@ -9,12 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
@@ -46,6 +49,10 @@ func TestBuildWritesTranscriptNotesAndPDF(t *testing.T) {
 	}))
 	t.Cleanup(api.Close)
 
+	oldURL := llm.OpenCodeURL
+	llm.OpenCodeURL = api.URL
+	t.Cleanup(func() { llm.OpenCodeURL = oldURL })
+
 	root := t.TempDir()
 	p := model.LecturePack{Discipline: "Сети", Number: 3, Dir: "Сети/лекция-3"}
 	dir := filepath.Join(root, p.Dir)
@@ -57,8 +64,8 @@ func TestBuildWritesTranscriptNotesAndPDF(t *testing.T) {
 	}
 	cfg := &config.Config{
 		FishStudioAPIKey: "k", FishStudioAPIURL: api.URL,
-		LLMAPIKey: "k", LLMAPIURL: api.URL + "/v1", LLMModel: "m",
-		ChromeBin: bin,
+		OpenCodeAPIKey: "k",
+		ChromeBin:      bin,
 	}
 	if err := Build(context.Background(), cfg, root, p); err != nil {
 		t.Fatal(err)
@@ -106,17 +113,17 @@ func TestBuildLLMFailureSurfaces(t *testing.T) {
 func TestWritePDFErrors(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{ChromeBin: filepath.Join(dir, "no-such-chromium")}
-	if err := WritePDF(cfg, "t", "md", filepath.Join(dir, "a.pdf")); err == nil {
+	if err := WritePDF(context.Background(), cfg, "t", "md", filepath.Join(dir, "a.pdf")); err == nil {
 		t.Fatal("missing browser must fail")
 	}
-	if err := WritePDF(cfg, "t", "md", filepath.Join(dir, "missing", "a.pdf")); err == nil {
+	if err := WritePDF(context.Background(), cfg, "t", "md", filepath.Join(dir, "missing", "a.pdf")); err == nil {
 		t.Fatal("unwritable html must fail")
 	}
 	fake := filepath.Join(dir, "fake-chrome")
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WritePDF(&config.Config{ChromeBin: fake}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "не записался") {
+	if err := WritePDF(context.Background(), &config.Config{ChromeBin: fake}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "не записался") {
 		t.Fatalf("browser that writes nothing: %v", err)
 	}
 }
@@ -129,7 +136,7 @@ func TestWritePDFRelativePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	pdf := filepath.Join("recordings", "x", "notes.pdf")
-	if err := WritePDF(&config.Config{ChromeBin: bin}, "Тема", "## Раздел\n\nтекст", pdf); err != nil {
+	if err := WritePDF(context.Background(), &config.Config{ChromeBin: bin}, "Тема", "## Раздел\n\nтекст", pdf); err != nil {
 		t.Fatal(err)
 	}
 	if st, err := os.Stat(pdf); err != nil || st.Size() < 100 {
@@ -161,14 +168,72 @@ func TestWritePDFHungBrowserWithFile(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WritePDF(&config.Config{ChromeBin: fake}, "t", "md", pdf); err != nil {
+	if err := WritePDF(context.Background(), &config.Config{ChromeBin: fake}, "t", "md", pdf); err != nil {
 		t.Fatalf("записанный pdf должен приниматься: %v", err)
 	}
 	hung := filepath.Join(dir, "hung-chrome")
 	if err := os.WriteFile(hung, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WritePDF(&config.Config{ChromeBin: hung}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "таймаут") {
+	if err := WritePDF(context.Background(), &config.Config{ChromeBin: hung}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "таймаут") {
 		t.Fatalf("зависший браузер без файла: %v", err)
+	}
+}
+
+func TestWritePDFCancelKillsProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	fake := filepath.Join(dir, "spawn-chrome")
+	script := "#!/bin/sh\nsleep 60 </dev/null >/dev/null 2>&1 &\necho $! > '" + pidFile + "'\nwait\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- WritePDF(ctx, &config.Config{ChromeBin: fake}, "t", "md", filepath.Join(dir, "c.pdf"))
+	}()
+
+	var childPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(pidFile)
+		if err == nil {
+			if pid, perr := strconv.Atoi(strings.TrimSpace(string(raw))); perr == nil && pid > 0 {
+				childPID = pid
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if childPID == 0 {
+		t.Fatal("дочерний процесс fake-chrome не успел записать pid")
+	}
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ожидалась ошибка context.Canceled, получено: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("WritePDF не завершился после отмены контекста")
+	}
+
+	// Проверяем, что фоновый дочерний процесс в процессной группе тоже убит.
+	dead := false
+	for i := 0; i < 20; i++ {
+		if err := syscall.Kill(childPID, 0); errors.Is(err, syscall.ESRCH) {
+			dead = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !dead {
+		_ = syscall.Kill(childPID, syscall.SIGKILL)
+		t.Fatalf("сиротский дочерний процесс pid=%d остался жив после отмены WritePDF", childPID)
 	}
 }

@@ -43,7 +43,9 @@ func New(key []byte) (*Vault, error) {
 }
 
 // Load берёт ключ из env (base64), иначе из файла; файла нет — создаёт его.
-// Все процессы читают один и тот же файл, поэтому создание идёт через O_EXCL.
+// Чтобы исключить окно между созданием файла и записью ключа при гонке процессов,
+// ключ пишется во временный файл с правами 0600, синхронизируется и публикуется
+// атомарно через os.Link.
 func Load(envKey, path string) (*Vault, error) {
 	if s := strings.TrimSpace(envKey); s != "" {
 		key, err := base64.StdEncoding.DecodeString(s)
@@ -60,30 +62,46 @@ func Load(envKey, path string) (*Vault, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("vault: mkdir: %w", err)
 	}
 	key := make([]byte, keyLen)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("vault: rand: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp, err := os.CreateTemp(dir, ".vault-key-*")
 	if err != nil {
-		if errors.Is(err, os.ErrExist) { // соседний процесс успел первым
-			key, rerr := readKey(path)
+		return nil, fmt.Errorf("vault: create temp key: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("vault: chmod temp key: %w", err)
+	}
+	if _, err := tmp.WriteString(base64.StdEncoding.EncodeToString(key) + "\n"); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("vault: write key: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return nil, fmt.Errorf("vault: sync key: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("vault: close key: %w", err)
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if os.IsExist(err) || errors.Is(err, os.ErrExist) { // соседний процесс успел первым
+			existingKey, rerr := readKey(path)
 			if rerr != nil {
 				return nil, rerr
 			}
-			return New(key)
+			return New(existingKey)
 		}
-		return nil, fmt.Errorf("vault: create key: %w", err)
-	}
-	if _, err := f.WriteString(base64.StdEncoding.EncodeToString(key) + "\n"); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("vault: write key: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return nil, fmt.Errorf("vault: close key: %w", err)
+		return nil, fmt.Errorf("vault: link key: %w", err)
 	}
 	return New(key)
 }

@@ -55,9 +55,15 @@ type Syncer struct {
 	// DescribeImage — текст рисунка вопроса (для тестов); nil — Moodle + vision.
 	DescribeImage func(ctx context.Context, src string) (string, error)
 
-	mu       sync.Mutex
-	lastFull map[int64]time.Time
-	lkPrev   map[int64][]model.Lesson // прошлый разбор пар по tg — для диффа в журнале
+	MoodleWorkers int // переопределение MOODLE_WORKERS (если > 0)
+
+	mu          sync.Mutex
+	lastFull    map[int64]time.Time
+	lkPrev      map[int64][]model.Lesson // прошлый разбор пар по tg — для диффа в журнале
+	runningAcc  map[int64]bool           // активные аккаунты, синхронизируемые прямо сейчас
+	runningQuiz map[string]bool          // активные тесты (tg:quizID), решаемые прямо сейчас
+	sem         chan struct{}            // семафор параллельных воркеров Moodle
+	wg          sync.WaitGroup           // ожидание завершения фоновых воркеров
 }
 
 func (s *Syncer) now() time.Time { return nowFn().In(s.loc()) }
@@ -489,7 +495,49 @@ func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) (
 		if err != nil {
 			return err
 		}
-		s.detectAndHandleOpenedQuizzes(ctx, acc, c, prev, items)
+
+		// Защита от одновременного решения одного и того же теста несколькими горутинами.
+		var lockedQuizzes []string
+		var curItems []model.MoodleItem
+		for _, it := range items {
+			if it.Kind == model.MoodleQuiz {
+				qid := strconv.FormatInt(it.CMID, 10)
+				if !s.tryLockQuiz(acc.TelegramID, qid) {
+					logx.Infof("uni", "moodle tg=%d quiz cmid=%d: тест уже решается в другой горутине, пропуск", acc.TelegramID, it.CMID)
+					continue
+				}
+				lockedQuizzes = append(lockedQuizzes, qid)
+			}
+			curItems = append(curItems, it)
+		}
+		var prevItems []model.MoodleItem
+		for _, it := range prev {
+			if it.Kind == model.MoodleQuiz {
+				qid := strconv.FormatInt(it.CMID, 10)
+				alreadyLocked := false
+				for _, lq := range lockedQuizzes {
+					if lq == qid {
+						alreadyLocked = true
+						break
+					}
+				}
+				if !alreadyLocked {
+					if !s.tryLockQuiz(acc.TelegramID, qid) {
+						logx.Infof("uni", "moodle tg=%d quiz cmid=%d (prev): тест уже решается в другой горутине, пропуск", acc.TelegramID, it.CMID)
+						continue
+					}
+					lockedQuizzes = append(lockedQuizzes, qid)
+				}
+			}
+			prevItems = append(prevItems, it)
+		}
+		defer func() {
+			for _, qid := range lockedQuizzes {
+				s.unlockQuiz(acc.TelegramID, qid)
+			}
+		}()
+
+		s.detectAndHandleOpenedQuizzes(ctx, acc, c, prevItems, curItems)
 		return nil
 	})
 	if err != nil {
@@ -553,10 +601,15 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, tg int64, 
 		for _, cr := range courses {
 			list, err := c.CourseActivities(ctx, cr)
 			if err != nil {
-				if errors.Is(err, moodle.ErrUnauthorized) {
+				if errors.Is(err, moodle.ErrUnauthorized) || ctx.Err() != nil {
 					return nil, err
 				}
-				logx.Warnf("uni", "moodle tg=%d: курс id=%d %q: %v", tg, cr.ID, cr.FullName, err)
+				logx.Warnf("uni", "moodle tg=%d: курс id=%d %q: %v (сохраняем старые задания курса)", tg, cr.ID, cr.FullName, err)
+				for _, p := range prev {
+					if (cr.ID != 0 && p.CourseID == cr.ID) || (cr.FullName != "" && p.Course == cr.FullName) {
+						byCM[p.CMID] = p
+					}
+				}
 				continue
 			}
 			logx.Debugf("uni", "moodle tg=%d: курс id=%d %q: элементов %d", tg, cr.ID, cr.FullName, len(list))
@@ -579,6 +632,9 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, tg int64, 
 		if !full {
 			known[p.CMID] = true
 		}
+	}
+	for cmid := range byCM {
+		known[cmid] = true
 	}
 	withCM, fromTL := 0, 0
 	for _, e := range events {

@@ -8,12 +8,13 @@ ORIGIN=http://127.0.0.1:8080
 
 set_webapp_url() {
   local url=$1
-  python3 - "$ENV_FILE" "$url" <<'PY'
-import sys
+  printf '%s\0' "$url" | ENV_FILE="$ENV_FILE" python3 -c '
+import os, sys, tempfile
 from pathlib import Path
-path = Path(sys.argv[1])
-url = sys.argv[2].rstrip("/")
-text = path.read_text() if path.exists() else ""
+
+path = Path(os.environ["ENV_FILE"])
+url = sys.stdin.read().split("\0", 1)[0].rstrip("/")
+text = path.read_text(encoding="utf-8") if path.exists() else ""
 lines = []
 found = False
 changed = False
@@ -29,10 +30,19 @@ if not found:
     lines.append("WEBAPP_PUBLIC_URL=" + url)
     changed = True
 if changed:
-    path.write_text("\n".join(lines) + "\n")
-    path.chmod(0o600)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        os.chmod(tmp_name, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp_name, path)
+    except Exception:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise
 print("changed" if changed else "same")
-PY
+'
 }
 
 write_url_file() {
@@ -49,10 +59,13 @@ fi
 echo "tunnel origin $ORIGIN"
 "$BIN" tunnel --no-autoupdate --url "$ORIGIN" 2>&1 | while IFS= read -r line; do
   printf '%s\n' "$line"
-  if [[ "$line" =~ https://[a-zA-Z0-9.-]+\.trycloudflare\.com ]]; then
-    url="${BASH_REMATCH[0]}"
-    write_url_file "$url"
-    st=$(set_webapp_url "$url")
-    echo "webapp $url file=saved env=$st"
+  if [[ "$line" =~ https://([a-zA-Z0-9-]+)\.trycloudflare\.com ]]; then
+    sub="${BASH_REMATCH[1]}"
+    if [[ "${sub,,}" != "api" ]]; then
+      url="${BASH_REMATCH[0]}"
+      write_url_file "$url"
+      st=$(set_webapp_url "$url")
+      echo "webapp $url file=saved env=$st"
+    fi
   fi
 done

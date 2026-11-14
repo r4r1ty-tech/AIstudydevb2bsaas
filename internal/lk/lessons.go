@@ -15,10 +15,14 @@ var urlFieldRe = regexp.MustCompile(`"url"\s*:\s*"[^"]*"`)
 
 // WeekOf — номер учебной недели для дня (неделя 1 начинается с startDate).
 func WeekOf(startDate string, day time.Time, loc *time.Location) (int, error) {
+	if loc == nil {
+		loc = time.UTC
+	}
 	start, err := time.ParseInLocation("2006-01-02", startDate, loc)
 	if err != nil {
 		return 0, fmt.Errorf("lk: start date %q: %w", startDate, err)
 	}
+	day = day.In(loc)
 	d := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, loc)
 	days := int(d.Sub(start).Hours()/24 + 0.5)
 	if days < 0 {
@@ -34,6 +38,9 @@ func (t *Timetable) ToLessons(week int, groupID, owner int64, loc *time.Location
 	if t == nil {
 		return nil, nil
 	}
+	if loc == nil {
+		loc = time.UTC
+	}
 	start, err := time.ParseInLocation("2006-01-02", t.CurrentYear.StartDate, loc)
 	if err != nil {
 		return nil, fmt.Errorf("lk: start date %q: %w", t.CurrentYear.StartDate, err)
@@ -43,6 +50,11 @@ func (t *Timetable) ToLessons(week int, groupID, owner int64, loc *time.Location
 	add := func(src TTLesson, iet bool) error {
 		w, ok := src.week(week)
 		if !ok {
+			return nil
+		}
+		disc := src.discipline()
+		if disc == "" {
+			logx.Debugf("lk", "пара id=%d без дисциплины пропущена (неделя %d)", src.ID, week)
 			return nil
 		}
 		if src.Weekday.ID < 1 || src.Weekday.ID > 7 {
@@ -63,7 +75,7 @@ func (t *Timetable) ToLessons(week int, groupID, owner int64, loc *time.Location
 			End:        finish.Format("15:04"),
 			Begin:      begin,
 			Finish:     finish,
-			Discipline: src.discipline(),
+			Discipline: disc,
 			Teacher:    src.teachers(),
 			Type:       src.typ(),
 			Online:     w.IsOnline == 1,
@@ -76,10 +88,6 @@ func (t *Timetable) ToLessons(week int, groupID, owner int64, loc *time.Location
 			l.Owner = owner
 		} else {
 			l.Subgroup = src.subgroup(groupID)
-		}
-		if l.Discipline == "" {
-			logx.Debugf("lk", "пара id=%d без дисциплины пропущена (неделя %d)", src.ID, week)
-			return nil
 		}
 		out = append(out, l)
 		who := "группа"

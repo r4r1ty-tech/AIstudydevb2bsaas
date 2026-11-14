@@ -35,3 +35,27 @@ func TestExportCookieOnSubpath(t *testing.T) {
 		t.Fatalf("restored session rejected: %v %v", resp.StatusCode, err)
 	}
 }
+
+func TestURLDoesNotDuplicateBasePath(t *testing.T) {
+	s, err := New("https://do.ssau.ru/moodle/", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		rel  string
+		want string
+	}{
+		{"/login/index.php", "https://do.ssau.ru/moodle/login/index.php"},
+		{"/moodle/mod/quiz/view.php?id=5", "https://do.ssau.ru/moodle/mod/quiz/view.php?id=5"},
+		{"/moodle", "https://do.ssau.ru/moodle"},
+		{"/moodle/", "https://do.ssau.ru/moodle/"},
+		{"/moodle?foo=1", "https://do.ssau.ru/moodle?foo=1"},
+		{"/moodle-other/page", "https://do.ssau.ru/moodle/moodle-other/page"},
+		{"https://other.example/x", "https://other.example/x"},
+	}
+	for _, tc := range cases {
+		if got := s.URL(tc.rel); got != tc.want {
+			t.Errorf("URL(%q) = %q, want %q", tc.rel, got, tc.want)
+		}
+	}
+}

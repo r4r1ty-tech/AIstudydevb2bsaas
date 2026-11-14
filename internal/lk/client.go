@@ -101,9 +101,15 @@ func (c *Client) Login(ctx context.Context, login, password string) error {
 	if err != nil {
 		return fmt.Errorf("lk: login post: %w", err)
 	}
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("lk: login post status %d", resp.StatusCode)
+	}
 	if bytes.Contains(body, []byte("Неверный логин")) {
 		logx.Debugf("lk", "login: отказ — сайт вернул «Неверный логин» (status=%d)", resp.StatusCode)
 		return ErrBadLogin
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("lk: login post status %d", resp.StatusCode)
 	}
 	// Успешный вход ставит куку и редиректит; проверяем по API, а не по вёрстке.
 	if _, err := c.Groups(ctx); err != nil {

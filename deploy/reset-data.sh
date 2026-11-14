@@ -9,7 +9,7 @@ echo "stop services"
 systemctl stop ssau-tg.service ssau-bbb.service ssau-panel.service ssau-rasp.service 2>/dev/null || true
 
 echo "wipe sqlite"
-rm -f "$APP/data/bot.db" "$APP/data/bot.db-wal" "$APP/data/bot.db-shm" "$APP/data/"*.db 2>/dev/null || true
+rm -f "$APP/data/"*.db "$APP/data/"*.db-wal "$APP/data/"*.db-shm "$APP/data/"*.db-journal 2>/dev/null || true
 
 echo "wipe recordings / lecture packs"
 if [[ -d "$APP/recordings" ]]; then

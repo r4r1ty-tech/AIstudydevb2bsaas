@@ -30,6 +30,7 @@ type sfuAudioSession struct {
 	sfuWS        *websocket.Conn
 	pc           *webrtc.PeerConnection
 	wsMu         sync.Mutex
+	stopOnce     sync.Once
 	sfuSuccess   atomic.Bool
 	iceConnected atomic.Bool
 	closed       atomic.Bool
@@ -78,22 +79,32 @@ func (a *sfuAudioSession) alive() bool {
 }
 
 func (a *sfuAudioSession) stop() {
-	if a == nil || !a.closed.CompareAndSwap(false, true) {
+	if a == nil {
 		return
 	}
-	_ = a.send(map[string]any{
-		"id":   "stop",
-		"type": "audio",
-		"role": "recv",
+	a.stopOnce.Do(func() {
+		// Отправляем "stop" до выставления closed = true, иначе a.send() вернёт ErrClosedPipe.
+		if !a.closed.Load() {
+			_ = a.send(map[string]any{
+				"id":   "stop",
+				"type": "audio",
+				"role": "recv",
+			})
+		}
+		a.closed.Store(true)
+		if a.cancel != nil {
+			a.cancel()
+		}
+		if a.sfuWS != nil {
+			_ = a.sfuWS.Close()
+		}
+		if a.pc != nil {
+			_ = a.pc.Close()
+		}
+		if a.readDone != nil {
+			<-a.readDone
+		}
 	})
-	a.cancel()
-	if a.sfuWS != nil {
-		_ = a.sfuWS.Close()
-	}
-	if a.pc != nil {
-		_ = a.pc.Close()
-	}
-	<-a.readDone
 }
 
 // activeSegmentRec adapts *capture.OpusRec to the worker's recorder interface

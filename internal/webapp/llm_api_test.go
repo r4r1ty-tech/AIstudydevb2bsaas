@@ -7,10 +7,12 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/panelpass"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/quizlog"
@@ -55,18 +57,42 @@ func TestAdminByLoginSuffix(t *testing.T) {
 	s, st, key, _ := newAdminServer(t)
 	friend := config.DefaultWhitelist[1]
 	if c := reqAs(s, key, friend, http.MethodGet, "/api/admin/llm/people", "").Code; c != http.StatusForbidden {
-		t.Fatalf("без логина на 528: %d, ждали 403", c)
+		t.Fatalf("обычный пользователь: %d, ждали 403", c)
 	}
 	if err := st.PutAccount(model.Account{TelegramID: friend, Kind: model.AccountMoodle, Login: "2021-000528"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.PutAccount(model.Account{TelegramID: friend, Kind: model.AccountLK, Login: "2021-000528"}); err != nil {
+		t.Fatal(err)
+	}
 	var set settingsResponse
 	_ = json.Unmarshal(reqAs(s, key, friend, http.MethodGet, "/api/settings", "").Body.Bytes(), &set)
-	if !set.IsAdmin {
-		t.Fatal("логин на 528 не дал админа")
+	if set.IsAdmin {
+		t.Fatal("суффикс логина 528 не должен давать права админа")
 	}
-	if c := reqAs(s, key, friend, http.MethodGet, "/api/admin/llm/people", "").Code; c != http.StatusOK {
-		t.Fatalf("/api/admin/llm/people: %d", c)
+	if c := reqAs(s, key, friend, http.MethodGet, "/api/admin/llm/people", "").Code; c != http.StatusForbidden {
+		t.Fatalf("/api/admin/llm/people при логине на 528: %d, ждали 403", c)
+	}
+	var stLLM llmState
+	_ = json.Unmarshal(reqAs(s, key, friend, http.MethodGet, "/api/llm", "").Body.Bytes(), &stLLM)
+	if stLLM.Admin {
+		t.Fatal("/api/llm Admin=true для логина на 528")
+	}
+	for _, p := range stLLM.Providers {
+		if p.ID == llm.Cheaper {
+			t.Fatalf("не-админ с логином 528 видит cheaper: %+v", stLLM.Providers)
+		}
+	}
+	for _, c := range stLLM.Chain {
+		if strings.HasPrefix(c, llm.Cheaper+"/") {
+			t.Fatalf("не-админ с логином 528 получил cheaper в цепочке: %v", stLLM.Chain)
+		}
+	}
+	if c := reqAs(s, key, friend, http.MethodPost, "/api/llm/choice", `{"provider":"cheaper"}`).Code; c != http.StatusBadRequest {
+		t.Fatalf("выбор cheaper при логине 528: %d, ждали 400", c)
+	}
+	if c := reqAs(s, key, config.DefaultAdminID, http.MethodGet, "/api/admin/llm/people", "").Code; c != http.StatusOK {
+		t.Fatalf("настоящий AdminID: %d, ждали 200", c)
 	}
 }
 
@@ -249,5 +275,82 @@ func TestQuizForceAll(t *testing.T) {
 	}
 	if v, _, _ := st.GetSetting(fmt.Sprintf("moodle_kick:%d", admin)); v != "" {
 		t.Error("пинок без постановки")
+	}
+}
+
+func TestDemoHidesRealKeysAndBlocksLLMProbes(t *testing.T) {
+	fullCfg := &config.Config{
+		ListenAddr:       config.DefaultListen,
+		Timezone:         config.DefaultTimezone,
+		BotToken:         "real-bot-token",
+		PanelPassword:    "real-panel-pass",
+		LLMAPIKey:        "real-cheap-key",
+		LLMAPIURL:        "https://real-cheap.example/v1",
+		LLMModel:         "real-model",
+		GeminiAPIKeys:    []string{"Афанасьев:real-gem-1"},
+		OpenCodeAPIKey:   "real-oc-1",
+		OpenCodeAPIKeys:  []string{"real-oc-2"},
+		AssemblyAPIKey:   "real-asm",
+		FishStudioAPIKey: "real-fish",
+		GrokAPIKey:       "real-grok",
+		GroqAPIKey:       "real-groq",
+		GitHubToken:      "real-gh",
+		SecretKey:        "real-sec",
+		SecretKeyFile:    "/tmp/real-secret.key",
+		TavilyAPIKey:     "real-tavily",
+		ExaAPIKey:        "real-exa",
+		DBPath:           "/tmp/real.db",
+	}
+
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	origGem, origOC := llm.GeminiURL, llm.OpenCodeURL
+	llm.GeminiURL, llm.OpenCodeURL = srv.URL, srv.URL
+	t.Cleanup(func() {
+		llm.GeminiURL, llm.OpenCodeURL = origGem, origOC
+	})
+
+	s := NewDemo(fullCfg)
+	if fullCfg.BotToken != "real-bot-token" || fullCfg.LLMAPIKey != "real-cheap-key" || len(fullCfg.GeminiAPIKeys) != 1 {
+		t.Fatalf("NewDemo изменил исходный конфиг: %+v", fullCfg)
+	}
+	if s.cfg.BotToken != "" || s.cfg.PanelPassword != "" ||
+		s.cfg.LLMAPIKey != "" || s.cfg.LLMAPIURL != "" || s.cfg.LLMModel != "" ||
+		len(s.cfg.GeminiAPIKeys) != 0 || s.cfg.OpenCodeAPIKey != "" || len(s.cfg.OpenCodeAPIKeys) != 0 ||
+		s.cfg.AssemblyAPIKey != "" || s.cfg.FishStudioAPIKey != "" ||
+		s.cfg.GrokAPIKey != "" || s.cfg.GroqAPIKey != "" ||
+		s.cfg.GitHubToken != "" || s.cfg.SecretKey != "" || s.cfg.SecretKeyFile != "" ||
+		s.cfg.TavilyAPIKey != "" || s.cfg.ExaAPIKey != "" || s.cfg.DBPath != "" {
+		t.Fatalf("в конфиге демо остались секреты или пути БД: %+v", s.cfg)
+	}
+	if len(llm.Providers(s.cfg)) != 0 || len(llm.DefaultChain(s.cfg)) != 0 {
+		t.Fatalf("в демо не должно быть провайдеров из .env: %+v", llm.Providers(s.cfg))
+	}
+
+	checks := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/api/llm/test", `{"provider":"gemini"}`},
+		{http.MethodPut, "/api/llm/keys/gemini", `{"keys":["secret-key"]}`},
+		{http.MethodDelete, "/api/llm/keys/gemini", ``},
+		{http.MethodGet, "/api/llm/models?provider=gemini", ``},
+	}
+	for _, tc := range checks {
+		rec := demoCall(t, s, tc.method, tc.path, tc.body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s: код %d, ждали 403 (%s)", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(strings.ToLower(rec.Body.String()), "демо") {
+			t.Fatalf("%s %s: ожидали русское сообщение про демо-режим, получили %s", tc.method, tc.path, rec.Body.String())
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("демо-режим сделал %d сетевых запросов к LLM", hits.Load())
 	}
 }

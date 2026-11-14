@@ -295,15 +295,30 @@ func (s *Server) handleLessons(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]lessonDTO, 0, len(lessons))
+	hiddenLessonKeys := make(map[string]bool)
 	for _, l := range lessons {
+		if !s.lessonVisible(l) {
+			hiddenLessonKeys[model.BBBLessonKey(l.ID)] = true
+			continue
+		}
 		dto := lessonDTO{Lesson: l}
 		dto.BBBURL, _ = model.ResolveBBB(l, bbb)
 		out = append(out, dto)
 	}
+	if len(hiddenLessonKeys) > 0 && len(bbb) > 0 {
+		filtered := make([]model.BBBLink, 0, len(bbb))
+		for _, link := range bbb {
+			if hiddenLessonKeys[link.Key] {
+				continue
+			}
+			filtered = append(filtered, link)
+		}
+		bbb = filtered
+	}
 	if bbb == nil {
 		bbb = []model.BBBLink{}
 	}
-	recs := s.listPackRecordings()
+	recs := s.listPackRecordingsFor(lessons)
 	logx.Debugf("webapp", "handleLessons: lessons=%d bbb=%d recordings=%d", len(out), len(bbb), len(recs))
 	writeJSON(w, lessonsResponse{
 		Lessons:    out,
@@ -335,7 +350,7 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 			writeStoreErr(w, err)
 			return
 		}
-		if l == nil {
+		if l == nil || !s.lessonVisible(*l) {
 			writeErr(w, http.StatusNotFound, "lesson not found")
 			return
 		}
@@ -356,6 +371,10 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		key = model.BBBKey(s.cfg.GroupID, req.Discipline, req.Teacher)
+	}
+	if err := s.authorizeBBBKey(key); err != nil {
+		writeBBBKeyErr(w, err)
+		return
 	}
 	logx.Debugf("webapp", "handleBBB: key=%q lesson_id=%d", key, req.LessonID)
 	if err := s.src.SetBBB(key, req.URL); err != nil {
@@ -624,20 +643,174 @@ func (s *Server) anyRecording() bool {
 	return ok
 }
 
+type packLessonLister interface {
+	PackLessonIDs(packID int64) ([]int64, error)
+}
+
+var (
+	errBBBKeyInvalid   = errors.New("invalid lesson key")
+	errBBBKeyNotFound  = errors.New("lesson not found")
+	errBBBKeyForbidden = errors.New("forbidden")
+)
+
+// authorizeBBBKey проверяет доступ к прямому ключу BBB (когда lesson_id не задан).
+func (s *Server) authorizeBBBKey(key string) error {
+	low := strings.ToLower(key)
+	if strings.HasPrefix(low, "lesson:") {
+		lid, ok := model.ParseBBBLessonID(key)
+		if !ok {
+			return errBBBKeyInvalid
+		}
+		l, err := s.src.LessonByID(lid)
+		if err != nil {
+			return err
+		}
+		if l == nil {
+			return errBBBKeyNotFound
+		}
+		if !s.lessonVisible(*l) {
+			return errBBBKeyForbidden
+		}
+		return nil
+	}
+	if s.viewerIsAdmin() {
+		return nil
+	}
+	lessons, err := s.src.ListLessons()
+	if err != nil {
+		return err
+	}
+	if strings.HasPrefix(low, "room|") {
+		for _, l := range lessons {
+			if model.BBBRoomKey(l.Discipline, l.Teacher, l.Type) == key && s.lessonVisible(l) {
+				return nil
+			}
+		}
+		return errBBBKeyForbidden
+	}
+	if strings.Contains(key, "|") {
+		disc, teacher := model.ParseBBBKey(key)
+		for _, l := range lessons {
+			if strings.TrimSpace(l.Discipline) == disc && strings.TrimSpace(l.Teacher) == teacher && s.lessonVisible(l) {
+				return nil
+			}
+		}
+	}
+	return errBBBKeyForbidden
+}
+
+func writeBBBKeyErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errBBBKeyInvalid):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, errBBBKeyNotFound):
+		writeErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, errBBBKeyForbidden):
+		writeErr(w, http.StatusForbidden, err.Error())
+	default:
+		writeStoreErr(w, err)
+	}
+}
+
+func lessonsByID(lessons []model.Lesson) map[int64]model.Lesson {
+	byID := make(map[int64]model.Lesson, len(lessons))
+	for _, l := range lessons {
+		byID[l.ID] = l
+	}
+	return byID
+}
+
+// packVisible определяет, виден ли пак текущему пользователю, и возвращает тип пары.
+// Не-админ видит несвязанный пак (без lesson_id и без записей в pack_lessons),
+// а при наличии привязок — только если хотя бы один связанный урок найден и проходит lessonVisible.
+func (s *Server) packVisible(p model.LecturePack, byID map[int64]model.Lesson) (bool, string) {
+	if s.viewerIsAdmin() {
+		if l, ok := byID[p.LessonID]; ok && strings.TrimSpace(l.Type) != "" {
+			return true, l.Type
+		}
+		return true, "Лекция"
+	}
+
+	var lessonIDs []int64
+	seen := make(map[int64]bool)
+	if p.LessonID > 0 {
+		seen[p.LessonID] = true
+		lessonIDs = append(lessonIDs, p.LessonID)
+	}
+	var lister packLessonLister
+	if l, ok := s.src.(packLessonLister); ok {
+		lister = l
+	} else if s.st != nil {
+		lister = s.st
+	}
+	if lister != nil && p.ID > 0 {
+		ids, err := lister.PackLessonIDs(p.ID)
+		if err != nil {
+			logx.Warnf("webapp", "packVisible: PackLessonIDs pack_id=%d: %v", p.ID, err)
+			return false, ""
+		}
+		for _, id := range ids {
+			if id > 0 && !seen[id] {
+				seen[id] = true
+				lessonIDs = append(lessonIDs, id)
+			}
+		}
+	}
+
+	if len(lessonIDs) == 0 {
+		return true, "Лекция"
+	}
+	if p.LessonID > 0 {
+		if l, ok := byID[p.LessonID]; ok && s.lessonVisible(l) {
+			if strings.TrimSpace(l.Type) != "" {
+				return true, l.Type
+			}
+			return true, "Лекция"
+		}
+	}
+	for _, id := range lessonIDs {
+		if l, ok := byID[id]; ok && s.lessonVisible(l) {
+			if strings.TrimSpace(l.Type) != "" {
+				return true, l.Type
+			}
+			return true, "Лекция"
+		}
+	}
+	return false, ""
+}
+
 func (s *Server) listPackRecordings() []model.Recording {
 	logx.Debugf("webapp", "listPackRecordings: enter")
-	out := []model.Recording{}
 	if s == nil || s.src == nil {
 		logx.Debugf("webapp", "listPackRecordings: nil server/store -> empty")
+		return []model.Recording{}
+	}
+	lessons, err := s.src.ListLessons()
+	if err != nil {
+		logx.Errorf("webapp", "listPackRecordings: ListLessons: %v", err)
+		return []model.Recording{}
+	}
+	return s.listPackRecordingsFor(lessons)
+}
+
+func (s *Server) listPackRecordingsFor(lessons []model.Lesson) []model.Recording {
+	logx.Debugf("webapp", "listPackRecordingsFor: enter")
+	out := []model.Recording{}
+	if s == nil || s.src == nil {
+		logx.Debugf("webapp", "listPackRecordingsFor: nil server/store -> empty")
 		return out
 	}
 	packs, err := s.src.ListPacks()
 	if err != nil {
-		logx.Errorf("webapp", "listPackRecordings: ListPacks: %v", err)
+		logx.Errorf("webapp", "listPackRecordingsFor: ListPacks: %v", err)
 		return out
 	}
+	byID := lessonsByID(lessons)
 	details, _ := s.src.(packDetails)
 	for _, p := range packs {
+		if ok, _ := s.packVisible(p, byID); !ok {
+			continue
+		}
 		abs := filepath.Join(s.recordingsDir, p.Dir)
 		mod := p.UpdatedAt
 		var size int64
@@ -647,7 +820,7 @@ func (s *Server) listPackRecordings() []model.Recording {
 			if st, err := os.Stat(abs); err == nil {
 				mod = st.ModTime()
 			} else {
-				logx.Debugf("webapp", "listPackRecordings: stat %s: %v", abs, err)
+				logx.Debugf("webapp", "listPackRecordingsFor: stat %s: %v", abs, err)
 			}
 			size = dirSize(abs)
 		}
@@ -661,7 +834,7 @@ func (s *Server) listPackRecordings() []model.Recording {
 			Discipline: p.Discipline,
 		})
 	}
-	logx.Debugf("webapp", "listPackRecordings: packs=%d -> recordings=%d", len(packs), len(out))
+	logx.Debugf("webapp", "listPackRecordingsFor: packs=%d -> recordings=%d", len(packs), len(out))
 	return out
 }
 

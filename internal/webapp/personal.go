@@ -340,16 +340,26 @@ func lessonsOn(all []model.Lesson, date string) []model.Lesson {
 	return out
 }
 
+func (s *Server) isOwnOrSharedLesson(l model.Lesson) bool {
+	return l.Owner == 0 || l.Owner == s.myID()
+}
+
 func (s *Server) buildDay(date string) (dayResponse, error) {
 	all, err := s.src.ListLessons()
 	if err != nil {
 		return dayResponse{}, fmt.Errorf("buildDay: ListLessons: %w", err)
 	}
+	visible := make([]model.Lesson, 0, len(all))
+	for _, l := range all {
+		if s.isOwnOrSharedLesson(l) {
+			visible = append(visible, l)
+		}
+	}
 	m, err := s.loadMine()
 	if err != nil {
 		return dayResponse{}, err
 	}
-	views, err := s.viewLessons(m, lessonsOn(all, date))
+	views, err := s.viewLessons(m, lessonsOn(visible, date))
 	if err != nil {
 		return dayResponse{}, err
 	}
@@ -380,7 +390,7 @@ func (s *Server) buildDay(date string) (dayResponse, error) {
 			}
 		}
 	}
-	for _, l := range all {
+	for _, l := range visible {
 		if !l.Begin.After(m.now) || !m.isMine(l) {
 			continue
 		}
@@ -429,6 +439,9 @@ func (s *Server) handleWeek(w http.ResponseWriter, r *http.Request) {
 	resp := weekResponse{Today: m.now.Format(dateLayout), Now: m.now, Days: []weekDay{}, Me: m.me, Demo: s.demo}
 	idx := map[string]int{}
 	for _, l := range all {
+		if !s.isOwnOrSharedLesson(l) {
+			continue
+		}
 		v, err := s.viewLesson(m, l)
 		if err != nil {
 			logx.Errorf("webapp", "handleWeek: %v", err)
@@ -508,7 +521,7 @@ func (s *Server) handleIntent(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
-	if l == nil {
+	if l == nil || !s.isOwnOrSharedLesson(*l) {
 		writeErr(w, http.StatusNotFound, "lesson not found")
 		return
 	}

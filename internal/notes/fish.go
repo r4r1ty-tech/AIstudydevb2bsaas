@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
@@ -34,8 +35,9 @@ func Transcribe(ctx context.Context, cfg *config.Config, audioPath string) (stri
 		key  string
 		fn   func(context.Context, *config.Config, string) (string, error)
 	}
-	// AssemblyAI первым; Fish и Groq — запасные, если у него ошибка или нет ключа.
+	// Gemini из бесплатного пула — первым; AssemblyAI, Fish и Groq — запасные.
 	providers := []provider{
+		{"gemini", geminiKeyMarker(cfg), transcribeGemini},
 		{"assemblyai", cfg.AssemblyAPIKey, transcribeAssembly},
 		{"fish", cfg.FishStudioAPIKey, transcribeFish},
 		{"groq", cfg.GroqAPIKey, transcribeGroq},
@@ -61,8 +63,8 @@ func Transcribe(ctx context.Context, cfg *config.Config, audioPath string) (stri
 		logx.Errorf("notes", "Transcribe: %s все провайдеры STT не сработали за %s: %s", tag, time.Since(started).Round(time.Second), strings.Join(fails, "; "))
 		return "", fmt.Errorf("%s", strings.Join(fails, "; "))
 	}
-	logx.Errorf("notes", "Transcribe: %s нет ключа STT (AssemblyAI / Fish / Groq)", tag)
-	return "", fmt.Errorf("нет ключа STT (AssemblyAI / Fish / Groq)")
+	logx.Errorf("notes", "Transcribe: %s нет ключа STT (Gemini / AssemblyAI / Fish / Groq)", tag)
+	return "", fmt.Errorf("нет ключа STT (Gemini / AssemblyAI / Fish / Groq)")
 }
 
 func transcribeFish(ctx context.Context, cfg *config.Config, audioPath string) (string, error) {
@@ -154,10 +156,15 @@ func transcribeFish(ctx context.Context, cfg *config.Config, audioPath string) (
 
 func truncate(s string, n int) string {
 	s = strings.TrimSpace(s)
-	if len(s) <= n {
-		logx.Debugf("notes", "truncate: len=%d max=%d unchanged", len(s), n)
+	if n <= 0 {
+		return ""
+	}
+	rc := utf8.RuneCountInString(s)
+	if rc <= n {
+		logx.Debugf("notes", "truncate: len=%d max=%d unchanged", rc, n)
 		return s
 	}
-	logx.Debugf("notes", "truncate: len=%d max=%d cut", len(s), n)
-	return s[:n] + "…"
+	runes := []rune(s)
+	logx.Debugf("notes", "truncate: len=%d max=%d cut", rc, n)
+	return string(runes[:n]) + "…"
 }
