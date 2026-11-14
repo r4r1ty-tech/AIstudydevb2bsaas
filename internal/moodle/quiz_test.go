@@ -2,6 +2,7 @@ package moodle
 
 import (
 	"context"
+	"github.com/PuerkitoBio/goquery"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -412,5 +413,29 @@ func TestFinishAttemptReviewForbiddenRedirectToView(t *testing.T) {
 	}
 	if !strings.Contains(res.Grade, "10,00") {
 		t.Errorf("expected Grade extracted from view.php, got %q", res.Grade)
+	}
+}
+
+// Таблица кода и рисунок в условии не теряются (решатель отвечал «нет таблицы»).
+func TestExtractQTextTableAndImage(t *testing.T) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(`<div class="qtext">
+<p>Декодируйте последовательность, используя неравномерный код:</p>
+<table><tr><th>Символ</th><th>Код</th></tr>
+<tr><td>а</td><td>0</td></tr><tr><td>б</td><td>10</td></tr>
+<tr><td>в</td><td><img src="https://do.ssau.ru/moodle/pluginfile.php/1/v.png" alt="image"></td></tr></table>
+<p>Последовательность:</p><p>0101</p><p>1000</p>
+Текст без абзаца <img src="https://do.ssau.ru/moodle/pluginfile.php/1/tree.png" alt="дерево Шеннона-Фано">
+</div>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, imgs := extractQTextImages(doc.Find(".qtext"), "")
+	for _, want := range []string{"Символ | Код", "а | 0", "б | 10", "в | [рисунок 1]", "01011000", "Текст без абзаца [рисунок 2: дерево Шеннона-Фано]"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("нет %q в\n%s", want, text)
+		}
+	}
+	if len(imgs) != 2 || !strings.HasSuffix(imgs[1], "tree.png") {
+		t.Fatalf("images=%v", imgs)
 	}
 }
