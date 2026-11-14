@@ -40,7 +40,7 @@ func (b *Bot) sendPanelPass(id, chatID int64) error {
 		who = " для " + bold(n)
 	}
 	text := fmt.Sprintf("🔑 Пароль в панель%s: <code>%s</code>\n"+
-		"Действует до %s. Потом жми «%s» ещё раз — каждый час новый.\n"+
+		"Действует до %s — нужен только чтобы войти: панель запомнит браузер на 30 дней. Нужно снова — жми «%s», пароль каждый час новый.\n"+
 		"Пароль личный: по нему панель знает, что это ты. Никому не пересылай.",
 		who, pw, until.In(b.loc).Format("15:04"), btnPanelPass)
 	opts := &gotgbot.SendMessageOpts{}
