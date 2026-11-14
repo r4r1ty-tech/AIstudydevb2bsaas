@@ -4,7 +4,7 @@
 
 | Бинарник | Unit | Зачем |
 | --- | --- | --- |
-| `tg` | `ssau-tg.service` | Telegram: вайтлист, онбординг, T-15, память ссылок BBB, кнопка Mini App |
+| `tg` | `ssau-tg.service` | Telegram: только личный пароль в панель (кнопка внизу, `/pass`) и уведомления; отвечает лишь вайтлисту |
 | `rasp` | `ssau-rasp.service` | Парсер расписания `ssau.ru/rasp` + cron 7/15/19/22 |
 | `panel` | `ssau-panel.service` | HTTPS Mini App + JSON API. Единственный, кто слушает порт |
 | `bbb` | `ssau-bbb.service` | Гостевой join в BBB без браузера (HTTP + DDP + Pion WebRTC), запись, слайды, вейкворды |

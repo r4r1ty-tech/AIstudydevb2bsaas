@@ -43,39 +43,3 @@ func dashOr(s string) string {
 	}
 	return s
 }
-
-func knownCommand(text string) bool {
-	name := commandName(text)
-	ok := false
-	if name == "" {
-		ok = false
-	} else {
-		switch name {
-		case "start", "panel", "test", "help", "today", "notes",
-			"settings", "words", "link", "links", "cancel", "connect", "deadlines", "tasks", "pass":
-			ok = true
-		default:
-			ok = false
-		}
-	}
-	logx.Debugf("tg", "knownCommand: name=%q ok=%v", name, ok)
-	return ok
-}
-
-func commandName(text string) string {
-	logx.Debugf("tg", "commandName: enter")
-	text = strings.TrimSpace(text)
-	if !strings.HasPrefix(text, "/") {
-		return ""
-	}
-	text = text[1:]
-	if i := strings.IndexAny(text, " \n\t"); i >= 0 {
-		text = text[:i]
-	}
-	if i := strings.IndexByte(text, '@'); i >= 0 {
-		text = text[:i]
-	}
-	name := strings.ToLower(strings.TrimSpace(text))
-	logx.Debugf("tg", "commandName: %q", name)
-	return name
-}

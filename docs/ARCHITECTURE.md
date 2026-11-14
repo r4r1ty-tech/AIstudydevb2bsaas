@@ -8,7 +8,7 @@
 
 | Бинарник | Вход | Пишет в БД | Слушает порт |
 | --- | --- | --- | --- |
-| `tg` | Telegram Bot API (long polling) | users, intents, presence(чтение), events, bbb_links, settings | нет |
+| `tg` | Telegram Bot API (long polling) | lecture_packs, moodle_items, accounts (чтение), settings | нет |
 | `rasp` | `ssau.ru/rasp` | lessons, parse_runs, events, settings | нет |
 | `panel` | HTTP (Mini App + API) | users, bbb_links, settings, intents(косвенно) | да (`:8080`) |
 | `bbb` | `bbb.ssau.ru` (HTTP/DDP/WebRTC), ffmpeg, Vosk | presence, events, lecture_packs, settings | нет |
@@ -25,7 +25,7 @@ internal/logx             уровни, формат, stderr + файл
 internal/store            sqlite: пользователи, пары, интенты, presence, events, паки, настройки
 internal/model            доменные типы и чистые методы (User, Lesson, JoinIntent, …)
 internal/rasp             Fetch (HTTP+UA+cookie), Parse (goquery), Diff, Refresh, cron
-internal/tg               Bot: роутинг, онбординг, T-15, live-карточки, тестовая карточка
+internal/tg               Bot: личный пароль в панель, напоминания о сроках Moodle, кнопка PDF под «конспект готов»
 internal/bbb              воркер захода: DirectJoiner (Greenlight HTTP, Meteor DDP, Pion WebRTC), лобби, слайды, запись, spotter
 internal/capture          OpusRec: прямой дамп RTP Opus в .ogg + декод PCM 16 кГц через ffmpeg (без PulseAudio)
 internal/wake             вейкворды: Vosk через wake.py (свободное распознавание) + поиск слов и их форм
@@ -68,11 +68,11 @@ internal/websess          HTTP-сессия «как браузер» с выг�
 
 Сессии: куки после входа шифруются и пишутся в `accounts.session`; следующий синк поднимает их и логинится по паролю, только если сайт ответил «не авторизован».
 
-Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification`), лента `core_calendar_get_action_events_by_timesort` (по 50, это и есть «несделанное»), состав курса из HTML `course/view.php` (assign/quiz/lesson/workshop), страница элемента → сроки (`activity-dates`), условия выполнения, статус (`submissionstatustable`, `quizattemptsummary`), попытки и лимит времени, начало описания. Новые задания со сроком впереди приходят сообщением. Когда открывается тест (`mod/quiz`, в том числе по 5-секундному триггеру `moodle_wake_kick` от вейкворда на паре), `internal/moodle/quiz.go` и `internal/uni/quiz_solve.go` заходят в попытку (`StartOrResumeAttempt`), парсят вопросы `.que`, подтягивают конспекты/транскрипты лекций (`lecture_packs`) по предмету, при наличии ключа LLM решают и завершают попытку (`SubmitAnswers` → `FinishAttempt`) и шлют отчёт в Telegram (без ключа LLM — присылают распарсенный текст вопросов и вариантов). Бот (`tg`) показывает «Сдать» и напоминает за 24 и 3 часа (`settings.dl_sent:*`); панель читает `moodle_items` через `storeMoodle`.
+Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification`), лента `core_calendar_get_action_events_by_timesort` (по 50, это и есть «несделанное»), состав курса из HTML `course/view.php` (assign/quiz/lesson/workshop), страница элемента → сроки (`activity-dates`), условия выполнения, статус (`submissionstatustable`, `quizattemptsummary`), попытки и лимит времени, начало описания. Новые задания со сроком впереди приходят сообщением. Когда открывается тест (`mod/quiz`, в том числе по 5-секундному триггеру `moodle_wake_kick` от вейкворда на паре), `internal/moodle/quiz.go` и `internal/uni/quiz_solve.go` заходят в попытку (`StartOrResumeAttempt`), парсят вопросы `.que`, подтягивают конспекты/транскрипты лекций (`lecture_packs`) по предмету, при наличии ключа LLM решают и завершают попытку (`SubmitAnswers` → `FinishAttempt`) и шлют отчёт в Telegram (без ключа LLM — присылают распарсенный текст вопросов и вариантов). Бот (`tg`) напоминает за 24 и 3 часа (`settings.dl_sent:*`), список «Сдать» — в панели; панель читает `moodle_items` через `storeMoodle`.
 
-### T-15 и решение
+### Решение по паре
 
-`tg.t15Loop` каждые 20 с берёт пары, начинающиеся в ближайшие 15 минут, и для активных пользователей их подгруппы шлёт карточку с кнопками «Зайти/Не сегодня», создавая `join_intent(pending)`. Кнопка пишет решение (`yes/no`). Молчание = `pending`.
+Карточек T-15 в боте больше нет. Решение «заходить / не заходить» человек ставит в панели (`POST /api/intent`, `POST /api/day`), оно пишется в `join_intents` (`yes/no`). Нет записи или `pending` — молчание = заходить.
 
 ### Заход на пару
 
@@ -122,14 +122,14 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 
 ### Telegram UX
 
-- Все сообщения отправляются с `parse_mode=HTML`; динамика (ФИО, дисциплина, препод, ссылки, имена гостя) экранируется через `internal/tg/html.go` (`esc/bold/code/hlink`). В `internal/tg/html_test.go` есть защитный тест: ни один форматтер не пропускает сырые `<`/`>` даже на враждебном вводе.
-- **Единый источник статуса захода** — live-карточка `tg` (`syncLiveCard`): она редактируется на месте и показывает предмет, ссылку, остаток, статус и ФИО. `bbb` больше не шлёт дублирующие «зашёл/жду в лобби/вышел» — только действия и тревоги: нет ссылки, ошибка захода, лобби >2 мин, вейкворд, готовый конспект.
+- Все сообщения отправляются с `parse_mode=HTML`; динамика (ФИО, дисциплина, препод, ссылки, имена гостя) экранируется через `internal/tg/html.go` (`esc/bold/code/hlink`). 
+- **Статус захода — в панели** (карточка пары, `presence`). Бот live-карточек больше не ведёт; `bbb` шлёт только действия и тревоги: нет ссылки, ошибка захода, лобби >2 мин, вейкворд, готовый конспект.
 - Навигация: reply-клавиатура (Пары / Конспекты / Профиль) + inline-кнопки в карточках; настройки редактируются inline, а не новыми сообщениями.
 - Команды: `/start`, `/help`, `/settings`, `/today`, `/notes`, `/cancel` (+ `/test` и `/panel` у админа). Неизвестная команда возвращает подсказку, а не тишину. `/cancel` сбрасывает ожидание ввода.
 
 ### Панель
 
-`internal/webapp`: статика (`static/`: `index.html`, `css/`, `js/`, шрифты и картинки вшиты в бинарник) + JSON API. Вход в API: верный `PANEL_PASSWORD` (`X-Panel-Password`/`Bearer`), либо пароля нет, но задан `PANEL_ALLOW_IPS`, либо демо; иначе 401. Фильтр по IP (`PANEL_ALLOW_IPS`, `PANEL_TRUST_PROXY`) стоит перед всем, включая статику. Обработчики работают через интерфейс `Source`: `*store.Store` в обычном режиме, `demoSource` в памяти при `PANEL_DEMO=1`. WebSocket нет — пуллинг.
+`internal/webapp`: статика (`static/`: `index.html`, `css/`, `js/`, шрифты и картинки вшиты в бинарник) + JSON API. Вход в API: личный часовой пароль из бота (`internal/panelpass`, определяет, кто вошёл), общий `PANEL_PASSWORD` (вход админом), либо паролей нет, но задан `PANEL_ALLOW_IPS`, либо демо; иначе 401. Служебные ручки — только админу. Фильтр по IP (`PANEL_ALLOW_IPS`, `PANEL_TRUST_PROXY`) стоит перед всем, включая статику. Обработчики работают через интерфейс `Source`: `*store.Store` в обычном режиме, `demoSource` в памяти при `PANEL_DEMO=1`. WebSocket нет — пуллинг.
 
 Пять экранов (hash-роутинг, нижняя панель на телефоне, боковая от 900px):
 
@@ -141,7 +141,7 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 
 Первый вход: пока у «меня» нет ФИО для BBB и подгруппы, вместо приложения экран «Первый вход»; `POST /api/me {fio, subgroup, onboard:true}` заканчивает настройку (как онбординг в Telegram).
 
-«Я» — пользователь `ADMIN_TELEGRAM_ID`. Решения пишутся в `join_intents`, как кнопки T-15 в боте; воркер `bbb` читает их сам.
+«Я» — тот, чей личный пароль введён (общий пароль — `ADMIN_TELEGRAM_ID`). Решения пишутся в `join_intents`; воркер `bbb` читает их сам. Молчание = заходить.
 
 | Метод | Путь | Что делает | Основные поля |
 | --- | --- | --- | --- |
@@ -159,7 +159,7 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 
 Служебные ручки пульта остались: `/api/now`, `/api/people`, `/api/people/{id}`, `/api/lessons`, `/api/bbb`, `/api/parser`, `/api/parser/refresh`, `/api/logs`, `/api/settings`, `/api/test`.
 
-Публичный адрес Mini App резолвится в `config.ResolveWebAppURL`: свежий URL туннеля из `WEBAPP_URL_FILE` важнее статичного `WEBAPP_PUBLIC_URL`. `tg` опрашивает файл каждые 20 с (`webappLoop`) и при смене переставляет кнопку админу через `setChatMenuButton` — рестарт не требуется.
+Публичный адрес Mini App резолвится в `config.ResolveWebAppURL`: свежий URL туннеля из `WEBAPP_URL_FILE` важнее статичного `WEBAPP_PUBLIC_URL`. `tg` опрашивает файл каждые 20 с (`webappLoop`) и при смене переставляет кнопку «Панель» всем из вайтлиста через `setChatMenuButton` — рестарт не требуется.
 
 ## Конкурентность (bbb)
 

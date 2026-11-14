@@ -344,7 +344,7 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("нет ссылки BBB: %s %s", lesson.Discipline, lesson.SlotLabel()))
 	}
 	notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
-		"Нет ссылки на комнату «%s» (%s). Пришли bbb.ssau.ru/b/… сюда — привяжу и запомню для этого предмета.",
+		"Нет ссылки на комнату «%s» (%s). Добавь её в панели: «Ещё → Комнаты BBB» — запомню для этого предмета.",
 		lesson.Discipline, lesson.SlotLabel(),
 	))
 }
@@ -614,7 +614,7 @@ func (w *Worker) joinFail(ctx context.Context, u model.User, lesson model.Lesson
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не получилось зайти на «%s» — пробую ещё раз.", lesson.Discipline))
 	case stop:
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
-			"Не зашёл на «%s» после %d попыток. Нажми «Зайти» в карточке пары — попробую снова.",
+			"Не зашёл на «%s» после %d попыток. Нажми «Зайти» у пары в панели — попробую снова.",
 			lesson.Discipline, maxJoinFails))
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("не зашёл: %s / %s / %d: %s", lesson.Discipline, u.FIO, u.TelegramID, reason))
 	}

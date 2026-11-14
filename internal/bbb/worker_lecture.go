@@ -771,7 +771,7 @@ func (w *Worker) announceNotes(ctx context.Context, p *model.LecturePack) {
 		return
 	}
 	label := archive.Label(p.Discipline, p.Number)
-	text := "Конспект готов: " + label + "\nСкачать PDF — кнопка ниже или «Конспекты» в меню."
+	text := "Конспект готов: " + label + "\nСкачать PDF — кнопка ниже или «Конспекты» в панели."
 	mk := notify.NotesButton(p.ID)
 	sent := false
 	if users, err := w.Store.ListUsers(); err == nil {
