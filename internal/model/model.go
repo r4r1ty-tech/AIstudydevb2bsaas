@@ -400,10 +400,8 @@ const (
 )
 
 func IsLecture(typ string) bool {
-	logx.Debugf("model", "IsLecture: type=%q", typ)
 	t := strings.ToLower(strings.TrimSpace(typ))
 	res := strings.Contains(t, "лекц") || strings.Contains(t, "lecture")
-	logx.Debugf("model", "IsLecture: type=%q -> %v", typ, res)
 	return res
 }
 
