@@ -34,7 +34,7 @@
       <p class="gate-sub">Введите пароль панели.</p>
       <label class="field">
         <span class="field-label">Пароль</span>
-        <input id="pw" type="password" name="password" autocomplete="current-password" required>
+        <input id="pw" type="password" name="password" autocomplete="current-password">
       </label>
       <p id="gate-msg" class="form-error" role="alert" hidden></p>
       <button type="submit" class="btn btn-primary btn-block">Войти</button>
@@ -48,8 +48,9 @@
       <p class="gate-sub">Две настройки, и бот начнёт заходить на онлайн-пары за вас.</p>
       <label class="field">
         <span class="field-label">Имя для BBB</span>
-        <input id="setup-fio" class="input" name="fio" autocomplete="name" maxlength="64" placeholder="Фамилия Имя Отчество" required>
-        <span class="field-hint">Так вас увидят в списке участников — как в журнале.</span>
+        <span class="field-hint" id="setup-fio-hint">Так вас увидят в списке участников — как в журнале.</span>
+        <input id="setup-fio" class="input" name="fio" autocomplete="name" maxlength="64" placeholder="Фамилия Имя Отчество" required pattern="\s*\S+(\s+\S+)+\s*" aria-describedby="setup-fio-hint" data-error="setup-fio-err">
+        <span class="field-error" id="setup-fio-err">Ошибка: впишите хотя бы фамилию и имя.</span>
       </label>
       <div class="field">
         <span class="field-label" id="setup-sub-l">Подгруппа</span>
@@ -78,7 +79,8 @@
     </main>
   </div>
 
-  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+  <div id="toasts" class="toasts" role="region" aria-label="Уведомления"></div>
+  <div id="toast-live" class="visually-hidden" role="status"></div>
   <noscript><p class="noscript">Для панели нужен включённый JavaScript.</p></noscript>
 </body>
 </html>

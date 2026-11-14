@@ -73,7 +73,7 @@ function setBadge(id, n) {
 
 async function refreshBadge() {
   try {
-    const d = await api("api/deadlines");
+    const d = await api("api/deadlines", { priority: "low" });
     setBadge("due", d.counts ? d.counts.overdue : 0);
   } catch { /* бейдж необязателен */ }
 }
@@ -91,9 +91,7 @@ function leaveScreen() {
   screen = fresh;
 }
 
-function route() {
-  const { name, sub } = parseHash();
-  const changed = name !== current;
+function mountRoute(name, sub, changed) {
   leaveScreen();
   life = new AbortController();
   current = name;
@@ -101,13 +99,36 @@ function route() {
   screen.className = `screen${ROUTES[name].wide ? " wide" : ""}`;
   document.title = `${ROUTES[name].label} · Пульт`;
   unmount = ROUTES[name].mount(screen, { sub, setBadge, refreshBadge, signal: life.signal }) || null;
-  if (changed) {
-    window.scrollTo(0, 0);
-    requestAnimationFrame(() => {
-      const h = screen.querySelector(".screen-title");
-      if (h && document.activeElement && document.activeElement.closest(".nav")) h.focus({ preventScroll: true });
-    });
+  if (changed) window.scrollTo(0, 0);
+}
+
+function focusTitle() {
+  const h = screen.querySelector(".screen-title");
+  if (h && document.activeElement && document.activeElement.closest(".nav")) h.focus({ preventScroll: true });
+}
+
+// Переход между разделами анимируем через View Transitions: экран
+// сдвигается в сторону вкладки, панель навигации остаётся на месте.
+// Без поддержки API (или при первом показе) экран меняется сразу.
+function route() {
+  const { name, sub } = parseHash();
+  const prev = current;
+  const changed = name !== prev;
+  if (!changed || !prev || !document.startViewTransition) {
+    mountRoute(name, sub, changed);
+    if (changed) requestAnimationFrame(focusTitle);
+    return;
   }
+  const keys = Object.keys(ROUTES);
+  const dir = keys.indexOf(name) > keys.indexOf(prev) ? "forward" : "backward";
+  let vt;
+  try {
+    vt = document.startViewTransition({ update: () => mountRoute(name, sub, true), types: [dir] });
+  } catch {
+    // Старые движки знают только startViewTransition(callback), без types.
+    vt = document.startViewTransition(() => mountRoute(name, sub, true));
+  }
+  vt.finished.finally(focusTitle);
 }
 
 function showGate(msg) {
@@ -213,6 +234,28 @@ document.getElementById("setup-form").addEventListener("submit", async (ev) => {
     btn.disabled = false;
   }
 });
+
+// Поля с data-error: пока поле в состоянии :user-invalid, ставим aria-invalid
+// и дописываем id сообщения в aria-describedby, чтобы читалка прочла ошибку
+// вместе с полем. Видимость самого сообщения решает CSS.
+function linkFieldErrors(form) {
+  const sync = (ev) => {
+    const el = ev.target;
+    const errId = el && el.dataset && el.dataset.error;
+    if (!errId) return;
+    let bad = false;
+    try { bad = el.matches(":user-invalid"); } catch { return; }
+    const ids = (el.getAttribute("aria-describedby") || "").split(/\s+/).filter((x) => x && x !== errId);
+    if (bad) ids.push(errId);
+    if (ids.length) el.setAttribute("aria-describedby", ids.join(" "));
+    else el.removeAttribute("aria-describedby");
+    if (bad) el.setAttribute("aria-invalid", "true");
+    else el.removeAttribute("aria-invalid");
+  };
+  form.addEventListener("input", sync);
+  form.addEventListener("focusout", sync);
+}
+linkFieldErrors(document.getElementById("setup-form"));
 
 setUnauthorizedHandler(() => {
   if (!booted) return;

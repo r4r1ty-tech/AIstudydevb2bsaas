@@ -50,6 +50,12 @@
   --font-display: "Unbounded", "Onest", system-ui, sans-serif;
   --font-text: "Onest", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* Доля x-высоты у наших шрифтов (снято через font-size-adjust: from-font).
+     Пока веб-шрифт грузится, запасной системный подгоняется под тот же
+     размер строчных — текст не прыгает при подмене. */
+  --fsa-text: 0.527;
+  --fsa-display: 0.569;
+  --fsa-mono: 0.55;
 
   --bg: #090c0a;
   --bg-raise: #0d110e;

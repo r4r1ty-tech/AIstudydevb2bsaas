@@ -167,9 +167,10 @@ export function mountToday(root) {
     reload: load,
   });
 
-  async function load() {
+  // bg: фоновый опрос по таймеру — с низким приоритетом сети.
+  async function load(bg = false) {
     try {
-      const d = await api("api/day");
+      const d = await api("api/day", bg ? { priority: "low" } : {});
       syncClock(d.now);
       if (!st.alive) return;
       app.offline = false;
@@ -312,7 +313,7 @@ export function mountToday(root) {
   });
 
   const tick = () => {
-    if (document.visibilityState === "visible") load();
+    if (document.visibilityState === "visible") load(true);
   };
   const onVis = () => tick();
   document.addEventListener("visibilitychange", onVis);

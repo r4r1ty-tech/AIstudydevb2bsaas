@@ -4,6 +4,11 @@ html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   background: var(--bg);
+  /* Нативные контролы и полосы прокрутки в цвет темы. --acc-text в светлой
+     теме тёмно-оливковый, поэтому заливка чекбокса не теряется на белом;
+     бегунок --text-4 отличим от фона (контраст около 3:1 в обеих темах). */
+  accent-color: var(--acc-text);
+  scrollbar-color: var(--text-4) transparent;
 }
 
 body {
@@ -12,7 +17,7 @@ body {
   min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-text);
+  font-family: var(--font-text); font-size-adjust: var(--fsa-text);
   font-size: 16px;
   line-height: 1.45;
   font-feature-settings: "tnum" 0;
@@ -68,12 +73,12 @@ button { cursor: pointer; }
 .icon-lg { width: 24px; height: 24px; }
 
 .mono {
-  font-family: var(--font-mono);
+  font-family: var(--font-mono); font-size-adjust: var(--fsa-mono);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
-.display { font-family: var(--font-display); letter-spacing: -0.02em; }
+.display { font-family: var(--font-display); font-size-adjust: var(--fsa-display); letter-spacing: -0.02em; }
 
 .visually-hidden {
   position: absolute !important;

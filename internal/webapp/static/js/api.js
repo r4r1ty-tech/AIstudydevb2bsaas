@@ -36,7 +36,7 @@ const FRIENDLY = {
   "refresh unavailable": "Обновление расписания сейчас недоступно.",
 };
 
-async function request(path, { method = "GET", body, signal, password = "", quiet401 = false } = {}) {
+async function request(path, { method = "GET", body, signal, priority, password = "", quiet401 = false } = {}) {
   const headers = { Accept: "application/json" };
   if (password) headers["X-Panel-Password"] = password;
   let payload;
@@ -46,7 +46,10 @@ async function request(path, { method = "GET", body, signal, password = "", quie
   }
   let res;
   try {
-    res = await fetch(path.replace(/^\//, ""), { method, headers, body: payload, signal, cache: "no-store" });
+    const init = { method, headers, body: payload, signal, cache: "no-store" };
+    // priority: "low" — фоновые опросы не отбирают канал у действий человека.
+    if (priority) init.priority = priority;
+    res = await fetch(path.replace(/^\//, ""), init);
   } catch (e) {
     if (e && e.name === "AbortError") throw e;
     throw new ApiError("Нет связи с сервером.", 0, null);
@@ -68,8 +71,8 @@ async function request(path, { method = "GET", body, signal, password = "", quie
 }
 
 export function api(path, opts = {}) {
-  const { method, body, signal } = opts;
-  return request(path, { method, body, signal });
+  const { method, body, signal, priority } = opts;
+  return request(path, { method, body, signal, priority });
 }
 
 // login меняет пароль из бота на долгую сессию в куке. 401 здесь — не «сессия
