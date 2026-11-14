@@ -56,7 +56,11 @@ go vet ./...
 - **push → main**: тесты → сборка `linux/amd64` четырёх бинарников → `scp` в `/opt/ssau-bot` → перезапуск systemd через `deploy/remote.sh`.
 - **workflow_dispatch**: ручной прогон теста и деплоя.
 
-Секреты репозитория: `VDS_SSH_KEY` (обязателен), `VDS_HOST`, `VDS_USER`, `VDS_PORT` (по умолчанию `203.0.113.30`, `root`, `22`). `.env` на сервере в деплой не входит — правится руками один раз.
+Секреты репозитория: `VDS_SSH_KEY` (обязателен), `VDS_HOST`, `VDS_USER`, `VDS_PORT` (по умолчанию `203.0.113.20`, `root`, `22`; сейчас все четыре заданы). LLM для конспектов: `LLM_API_KEY/URL/MODEL`, без них — `DEEPSEEK_API_KEY` с `api.deepseek.com` и `deepseek-chat`. `.env` на сервере в деплой не входит — правится руками один раз.
+
+## Прод
+
+VDS прод-VDS (хостер, Прага, 4 CPU / 4 ГБ, Debian 13), `203.0.113.20`. Панель — `https://panel.example.com` за Caddy с сертификатом Let's Encrypt, открыта только IP из `PANEL_ALLOW_IPS` (выходы VPN-пула) и по `PANEL_PASSWORD`. Из РФ IP сервера напрямую не виден — панель открывается через VPN. Подробнее — [docs/OPERATIONS.md](docs/OPERATIONS.md#прод-прод-vds).
 
 ## Логи
 

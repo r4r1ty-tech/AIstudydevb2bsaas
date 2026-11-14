@@ -170,7 +170,16 @@ systemctl disable --now ssau-bot.service 2>/dev/null || true
 rm -f /etc/systemd/system/ssau-bot.service
 
 systemctl daemon-reload
-systemctl enable ssau.target ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service ssau-tunnel.service
+systemctl enable ssau.target ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service
+
+# PANEL_TUNNEL=0 в .env: панель за своим Caddy с сертификатом, cloudflared не нужен.
+tunnel_on=1
+if [[ -f "$APP/.env" ]] && grep -q '^PANEL_TUNNEL=0' "$APP/.env"; then
+  tunnel_on=0
+  systemctl disable --now ssau-tunnel.service 2>/dev/null || true
+else
+  systemctl enable ssau-tunnel.service
+fi
 
 if [[ ! -f "$APP/.env" ]]; then
   echo "бинарники в $APP, но нет $APP/.env — сервисы не стартую"
@@ -183,7 +192,7 @@ grep -q '^VOSK_MODEL=' "$APP/.env" || echo 'VOSK_MODEL=/opt/ssau-bot/vosk-model'
 grep -q '^VOSK_SCRIPT=' "$APP/.env" || echo 'VOSK_SCRIPT=/opt/ssau-bot/wake.py' >> "$APP/.env"
 grep -q '^LOG_LEVEL=' "$APP/.env" || echo 'LOG_LEVEL=info' >> "$APP/.env"
 grep -q '^LOG_FILE=' "$APP/.env" || echo 'LOG_FILE=/opt/ssau-bot/ssau.log' >> "$APP/.env"
-grep -q '^WEBAPP_URL_FILE=' "$APP/.env" || echo 'WEBAPP_URL_FILE=/opt/ssau-bot/webapp_url' >> "$APP/.env"
+[[ $tunnel_on -eq 0 ]] || grep -q '^WEBAPP_URL_FILE=' "$APP/.env" || echo 'WEBAPP_URL_FILE=/opt/ssau-bot/webapp_url' >> "$APP/.env"
 
 set_env_vars \
   "LLM_API_KEY=${LLM_API_KEY:-}" \
@@ -205,12 +214,13 @@ if systemctl is-active --quiet ssau-bbb.service; then
   bbb_was_active=1
 fi
 
-systemctl restart ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service
+systemctl restart ssau-tg.service ssau-rasp.service ssau-panel.service
+[[ $tunnel_on -eq 0 ]] || systemctl restart ssau-tunnel.service
 if [[ "$bbb_was_active" -eq 1 ]]; then
   systemctl restart ssau-bbb.service
 fi
 sleep 1
-systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service ssau-tunnel.service || true
+systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service || true
 if [[ "$bbb_was_active" -eq 1 ]]; then
   systemctl --no-pager --full status ssau-bbb.service || true
 else
