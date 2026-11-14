@@ -52,29 +52,89 @@ func TestDefaultChainExcludesCheaper(t *testing.T) {
 	if len(only) != 1 || only[0].Provider != Cheaper {
 		t.Fatalf("без бесплатных: %v", only)
 	}
+	// cheaperinference: muse первой, LLM_MODEL без повтора; чужой провайдер — один LLM_MODEL
+	if got := cheaperModels("glm-5.3-flash", "https://api.cheaperinference.com/v1"); strings.Join(got, ",") != "muse-spark-1.3-contributor,glm-5.3-flash" {
+		t.Fatalf("cheaperModels: %v", got)
+	}
+	if got := cheaperModels("kimi", "https://api.cheaperinference.com/v1"); len(got) != 3 || got[2] != "kimi" {
+		t.Fatalf("cheaperModels + свой LLM_MODEL: %v", got)
+	}
+	if got := cheaperModels("", "https://other/v1"); len(got) != 0 {
+		t.Fatalf("чужой провайдер без LLM_MODEL: %v", got)
+	}
 }
 
-func TestChainForChoice(t *testing.T) {
-	cfg := cfgAll()
-	// cheaper — только админу
-	if got := ChainFor(cfg, Choice{Provider: Cheaper, Model: "kimi-k3"}, false); got[0].Provider != Gemini {
-		t.Fatalf("не админ получил cheaper: %v", got[0])
+func cfgOwners() *config.Config {
+	return &config.Config{
+		GeminiAPIKeys:   []string{"Афанасьев:g1", "Агеев:g2", "Костин:g3"},
+		OpenCodeAPIKeys: []string{"Иваныч:o1", "Агеев:o2"},
+		LLMAPIKey:       "ch", LLMAPIURL: "https://api.cheaperinference.com/v1", LLMModel: "glm-5.3-flash",
 	}
-	got := ChainFor(cfg, Choice{Provider: Cheaper, Model: "kimi-k3"}, true)
-	if got[0].Provider != Cheaper || got[0].Model != "kimi-k3" || got[1].Provider != Gemini {
-		t.Fatalf("админ: %v %v", got[0], got[1])
+}
+
+// Обычный человек — жёстко только свои ключи: выбор первым, потом свои же
+// ключи на других моделях. Ни чужих ключей, ни cheaper.
+func TestChainForUserOwnKeysOnly(t *testing.T) {
+	cfg := cfgOwners()
+	got := ChainFor(cfg, Choice{Provider: Gemini, Model: "gemini-3.6-flash", Key: 2}, false, "агеев")
+	if len(got) == 0 || got[0].Provider != Gemini || got[0].Model != "gemini-3.6-flash" || got[0].KeyLabel != "Агеев" {
+		t.Fatalf("начало: %v", got)
 	}
-	// любой может выбрать gemini и конкретный ключ; дальше — другие ключи, потом общая цепочка
-	got = ChainFor(cfg, Choice{Provider: Gemini, Model: "gemini-3.6-flash", Key: 2}, false)
-	if got[0].KeyIdx != 1 || got[0].Model != "gemini-3.6-flash" || got[1].KeyIdx != 0 || got[1].Model != "gemini-3.6-flash" || got[2].Model != GeminiModels[0] {
-		t.Fatalf("выбор ключа: %v %v %v", got[0], got[1], got[2])
+	want := len(GeminiModels) + len(OpenCodeModels) // по ключу Агеева у каждого провайдера
+	if len(got) != want {
+		t.Fatalf("длина %d, ждал %d: %v", len(got), want, got)
 	}
-	for _, x := range got[2:] {
-		if x.Provider == Gemini && x.Model == "gemini-3.6-flash" {
-			t.Fatal("выбранная модель повторилась в хвосте")
+	for _, x := range got {
+		if x.KeyLabel != "Агеев" || x.Provider == Cheaper {
+			t.Fatalf("чужое в цепочке: %v", x)
 		}
 	}
-	if got := ChainFor(cfg, Choice{Provider: "nope"}, true); got[0].Provider != Gemini {
+	// выбрал чужой ключ — он не попадает, остаются свои
+	got = ChainFor(cfg, Choice{Provider: Gemini, Key: 1}, false, "Агеев")
+	for _, x := range got {
+		if x.KeyLabel != "Агеев" {
+			t.Fatalf("чужой ключ: %v", x)
+		}
+	}
+	// cheaper не админу недоступен
+	for _, x := range ChainFor(cfg, Choice{Provider: Cheaper}, false, "Агеев") {
+		if x.Provider == Cheaper {
+			t.Fatal("cheaper у не админа")
+		}
+	}
+	// своих ключей нет — пусто
+	if got := ChainFor(cfg, Choice{}, false, "Петров"); len(got) != 0 {
+		t.Fatalf("без своих ключей: %v", got)
+	}
+	if got := ChainFor(cfg, Choice{Provider: Gemini}, false, ""); len(got) != 0 {
+		t.Fatalf("без фамилии: %v", got)
+	}
+}
+
+// Админ: выбор, потом cheaper c muse-spark-1.3-contributor, потом все ключи.
+func TestChainForAdminFallback(t *testing.T) {
+	cfg := cfgOwners()
+	got := ChainFor(cfg, Choice{Provider: Gemini, Model: "gemini-3.6-flash", Key: 3}, true, "Амелин")
+	if got[0].Provider != Gemini || got[0].KeyIdx != 2 || got[0].Model != "gemini-3.6-flash" {
+		t.Fatalf("выбор: %v", got[0])
+	}
+	i := 0
+	for i < len(got) && got[i].Provider == Gemini && got[i].Model == "gemini-3.6-flash" {
+		i++
+	}
+	if i != 3 || got[i].Provider != Cheaper || got[i].Model != "muse-spark-1.3-contributor" || got[i+1].Model != "glm-5.3-flash" {
+		t.Fatalf("после выбора ждал cheaper/muse: %v", got[i:])
+	}
+	total := len(GeminiModels)*3 + len(OpenCodeModels)*2 + 2
+	if len(got) != total {
+		t.Fatalf("админ получил не всё: %d из %d", len(got), total)
+	}
+	// без выбора — сразу cheaper/muse
+	if got := ChainFor(cfg, Choice{}, true, ""); got[0].Provider != Cheaper || got[0].Model != "muse-spark-1.3-contributor" {
+		t.Fatalf("админ без выбора: %v", got[0])
+	}
+	// неизвестный провайдер — как без выбора
+	if got := ChainFor(cfg, Choice{Provider: "nope"}, true, ""); got[0].Provider != Cheaper {
 		t.Fatalf("неизвестный провайдер: %v", got[0])
 	}
 }

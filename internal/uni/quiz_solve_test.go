@@ -230,6 +230,7 @@ func TestQuizSolveWithLLM(t *testing.T) {
 		LLMAPIKey: "fake_key",
 		LLMAPIURL: llmSrv.URL,
 		LLMModel:  "fake_model",
+		AdminID:   10,
 	}
 
 	// Элемент теста, который открылся (ранее не было в базе)
@@ -419,7 +420,7 @@ func TestQuizSolveLLMDownKeepsAttemptOpen(t *testing.T) {
 	acc, _ := st.GetAccount(10, model.AccountMoodle)
 	dbPath := filepath.Join(t.TempDir(), "bot.db")
 	// без бесплатных ключей цепочка — один вариант LLM_* (фейк, всегда 503)
-	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", DBPath: dbPath}
+	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10, DBPath: dbPath}
 
 	item := model.MoodleItem{CMID: 777, Course: "Теория информации", Kind: model.MoodleQuiz, Title: "Тест", Status: model.MoodleTodo,
 		URL: moodleSrv.URL + "/mod/quiz/view.php?id=777"}
@@ -490,7 +491,7 @@ func TestQuizForceOverdue(t *testing.T) {
 	f := newFake(t)
 	sy, st, sent := setup(t, f)
 	sy.MoodleBase = moodleSrv.URL
-	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m"}
+	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10}
 	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
 	acc, _ := st.GetAccount(10, model.AccountMoodle)
 	past := time.Now().Add(-48 * time.Hour)
@@ -547,7 +548,7 @@ func TestQuizSubmitErrorKeepsAttemptOpen(t *testing.T) {
 	f := newFake(t)
 	sy, st, sent := setup(t, f)
 	sy.MoodleBase = moodleSrv.URL
-	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m"}
+	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10}
 	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
 	acc, _ := st.GetAccount(10, model.AccountMoodle)
 	item := model.MoodleItem{CMID: 777, Course: "Теория информации", Kind: model.MoodleQuiz, Title: "Тест", Status: model.MoodleTodo}

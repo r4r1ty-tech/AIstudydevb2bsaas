@@ -71,25 +71,34 @@ func TestAdminByLoginSuffix(t *testing.T) {
 }
 
 func TestLLMChoiceRoundTrip(t *testing.T) {
-	s, _, key, _ := newAdminServer(t)
+	s, store, key, _ := newAdminServer(t)
 	admin := config.DefaultAdminID
 	friend := config.DefaultWhitelist[1]
+	// ключи подписаны фамилией: у друга Костина свой ключ gemini #2
+	_ = store.SetSetting(fmt.Sprintf("lk_name:%d", friend), "Костин Иван Петрович")
 
 	var st llmState
 	_ = json.Unmarshal(reqAs(s, key, admin, http.MethodGet, "/api/llm", "").Body.Bytes(), &st)
-	if len(st.Providers) != 3 || !st.Admin || !strings.HasPrefix(st.Chain[0], "gemini/") {
+	// админ без выбора — сразу cheaper, потом все ключи
+	if len(st.Providers) != 3 || !st.Admin || !strings.HasPrefix(st.Chain[0], "cheaper/") || !strings.HasPrefix(st.Chain[1], "gemini/") {
 		t.Fatalf("админ по умолчанию: %+v", st)
 	}
 	if k := st.Providers[0].KeyInfo; len(k) != 2 || k[0].Label != "Афанасьев" || k[0].Tail == "" {
 		t.Fatalf("ключи у админа: %+v", k)
 	}
 
-	// друг: cheaper не видит, хвостов ключей не видит, но выбирает ключ сам
+	// друг: cheaper и чужие ключи не видит, хвостов нет — только свой ключ
 	rec := reqAs(s, key, friend, http.MethodGet, "/api/llm", "")
 	st = llmState{}
 	_ = json.Unmarshal(rec.Body.Bytes(), &st)
-	if len(st.Providers) != 2 || st.Admin || st.Providers[0].KeyInfo[1].Tail != "" || strings.Contains(rec.Body.String(), "secret") {
+	if len(st.Providers) != 1 || st.Admin || len(st.Providers[0].KeyInfo) != 1 || st.Providers[0].KeyInfo[0].N != 2 ||
+		st.Providers[0].KeyInfo[0].Tail != "" || strings.Contains(rec.Body.String(), "secret") || strings.Contains(rec.Body.String(), "Афанасьев\"") {
 		t.Fatalf("друг: %s", rec.Body)
+	}
+	for _, c := range st.Chain {
+		if !strings.Contains(c, "(Костин)") {
+			t.Fatalf("в цепочке друга чужой ключ: %v", st.Chain)
+		}
 	}
 	if c := reqAs(s, key, friend, http.MethodPost, "/api/llm/choice", `{"provider":"cheaper"}`).Code; c != http.StatusBadRequest {
 		t.Fatalf("друг выбрал cheaper: %d", c)
@@ -97,8 +106,14 @@ func TestLLMChoiceRoundTrip(t *testing.T) {
 	rec = reqAs(s, key, friend, http.MethodPost, "/api/llm/choice", `{"provider":"gemini","model":"gemini-3.6-flash","key":2}`)
 	st = llmState{}
 	_ = json.Unmarshal(rec.Body.Bytes(), &st)
-	if rec.Code != http.StatusOK || st.Chain[0] != "gemini/gemini-3.6-flash#2(Костин)" || st.Chain[1] != "gemini/gemini-3.6-flash#1(Афанасьев)" {
-		t.Fatalf("выбор друга: %d %+v", rec.Code, st.Chain[:2])
+	if rec.Code != http.StatusOK || st.Chain[0] != "gemini/gemini-3.6-flash#2(Костин)" || st.Chain[1] != "gemini/gemini-4-hydrogen#2(Костин)" || len(st.Chain) != 3 {
+		t.Fatalf("выбор друга: %d %+v", rec.Code, st.Chain)
+	}
+	if c := reqAs(s, key, friend, http.MethodPost, "/api/llm/choice", `{"provider":"gemini","key":1}`).Code; c != http.StatusForbidden {
+		t.Fatalf("чужой ключ: %d", c)
+	}
+	if c := reqAs(s, key, friend, http.MethodPost, "/api/llm/choice", `{"provider":"opencode"}`).Code; c != http.StatusForbidden {
+		t.Fatalf("провайдер без своих ключей: %d", c)
 	}
 	if c := reqAs(s, key, friend, http.MethodPost, "/api/llm/choice", `{"provider":"gemini","key":9}`).Code; c != http.StatusBadRequest {
 		t.Fatalf("несуществующий ключ: %d", c)

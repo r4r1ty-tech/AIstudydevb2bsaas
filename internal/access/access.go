@@ -66,10 +66,20 @@ func SetChoice(st Store, id int64, ch llm.Choice) error {
 	return st.SetSetting(choiceKey(id), string(b))
 }
 
-// QuizChain — цепочка для тестов человека id: его выбор (провайдер, модель,
-// ключ) первым, дальше остальные ключи и общая цепочка. cheaper — только админу.
+// QuizChain — цепочка для тестов человека id (см. llm.ChainFor): у
+// обычного — только его ключи, у админа — выбор, потом cheaper и все ключи.
 func QuizChain(cfg *config.Config, st Store, id int64) []llm.Target {
-	return llm.ChainFor(cfg, GetChoice(st, id), IsAdmin(cfg, st, id))
+	return llm.ChainFor(cfg, GetChoice(st, id), IsAdmin(cfg, st, id), KeyOwner(st, id))
+}
+
+// KeyOwner — чьи ключи человека: фамилия из ФИО ЛК (ключи в .env
+// подписаны фамилией владельца, «Агеев:ключ»). Пусто — своих ключей нет.
+func KeyOwner(st Store, id int64) string {
+	f := strings.Fields(LKName(st, id))
+	if len(f) == 0 {
+		return ""
+	}
+	return f[0]
 }
 
 // LKName — ФИО из ЛК (uni.LKNameKey, без импорта uni), пусто — не знаем.
