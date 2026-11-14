@@ -192,6 +192,15 @@ func (s *Store) migrate() error {
 			updated_at TEXT,
 			PRIMARY KEY (telegram_id, cmid)
 		)`,
+		// Входы в панель по куке: токен хранится только как sha256, сроки — unix-секунды.
+		`CREATE TABLE IF NOT EXISTS web_sessions (
+			token_hash TEXT PRIMARY KEY,
+			telegram_id INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(telegram_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_web_sessions_exp ON web_sessions(expires_at)`,
 	}
 	logx.Debugf("store", "migrate: statements=%d", len(stmts))
 	tx, err := s.db.Begin()

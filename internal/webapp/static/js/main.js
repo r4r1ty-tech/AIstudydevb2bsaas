@@ -1,6 +1,6 @@
 // Точка входа: вход, навигация по hash (#today, #week, #due, #notes, #more),
 // совместимость с Telegram Mini App без блокировки загрузки.
-import { api, password, setPassword, setUnauthorizedHandler } from "./api.js";
+import { api, login, setUnauthorizedHandler, takeLegacyPassword } from "./api.js";
 import { html, setHTML } from "./dom.js";
 import { icon } from "./icons.js";
 import { setTimezone } from "./format.js";
@@ -140,7 +140,7 @@ async function boot() {
     s = await api("api/settings");
   } catch (e) {
     if (e.status === 401) {
-      showGate(password() ? "Пароль не подошёл." : "");
+      showGate("");
       return;
     }
     shell.hidden = false;
@@ -216,18 +216,29 @@ document.getElementById("setup-form").addEventListener("submit", async (ev) => {
 
 setUnauthorizedHandler(() => {
   if (!booted) return;
-  setPassword("");
-  showGate("Пароль сменился — войдите заново.");
+  showGate("Сессия закончилась — войдите заново.");
 });
 
-document.getElementById("login-form").addEventListener("submit", (ev) => {
+// Пароль из бота нужен только для входа: сервер меняет его на долгую сессию
+// в куке (30 дней с последнего захода, продлевается сам) и дальше пароль
+// не хранится и не пересылается.
+document.getElementById("login-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const v = document.getElementById("pw").value.trim();
   if (!v) {
     showGate("Введите пароль.");
     return;
   }
-  setPassword(v);
+  const btn = ev.currentTarget.querySelector('[type="submit"]');
+  if (btn) btn.disabled = true;
+  try {
+    await login(v);
+  } catch (e) {
+    showGate(e.status === 401 ? "Пароль не подошёл." : e.message);
+    return;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
   boot();
 });
 
@@ -239,5 +250,14 @@ window.addEventListener("hashchange", () => {
   route();
 });
 
+async function start() {
+  // Вкладка со старым входом (пароль в sessionStorage) не должна его терять.
+  const legacy = takeLegacyPassword();
+  if (legacy) {
+    try { await login(legacy); } catch { /* пароль протух — покажем экран входа */ }
+  }
+  boot();
+}
+
 telegram();
-boot();
+start();

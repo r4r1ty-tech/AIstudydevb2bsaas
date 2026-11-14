@@ -1,22 +1,22 @@
-// Обёртка над fetch: относительные пути (панель может жить за прокси),
-// пароль панели из sessionStorage в заголовке X-Panel-Password.
+// Обёртка над fetch: относительные пути (панель может жить за прокси).
+// Вход держится на HttpOnly-куке: пароль из бота уходит на сервер один раз
+// (login), дальше браузер сам шлёт куку, а пароль нигде не хранится.
 
-const PW_KEY = "panel_pw";
+const LEGACY_PW_KEY = "panel_pw";
 let onUnauthorized = () => {};
 
 export function setUnauthorizedHandler(fn) {
   onUnauthorized = fn;
 }
 
-export function password() {
-  try { return sessionStorage.getItem(PW_KEY) || ""; } catch { return ""; }
-}
-
-export function setPassword(v) {
+// Раньше пароль лежал в sessionStorage. Забираем его один раз (чтобы открытая
+// вкладка не потеряла вход при обновлении) и стираем.
+export function takeLegacyPassword() {
   try {
-    if (v) sessionStorage.setItem(PW_KEY, v);
-    else sessionStorage.removeItem(PW_KEY);
-  } catch { /* приватный режим — живём без запоминания */ }
+    const v = sessionStorage.getItem(LEGACY_PW_KEY) || "";
+    sessionStorage.removeItem(LEGACY_PW_KEY);
+    return v;
+  } catch { return ""; }
 }
 
 export class ApiError extends Error {
@@ -36,10 +36,9 @@ const FRIENDLY = {
   "refresh unavailable": "Обновление расписания сейчас недоступно.",
 };
 
-export async function api(path, { method = "GET", body, signal } = {}) {
+async function request(path, { method = "GET", body, signal, password = "", quiet401 = false } = {}) {
   const headers = { Accept: "application/json" };
-  const pw = password();
-  if (pw) headers["X-Panel-Password"] = pw;
+  if (password) headers["X-Panel-Password"] = password;
   let payload;
   if (body !== undefined) {
     headers["Content-Type"] = "application/json; charset=utf-8";
@@ -58,7 +57,7 @@ export async function api(path, { method = "GET", body, signal } = {}) {
     try { data = JSON.parse(text); } catch { data = { error: text.trim() }; }
   }
   if (res.status === 401) {
-    onUnauthorized();
+    if (!quiet401) onUnauthorized();
     throw new ApiError("Нужен пароль панели.", 401, data);
   }
   if (!res.ok) {
@@ -66,4 +65,20 @@ export async function api(path, { method = "GET", body, signal } = {}) {
     throw new ApiError(FRIENDLY[raw] || raw, res.status, data);
   }
   return data;
+}
+
+export function api(path, opts = {}) {
+  const { method, body, signal } = opts;
+  return request(path, { method, body, signal });
+}
+
+// login меняет пароль из бота на долгую сессию в куке. 401 здесь — не «сессия
+// кончилась», а «пароль не подошёл», поэтому общий обработчик не вызываем.
+export function login(password) {
+  return request("api/login", { method: "POST", password, quiet401: true });
+}
+
+// logout удаляет сессию на сервере и стирает куку.
+export function logout() {
+  return request("api/logout", { method: "POST", quiet401: true });
 }

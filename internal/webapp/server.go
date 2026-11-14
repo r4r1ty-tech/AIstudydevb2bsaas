@@ -43,6 +43,8 @@ type Server struct {
 	passKey []byte
 	// viewer — кто вошёл (Telegram id); выставляется в копии Server на запрос.
 	viewer int64
+	// viaSession — запрос пришёл с кукой долгой сессии (в копии на запрос).
+	viaSession bool
 	// st — настоящая база (nil в демо): настройки, аккаунты, Kick для админки.
 	st *store.Store
 }
@@ -204,6 +206,10 @@ func (s *Server) routes() http.Handler {
 		_, _ = w.Write(data)
 	})
 
+	// Вход и выход по куке — вне requireAccess: вход идёт с паролем, выход
+	// должен работать и с просроченной сессией.
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.Handle("/api/", s.requireAccess())
 	logx.Debugf("webapp", "routes: done")
 	return AllowIPs(s.allow, s.cfg.PanelTrustProxy, logRequests(mux))
@@ -387,43 +393,61 @@ func (s *Server) panelIDs() []int64 {
 	return ids
 }
 
-// whoIs — кто стоит за запросом. Порядок: демо (админ), общий PANEL_PASSWORD
-// (админ), личный часовой пароль из бота (его владелец), панель без паролей и
-// без ключа хранилища, закрытая списком IP (админ). Иначе — отказ.
-func (s *Server) whoIs(r *http.Request) (int64, bool) {
-	admin := s.cfg.AdminID
-	if s.demo {
-		return admin, true
-	}
+// passwordIdentity — кто вошёл по паролю из заголовка: общий PANEL_PASSWORD
+// (админ) или личный часовой пароль из бота (его владелец).
+func (s *Server) passwordIdentity(r *http.Request) (int64, bool) {
 	got := passwordFromRequest(r)
 	if want := s.cfg.PanelPassword; want != "" && passwordOK(got, want) {
-		return admin, true
+		return s.cfg.AdminID, true
 	}
-	if id, ok := panelpass.Who(s.passKey, s.panelIDs(), got, s.clock()); ok {
-		return id, true
+	return panelpass.Who(s.passKey, s.panelIDs(), got, s.clock())
+}
+
+// whoIs — кто стоит за запросом. Порядок: демо (админ), пароль в заголовке
+// (общий PANEL_PASSWORD — админ, личный часовой — его владелец; старый способ
+// входа остаётся), кука долгой сессии, панель без паролей и без ключа
+// хранилища, закрытая списком IP (админ). Иначе — отказ. viaSession — вошли по
+// куке: для таких запросов дальше включается защита от чужих сайтов.
+func (s *Server) whoIs(w http.ResponseWriter, r *http.Request) (id int64, viaSession, ok bool) {
+	admin := s.cfg.AdminID
+	if s.demo {
+		return admin, false, true
+	}
+	if id, ok := s.passwordIdentity(r); ok {
+		return id, false, true
+	}
+	if id, ok := s.sessionFromCookie(w, r); ok {
+		return id, true, true
 	}
 	// Только по IP — лишь если ключа хранилища нет в конфиге совсем. Ключ
 	// настроен, но не загрузился — личные пароли не работают, и пускать всех
 	// с разрешённых IP админом нельзя (fail-closed).
 	if s.cfg.PanelPassword == "" && len(s.passKey) == 0 && len(s.allow) > 0 &&
 		s.cfg.SecretKey == "" && s.cfg.SecretKeyFile == "" {
-		return admin, true
+		return admin, false, true
 	}
-	return 0, false
+	return 0, false, false
 }
 
 func (s *Server) requireAccess() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logx.Debugf("webapp", "requireAccess: %s %s demo=%v allow=%d", r.Method, r.URL.Path, s.demo, len(s.allow))
-		id, ok := s.whoIs(r)
+		id, viaSession, ok := s.whoIs(w, r)
 		if !ok {
 			logx.Warnf("webapp", "requireAccess: auth failed %s %s", r.Method, r.URL.Path)
 			logx.Warnf("panel", "bad password %s", r.URL.Path)
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		logx.Debugf("webapp", "requireAccess: tg=%d %s %s", id, r.Method, r.URL.Path)
-		s.asViewer(id).apiMux().ServeHTTP(w, r)
+		if viaSession && crossSite(r) {
+			logx.Warnf("panel", "cross-site %s %s tg=%d", r.Method, r.URL.Path, id)
+			writeErr(w, http.StatusForbidden, "cross-site request")
+			return
+		}
+		logx.Debugf("webapp", "requireAccess: tg=%d %s %s session=%v", id, r.Method, r.URL.Path, viaSession)
+		v := s.asViewer(id)
+		v.viaSession = viaSession
+		v.apiMux().ServeHTTP(w, r)
 	})
 }
 

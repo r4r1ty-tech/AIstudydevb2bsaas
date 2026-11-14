@@ -76,6 +76,8 @@ type settingsResponse struct {
 	BBBPrefix string `json:"bbb_prefix"`
 	// IsAdmin — показывать ли блок «Служебное».
 	IsAdmin bool `json:"is_admin"`
+	// Session — вход по куке: в «Ещё» можно показать «Выйти».
+	Session bool `json:"session"`
 }
 
 func (s *Server) handleNow(w http.ResponseWriter, r *http.Request) {
@@ -526,6 +528,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		Demo:      s.demo,
 		BBBPrefix: bbbPrefix,
 		IsAdmin:   s.viewerIsAdmin(),
+		Session:   s.viaSession,
 	})
 }
 

@@ -1,5 +1,5 @@
 // «Ещё»: аккаунт универа, профиль, комнаты BBB и свёрнутое «Служебное».
-import { api } from "../api.js";
+import { api, logout } from "../api.js";
 import { html, setHTML, str } from "../dom.js";
 import { icon } from "../icons.js";
 import { ago, syncClock } from "../format.js";
@@ -116,6 +116,8 @@ export function mountMore(root, ctx) {
     setHTML(root, html`${head({ eyebrow: "Настройки и служебное", title: "Ещё" })}
       ${section("account", "key", "Аккаунт универа", "Moodle: тесты и задания со сроками; ЛК: расписание, подгруппы и ссылки BBB", html`<div id="acc-body" class="stack-lg">${accountBody(st.moodle)}</div>`)}
       ${section("profile", "user", "Профиль", "Как бот заходит за вас", profileBody(st.me))}
+      ${app.settings?.session ? section("session", "logout", "Вход в панель", "Браузер запомнен на 30 дней с последнего захода — пароль из бота не нужен", html`<button type="button" class="btn btn-ghost" data-action="panel-logout">${icon("logout")}Выйти</button>
+        <p class="field-hint">Сессия удалится на сервере. Чтобы зайти снова, возьмите новый пароль в боте.</p>`) : ""}
       ${st.ai ? section("ai", "bot", "ИИ для тестов", "Какой моделью и чьим ключом бот решает твои тесты в Moodle", aiFormHTML(st.ai)) : ""}
       ${section("rooms", "door", "Комнаты BBB", "Ссылки по предметам — подставляются на каждую пару", roomsBody(st.rooms))}
       ${app.settings?.is_admin ? html`<details class="card fold service" id="service" ${st.serviceOpen ? "open" : ""}>
@@ -160,6 +162,15 @@ export function mountMore(root, ctx) {
     if (act.dataset.action === "retry") {
       setHTML(root, skeleton());
       load();
+    } else if (act.dataset.action === "panel-logout") {
+      busy(act, true);
+      try {
+        await logout();
+        location.reload();
+      } catch (e) {
+        busy(act, false);
+        toast(e.message, "error");
+      }
     } else if (act.dataset.action === "moodle-logout") {
       busy(act, true);
       try {
