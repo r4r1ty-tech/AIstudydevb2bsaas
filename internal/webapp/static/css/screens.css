@@ -428,3 +428,8 @@
 
 /* «Без срока»: спокойные карточки без цвета срочности. */
 .due-nodue { margin-top: 16px; }
+
+/* Личные ключи ИИ */
+.ai-key-card { gap: 10px; }
+.ai-key-head { justify-content: space-between; }
+.ai-limits { display: flex; flex-direction: column; gap: 4px; font-size: 13.5px; color: var(--text-2); }

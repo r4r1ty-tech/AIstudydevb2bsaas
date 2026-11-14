@@ -52,8 +52,13 @@ func New(o Options) *Searcher {
 		hc = &http.Client{Timeout: 20 * time.Second}
 	}
 	s := &Searcher{}
-	if o.TavilyKey != "" {
-		s.Providers = append(s.Providers, &Tavily{Key: o.TavilyKey, HTTP: hc})
+	// TAVILY_API_KEY может содержать несколько ключей через запятую: каждый
+	// становится отдельным поставщиком в цепочке. Когда лимит одного ключа
+	// исчерпан, Search перейдёт к следующему ключу сам.
+	for _, k := range strings.Split(o.TavilyKey, ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			s.Providers = append(s.Providers, &Tavily{Key: k, HTTP: hc})
+		}
 	}
 	if o.ExaKey != "" {
 		s.Providers = append(s.Providers, &Exa{Key: o.ExaKey, HTTP: hc})

@@ -47,6 +47,10 @@ type Server struct {
 	viaSession bool
 	// st — настоящая база (nil в демо): настройки, аккаунты, Kick для админки.
 	st *store.Store
+	// vault — шифратор секретов (личные API-ключи и учётные данные).
+	vault *vault.Vault
+	// loginLim — ограничение частоты неудачных попыток входа по IP.
+	loginLim *loginLimiter
 }
 
 // New — панель поверх настоящей базы. st может быть nil (тесты статики и пароля).
@@ -58,10 +62,12 @@ func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir
 	}
 	var md Moodle = moodleStub{}
 	var passKey []byte
+	var loadedVault *vault.Vault
 	if cfg != nil && (cfg.SecretKey != "" || cfg.SecretKeyFile != "") {
 		if v, err := vault.Load(cfg.SecretKey, cfg.SecretKeyFile); err != nil {
 			logx.Errorf("webapp", "New: vault: %v — Moodle и личные пароли в панели выключены", err)
 		} else {
+			loadedVault = v
 			passKey = v.Derive(panelpass.Label)
 			if st != nil {
 				md = &storeMoodle{st: st, v: v, owner: cfg.AdminID, lkBase: cfg.LKBaseURL, moodleBase: cfg.MoodleBaseURL}
@@ -71,6 +77,10 @@ func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir
 	s := buildServer(cfg, src, md, refresh, recordingsDir, nil, false)
 	s.passKey = passKey
 	s.st = st
+	s.vault = loadedVault
+	if st != nil && loadedVault != nil {
+		access.InitLLMBridge(st, loadedVault)
+	}
 	return s
 }
 
@@ -82,6 +92,10 @@ func buildServer(cfg *config.Config, src Source, moodle Moodle, refresh RefreshF
 			AdminID:    config.DefaultAdminID,
 			Whitelist:  append([]int64(nil), config.DefaultWhitelist...),
 		}
+	} else if demo {
+		c := *cfg
+		sanitizeDemoConfig(&c)
+		cfg = &c
 	}
 	if recordingsDir == "" {
 		recordingsDir = cfg.RecordingsDir
@@ -101,6 +115,7 @@ func buildServer(cfg *config.Config, src Source, moodle Moodle, refresh RefreshF
 		loc:           loadLocation(cfg.Timezone),
 		clock:         clock,
 		demo:          demo,
+		loginLim:      newLoginLimiter(),
 	}
 	s.allow, s.allowErr = ParseAllowList(cfg.PanelAllowIPs)
 	if s.allowErr != nil {
@@ -343,6 +358,10 @@ func (s *Server) apiMux() http.Handler {
 	api.HandleFunc("GET /api/llm/models", s.handleLLMModels)
 	api.HandleFunc("POST /api/llm/choice", s.handleLLMChoice)
 	api.HandleFunc("POST /api/llm/test", s.handleLLMTest)
+	api.HandleFunc("GET /api/llm/keys", s.handleLLMKeysList)
+	api.HandleFunc("PUT /api/llm/keys/{provider}", s.handleLLMKeyPut)
+	api.HandleFunc("DELETE /api/llm/keys/{provider}", s.handleLLMKeyDelete)
+	api.HandleFunc("GET /api/llm/limits", s.handleLLMLimits)
 	// «Пройти» у теста в «Сдать»: решить свой тест сейчас, даже просроченный.
 	api.HandleFunc("POST /api/quiz/force", s.handleQuizForce)
 	api.HandleFunc("POST /api/quiz/force-all", s.handleQuizForceAll)
@@ -366,19 +385,18 @@ func (s *Server) asViewer(id int64) *Server {
 	return &c
 }
 
-// viewerIsAdmin — ADMIN_TELEGRAM_ID или аккаунт универа с логином на
-// ADMIN_LOGIN_SUFFIX (internal/access).
+// viewerIsAdmin — админ панели (строго по ADMIN_TELEGRAM_ID).
 func (s *Server) viewerIsAdmin() bool {
-	if s.cfg == nil {
-		return false
-	}
-	if s.viewer == s.cfg.AdminID && s.viewer != 0 {
-		return true
-	}
-	if s.st == nil {
+	if s.cfg == nil || s.viewer == 0 {
 		return false
 	}
 	return access.IsAdmin(s.cfg, s.st, s.viewer)
+}
+
+// lessonVisible — видна ли пара текущему пользователю: общие пары (Owner == 0),
+// свои личные пары ИОТ (Owner == myID), либо все пары для администратора.
+func (s *Server) lessonVisible(l model.Lesson) bool {
+	return l.Owner == 0 || l.Owner == s.myID() || s.viewerIsAdmin()
 }
 
 // panelIDs — кому положен личный пароль: вайтлист и админ.

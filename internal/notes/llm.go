@@ -2,6 +2,7 @@ package notes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,6 +11,20 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
+
+// ErrCheaperNotAllowed возвращается при обнаружении админского провайдера cheaper или таргетов AdminOnly в пути конспектов.
+var ErrCheaperNotAllowed = errors.New("для конспектов запрещено использовать админский ключ (cheaper)")
+
+// ValidateChain проверяет цепочку на отсутствие cheaper и таргетов AdminOnly.
+// Если найден хотя бы один запрещённый таргет, немедленно возвращает ErrCheaperNotAllowed без сетевых вызовов.
+func ValidateChain(chain []llm.Target) error {
+	for _, t := range chain {
+		if t.Provider == llm.Cheaper || t.AdminOnly {
+			return ErrCheaperNotAllowed
+		}
+	}
+	return nil
+}
 
 // chatResp — ответ OpenAI-совместимого chat/completions (нужен vision.go).
 type chatResp struct {
@@ -28,9 +43,13 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	tag := li.tag()
 	started := time.Now()
 	logx.Infof("notes", "Summarize: старт %s discipline=%q lecture=%d transcript_chars=%d slides_chars=%d", tag, discipline, n, len([]rune(transcript)), len([]rune(slides)))
-	chain := llm.DefaultChain(cfg)
+	chain := llm.PoolChain(cfg)
+	if err := ValidateChain(chain); err != nil {
+		logx.Errorf("notes", "Summarize: %s запрещённый провайдер: %v", tag, err)
+		return "", err
+	}
 	if len(chain) == 0 {
-		logx.Errorf("notes", "Summarize: %s нет ключей ИИ (GEMINI_API_KEYS / OPENCODE_API_KEY / LLM_*)", tag)
+		logx.Errorf("notes", "Summarize: %s нет ключей ИИ (GEMINI_API_KEYS / OPENCODE_API_KEY)", tag)
 		return "", fmt.Errorf("нет ключей ИИ")
 	}
 	chainNames := make([]string, 0, len(chain))
@@ -78,14 +97,22 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	return content, nil
 }
 
-// Ask — общая бесплатная цепочка провайдеров (internal/llm): gemini, потом
-// opencode; LLM_* (cheaperinference) — только если больше ничего не настроено.
-func Ask(ctx context.Context, cfg *config.Config, sysPrompt, userPrompt string) (string, error) {
-	res, err := llm.Ask(ctx, llm.DefaultChain(cfg), sysPrompt, userPrompt)
+// AskChain выполняет запрос по заданной цепочке после обязательной валидации на отсутствие cheaper/AdminOnly.
+func AskChain(ctx context.Context, chain []llm.Target, sysPrompt, userPrompt string) (string, error) {
+	if err := ValidateChain(chain); err != nil {
+		return "", err
+	}
+	res, err := llm.Ask(ctx, chain, sysPrompt, userPrompt)
 	if err != nil {
 		return "", err
 	}
 	return res.Text, nil
+}
+
+// Ask — общая бесплатная цепочка провайдеров из пула (Gemini и OpenCode).
+// Ключ cheaper (AdminOnly) для конспектов строго запрещён.
+func Ask(ctx context.Context, cfg *config.Config, sysPrompt, userPrompt string) (string, error) {
+	return AskChain(ctx, llm.PoolChain(cfg), sysPrompt, userPrompt)
 }
 
 // chatEndpoint принимает любой OpenAI-совместимый base URL: и с /v1, и без.

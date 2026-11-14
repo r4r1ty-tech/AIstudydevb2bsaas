@@ -2,6 +2,7 @@ package moodle
 
 import (
 	"context"
+	"errors"
 	"github.com/PuerkitoBio/goquery"
 	"io"
 	"mime"
@@ -472,5 +473,35 @@ func TestParseReviewRightAnswerAndFeedback(t *testing.T) {
 	}
 	if q.Feedback != "Ошибка на втором шаге" {
 		t.Errorf("Feedback = %q, ожидали отзыв без правильного ответа", q.Feedback)
+	}
+}
+
+func TestFetchFileClearsSesskeyOnLoginRedirect(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login/index.php":
+			_, _ = w.Write([]byte(`<html><form id="login"></form></html>`))
+		default:
+			http.Redirect(w, r, srv.URL+"/login/index.php", http.StatusSeeOther)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.setSesskey("STALE_KEY")
+
+	_, _, err = c.FetchFile(context.Background(), "/pluginfile.php/1/question/img.png")
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
+	}
+	c.mu.Lock()
+	sk := c.sesskey
+	c.mu.Unlock()
+	if sk != "" {
+		t.Fatalf("sesskey = %q, want empty after login redirect", sk)
 	}
 }

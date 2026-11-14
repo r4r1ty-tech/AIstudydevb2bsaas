@@ -1,6 +1,7 @@
 package notes
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,7 +78,7 @@ func TestWritePDFMath(t *testing.T) {
 	}
 	pdf := filepath.Join(t.TempDir(), "notes.pdf")
 	md := "Формула: $\\frac{a}{b} + \\sqrt{x}$\n\n$$\n\\sum_{i=1}^{n} x_i\n$$\n"
-	if err := WritePDF(&config.Config{ChromeBin: bin}, "Тема", md, pdf); err != nil {
+	if err := WritePDF(context.Background(), &config.Config{ChromeBin: bin}, "Тема", md, pdf); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(pdf)

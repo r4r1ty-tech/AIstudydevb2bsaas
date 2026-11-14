@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yuin/goldmark"
@@ -23,7 +24,13 @@ import (
 // job (and the worker shutdown) forever.
 var pdfTimeout = 3 * time.Minute
 
-func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
+func WritePDF(ctx context.Context, cfg *config.Config, title, md, pdfPath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	started := time.Now()
 	// RECORDINGS_DIR на VDS относительный, а file://recordings/... Chromium
 	// читает как хост «recordings» и отвечает ERR_INVALID_URL.
@@ -49,9 +56,9 @@ func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 	}
 	// Старый файл не должен сойти за свежий, если печать молча не сработала.
 	_ = os.Remove(pdfPath)
-	ctx, cancel := context.WithTimeout(context.Background(), pdfTimeout)
+	cctx, cancel := context.WithTimeout(ctx, pdfTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin,
+	cmd := exec.CommandContext(cctx, bin,
 		"--headless=new",
 		"--disable-gpu",
 		"--no-sandbox",
@@ -59,10 +66,25 @@ func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 		"--print-to-pdf="+pdfPath,
 		(&url.URL{Scheme: "file", Path: filepath.ToSlash(htmlPath)}).String(),
 	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil || cmd.Process.Pid <= 0 {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
+	if cmd.Process != nil && cmd.Process.Pid > 0 {
+		// Гарантируем завершение всей процессной группы, чтобы headless Chromium не оставлял сирот.
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	logx.Debugf("notes", "WritePDF: chromium bin=%s out=%q", bin, truncate(string(out), 200))
-	if ctx.Err() != nil {
+	if cctx.Err() != nil {
+		if ctx.Err() != nil {
+			logx.Errorf("notes", "WritePDF: print-to-pdf отменён bin=%s: %v", bin, ctx.Err())
+			return fmt.Errorf("print-to-pdf: %w", ctx.Err())
+		}
 		// Chrome иногда печатает файл и не выходит: готовый PDF важнее кода возврата.
 		if st, serr := os.Stat(pdfPath); serr == nil && st.Size() >= 100 {
 			logx.Warnf("notes", "WritePDF: chromium не вышел за %s, но pdf записан bytes=%d", pdfTimeout, st.Size())

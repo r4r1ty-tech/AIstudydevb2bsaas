@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -181,10 +182,26 @@ func (r *OpusRec) WriteRTP(pkt *rtp.Packet) error {
 
 // Read reads decoded 16 kHz mono s16le PCM bytes for the wake-word spotter.
 func (r *OpusRec) Read(p []byte) (int, error) {
-	if r == nil || r.pcmOut == nil {
+	if r == nil {
 		return 0, io.EOF
 	}
-	return r.pcmOut.Read(p)
+	r.mu.Lock()
+	pcmOut := r.pcmOut
+	r.mu.Unlock()
+	if pcmOut == nil {
+		return 0, io.EOF
+	}
+
+	n, err := pcmOut.Read(p)
+	if err != nil {
+		r.mu.Lock()
+		stopped := r.stopped
+		r.mu.Unlock()
+		if stopped && errors.Is(err, os.ErrClosed) {
+			return n, io.EOF
+		}
+	}
+	return n, err
 }
 
 // Stats returns total RTP packets and payload bytes written to disk.
@@ -233,6 +250,14 @@ func (r *OpusRec) Stop() error {
 	}
 	if r.cancel != nil {
 		r.cancel()
+	}
+
+	r.mu.Lock()
+	pcmOut := r.pcmOut
+	r.pcmOut = nil
+	r.mu.Unlock()
+	if pcmOut != nil {
+		_ = pcmOut.Close()
 	}
 
 	var closeErr error

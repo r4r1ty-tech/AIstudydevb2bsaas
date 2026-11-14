@@ -84,6 +84,17 @@ func TestOpusRecDecodesPCMWithFFmpeg(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	type readRes struct {
+		pcm []byte
+		err error
+	}
+	readCh := make(chan readRes, 1)
+	go func() {
+		b, rerr := io.ReadAll(rec)
+		readCh <- readRes{pcm: b, err: rerr}
+	}()
+
 	for i := 0; i < 50; i++ {
 		if err := rec.WriteRTP(dummyOpusPacket(uint16(i+1), uint32(i*960))); err != nil {
 			t.Fatal(err)
@@ -92,12 +103,15 @@ func TestOpusRecDecodesPCMWithFFmpeg(t *testing.T) {
 	if err := rec.Stop(); err != nil {
 		t.Fatal(err)
 	}
-	pcm, err := io.ReadAll(rec)
-	if err != nil {
-		t.Fatal(err)
+	res := <-readCh
+	if res.err != nil {
+		t.Fatal(res.err)
 	}
-	if len(pcm) == 0 {
+	if len(res.pcm) == 0 {
 		t.Fatal("expected decoded PCM bytes from ffmpeg")
+	}
+	if n, rerr := rec.Read(make([]byte, 16)); n != 0 || rerr != io.EOF {
+		t.Fatalf("Read after Stop: n=%d err=%v, want (0, io.EOF)", n, rerr)
 	}
 	dur, _, err := Probe(ctx, out)
 	if err != nil {
@@ -105,5 +119,39 @@ func TestOpusRecDecodesPCMWithFFmpeg(t *testing.T) {
 	}
 	if dur < 500*time.Millisecond {
 		t.Fatalf("duration = %s, want >= 500ms", dur)
+	}
+}
+
+func TestOpusRecStopClosesPCMOutPipe(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pw.Close()
+
+	rec := &OpusRec{pcmOut: pr}
+	readDone := make(chan error, 1)
+	go func() {
+		_, rerr := rec.Read(make([]byte, 64))
+		readDone <- rerr
+	}()
+	time.Sleep(30 * time.Millisecond)
+
+	if err := rec.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := rec.Stop(); err != nil {
+		t.Fatalf("second Stop: %v", err)
+	}
+	select {
+	case rerr := <-readDone:
+		if rerr != io.EOF {
+			t.Fatalf("blocked Read after Stop: err=%v, want io.EOF", rerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked Read did not unblock on Stop")
+	}
+	if _, cerr := pr.Read(make([]byte, 1)); cerr == nil {
+		t.Fatal("expected pcmOut FD to be closed after Stop")
 	}
 }

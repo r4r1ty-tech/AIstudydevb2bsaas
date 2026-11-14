@@ -3,15 +3,18 @@ package webapp
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/access"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/quizlog"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/uni"
 )
 
@@ -46,13 +49,59 @@ func (s *Server) needStore(w http.ResponseWriter) bool {
 	return true
 }
 
+var personalProviders = []string{llm.Gemini, llm.OpenCode}
+
+const (
+	// Ориентировочные суточные лимиты бесплатных тарифов (только как подсказка в UI).
+	estimatedGeminiDailyRequests   = 1500
+	estimatedOpenCodeDailyRequests = 200
+)
+
+func isPersonalKeyProvider(provider string) bool {
+	return provider == llm.Gemini || provider == llm.OpenCode
+}
+
+func (s *Server) personalKeyMap(id int64) map[string]store.LLMKeyRecord {
+	if s.st == nil || id == 0 {
+		return nil
+	}
+	recs, err := s.st.ListLLMKeysByUser(id)
+	if err != nil || len(recs) == 0 {
+		return nil
+	}
+	out := make(map[string]store.LLMKeyRecord, len(recs))
+	for _, rec := range recs {
+		if isPersonalKeyProvider(rec.Provider) {
+			out[rec.Provider] = rec
+		}
+	}
+	return out
+}
+
 // visibleProviders — провайдеры, доступные тому, кто вошёл. Не админ видит
-// только свои ключи (подпись = его фамилия) и только провайдеров, где они есть.
+// только свои ключи (подпись = его фамилия или личный ключ из БД) и только провайдеров, где они есть.
 func (s *Server) visibleProviders() []llm.Provider {
 	admin := s.viewerIsAdmin()
-	owner := access.KeyOwner(s.st, s.myID())
+	id := s.myID()
+	owner := access.KeyOwner(s.st, id)
+	dbKeys := s.personalKeyMap(id)
+
+	provs := llm.Providers(s.cfg)
+	seenProv := make(map[string]bool, len(provs))
+	for _, p := range provs {
+		seenProv[p.ID] = true
+	}
+	for _, pid := range personalProviders {
+		if _, hasDB := dbKeys[pid]; hasDB && !seenProv[pid] {
+			if bp, ok := llm.BuiltinProvider(pid); ok {
+				provs = append(provs, bp)
+				seenProv[pid] = true
+			}
+		}
+	}
+
 	var out []llm.Provider
-	for _, p := range llm.Providers(s.cfg) {
+	for _, p := range provs {
 		if p.AdminOnly && !admin {
 			continue
 		}
@@ -64,10 +113,17 @@ func (s *Server) visibleProviders() []llm.Provider {
 					mine = append(mine, ki)
 				}
 			}
-			if len(mine) == 0 {
-				continue
-			}
 			pub.KeyInfo = mine
+		}
+		if rec, hasDB := dbKeys[p.ID]; hasDB {
+			pub.KeyInfo = append(pub.KeyInfo, llm.KeyInfo{
+				N:     len(p.Keys) + 1,
+				Label: "личный",
+				Tail:  rec.Mask,
+			})
+		}
+		if !admin && len(pub.KeyInfo) == 0 {
+			continue
 		}
 		out = append(out, pub)
 	}
@@ -81,9 +137,9 @@ func (s *Server) llmStateFor(id int64) llmState {
 		Admin:     s.viewerIsAdmin(),
 		Providers: s.visibleProviders(),
 		Choice:    access.GetChoice(s.st, id),
-		Chain:     chainNames(access.QuizChain(s.cfg, s.st, id)),
+		Chain:     chainNames(access.QuizChainWithVault(s.cfg, s.st, s.vault, id)),
 		Default:   chainNames(def),
-		NotesWith: chainNames(def),
+		NotesWith: chainNames(llm.PoolChain(s.cfg)),
 	}
 }
 
@@ -94,24 +150,56 @@ func (s *Server) handleLLMGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.llmStateFor(s.myID()))
 }
 
-// allowedProvider — провайдер есть и доступен вошедшему.
-func (s *Server) allowedProvider(id string) (llm.Provider, bool) {
-	p, ok := llm.Find(s.cfg, id)
-	if !ok || (p.AdminOnly && !s.viewerIsAdmin()) {
-		return llm.Provider{}, false
+// providerFor — провайдер есть (в конфиге или встроенный бесплатный) и доступен вошедшему.
+func (s *Server) providerFor(id string) (llm.Provider, bool) {
+	if p, ok := llm.Find(s.cfg, id); ok {
+		if p.AdminOnly && !s.viewerIsAdmin() {
+			return llm.Provider{}, false
+		}
+		return p, true
 	}
-	return p, true
+	return llm.BuiltinProvider(id)
 }
 
 func (s *Server) handleLLMModels(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.allowedProvider(r.URL.Query().Get("provider"))
+	if s.demo {
+		writeErr(w, http.StatusForbidden, "в демо-режиме запросы к внешним LLM API отключены")
+		return
+	}
+	p, ok := s.providerFor(r.URL.Query().Get("provider"))
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "нет такого провайдера")
 		return
 	}
+	id := s.myID()
+	var userSecret string
+	if s.st != nil && s.vault != nil && isPersonalKeyProvider(p.ID) {
+		if rec, err := s.st.GetLLMKey(id, p.ID); err == nil && rec != nil {
+			if plain, oerr := s.vault.Open(rec.SecretEnc); oerr == nil {
+				userSecret = strings.TrimSpace(plain)
+			}
+		}
+	}
+	if userSecret == "" {
+		owner := access.KeyOwner(s.st, id)
+		for _, k := range p.Keys {
+			if llm.OwnsKey(k, owner) {
+				userSecret = k.Secret
+				break
+			}
+		}
+	}
+	if userSecret == "" && s.viewerIsAdmin() && len(p.Keys) > 0 {
+		userSecret = p.Keys[0].Secret
+	}
+	if userSecret == "" {
+		writeErr(w, http.StatusForbidden, "сначала добавь свой ключ для этого провайдера")
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 	defer cancel()
-	models, err := llm.ListModels(ctx, p)
+	models, err := llm.ListModelsWithKey(ctx, p, userSecret)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "список моделей: "+err.Error())
 		return
@@ -129,24 +217,36 @@ func (s *Server) decodeChoice(w http.ResponseWriter, r *http.Request) (llm.Choic
 	if ch.Provider == "" {
 		return ch, true
 	}
-	p, ok := s.allowedProvider(ch.Provider)
+	p, ok := s.providerFor(ch.Provider)
 	if !ok {
 		writeErr(w, http.StatusBadRequest, "нет такого провайдера")
 		return ch, false
 	}
-	if ch.Key < 0 || ch.Key > len(p.Keys) {
+	hasDBKey := false
+	if s.st != nil && isPersonalKeyProvider(p.ID) {
+		if rec, err := s.st.GetLLMKey(s.myID(), p.ID); err == nil && rec != nil {
+			hasDBKey = true
+		}
+	}
+	maxKey := len(p.Keys)
+	if hasDBKey {
+		maxKey++
+	}
+	if ch.Key < 0 || ch.Key > maxKey {
 		writeErr(w, http.StatusBadRequest, "нет такого ключа")
 		return ch, false
 	}
-	// Не админ — только свои ключи: чужой выбрать нельзя, а «любой» значит
-	// «любой из моих».
+	// Не админ — только свои ключи (из БД или подписанные в .env).
 	if !s.viewerIsAdmin() {
 		owner := access.KeyOwner(s.st, s.myID())
-		if ch.Key > 0 && !llm.OwnsKey(p.Keys[ch.Key-1], owner) {
-			writeErr(w, http.StatusForbidden, "это не твой ключ")
-			return ch, false
+		if ch.Key > 0 {
+			isDBIndex := hasDBKey && ch.Key == len(p.Keys)+1
+			if !isDBIndex && !llm.OwnsKey(p.Keys[ch.Key-1], owner) {
+				writeErr(w, http.StatusForbidden, "это не твой ключ")
+				return ch, false
+			}
 		}
-		own := false
+		own := hasDBKey
 		for _, k := range p.Keys {
 			own = own || llm.OwnsKey(k, owner)
 		}
@@ -175,6 +275,10 @@ func (s *Server) handleLLMChoice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
+	if s.demo {
+		writeErr(w, http.StatusForbidden, "в демо-режиме проверка LLM API отключена")
+		return
+	}
 	ch, ok := s.decodeChoice(w, r)
 	if !ok {
 		return
@@ -183,26 +287,275 @@ func (s *Server) handleLLMTest(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "выбери провайдера")
 		return
 	}
-	// «Любой» у не админа — проверяем его первый ключ, а не перебор чужих.
-	if ch.Key == 0 && !s.viewerIsAdmin() {
-		if p, ok := llm.Find(s.cfg, ch.Provider); ok {
-			owner := access.KeyOwner(s.st, s.myID())
-			for i, k := range p.Keys {
-				if llm.OwnsKey(k, owner) {
-					ch.Key = i + 1
-					break
-				}
-			}
-		}
-	}
+	id := s.myID()
+	userKeys := access.UserKeysFromVault(s.st, s.vault, id)
+	chain := llm.ChainForTest(s.cfg, ch, s.viewerIsAdmin(), access.KeyOwner(s.st, id), userKeys)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
-	res, err := llm.Test(ctx, s.cfg, ch)
+	res, err := llm.Ask(ctx, chain, "", "Ответь одним словом: работает")
 	out := map[string]any{"ok": err == nil, "attempts": res.Attempts, "text": res.Text}
 	if err != nil {
 		out["error"] = err.Error()
 	}
 	writeJSON(w, out)
+}
+
+type llmKeyView struct {
+	Provider      string `json:"provider"`
+	Name          string `json:"name"`
+	Configured    bool   `json:"configured"`
+	Mask          string `json:"mask,omitempty"`
+	SharePool     bool   `json:"share_pool"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
+	CooldownUntil string `json:"cooldown_until,omitempty"`
+	CooldownSec   int    `json:"cooldown_sec"`
+}
+
+type llmLimitView struct {
+	Provider               string `json:"provider"`
+	Name                   string `json:"name"`
+	Day                    string `json:"day"`
+	Configured             bool   `json:"configured"`
+	Requests               int    `json:"requests"`
+	InputTokens            int    `json:"input_tokens"`
+	OutputTokens           int    `json:"output_tokens"`
+	EstimatedDailyRequests int    `json:"estimated_daily_requests"`
+	RemainingEstimate      int    `json:"remaining_estimate"`
+	EstimatedNote          string `json:"estimated_note"`
+	CooldownUntil          string `json:"cooldown_until,omitempty"`
+	CooldownSec            int    `json:"cooldown_sec"`
+}
+
+func (s *Server) effectiveCooldown(id int64, provider, secret, day string, now time.Time) (time.Time, int) {
+	var until time.Time
+	if secret != "" {
+		if memUntil, active := llm.KeyCooldownUntil(secret); active && memUntil.After(now) {
+			until = memUntil
+		}
+	}
+	if s.st != nil {
+		if u, err := s.st.GetLLMUsage(id, provider, day); err == nil && u != nil && u.CooldownUntil != nil && u.CooldownUntil.After(now) {
+			if until.IsZero() || u.CooldownUntil.After(until) {
+				until = *u.CooldownUntil
+			}
+		}
+	}
+	if until.IsZero() || !until.After(now) {
+		return time.Time{}, 0
+	}
+	sec := int(math.Ceil(until.Sub(now).Seconds()))
+	if sec < 1 {
+		sec = 1
+	}
+	return until, sec
+}
+
+func (s *Server) buildLLMKeyView(id int64, pid string, rec *store.LLMKeyRecord, day string, now time.Time) llmKeyView {
+	bp, _ := llm.BuiltinProvider(pid)
+	view := llmKeyView{
+		Provider: pid,
+		Name:     bp.Name,
+	}
+	var secret string
+	if rec != nil {
+		view.Configured = true
+		view.Mask = rec.Mask
+		view.SharePool = rec.SharePool
+		if !rec.UpdatedAt.IsZero() {
+			view.UpdatedAt = rec.UpdatedAt.UTC().Format(time.RFC3339)
+		}
+		if s.vault != nil {
+			if plain, err := s.vault.Open(rec.SecretEnc); err == nil {
+				secret = strings.TrimSpace(plain)
+			}
+		}
+	}
+	until, sec := s.effectiveCooldown(id, pid, secret, day, now)
+	if sec > 0 {
+		view.CooldownUntil = until.UTC().Format(time.RFC3339)
+		view.CooldownSec = sec
+	}
+	return view
+}
+
+func (s *Server) handleLLMKeysList(w http.ResponseWriter, r *http.Request) {
+	if !s.needStore(w) {
+		return
+	}
+	id := s.myID()
+	now := s.clock().UTC()
+	// Единый день в UTC для согласованности с access.InitLLMBridge.
+	day := now.Format("2006-01-02")
+	dbKeys := s.personalKeyMap(id)
+
+	out := make([]llmKeyView, 0, len(personalProviders))
+	for _, pid := range personalProviders {
+		var recPtr *store.LLMKeyRecord
+		if rec, ok := dbKeys[pid]; ok {
+			rCopy := rec
+			recPtr = &rCopy
+		}
+		out = append(out, s.buildLLMKeyView(id, pid, recPtr, day, now))
+	}
+	writeJSON(w, map[string]any{"keys": out, "vault_ready": s.vault != nil})
+}
+
+func (s *Server) handleLLMKeyPut(w http.ResponseWriter, r *http.Request) {
+	if s.demo {
+		writeErr(w, http.StatusForbidden, "в демо-режиме управление API-ключами отключено")
+		return
+	}
+	if !s.needStore(w) {
+		return
+	}
+	if s.vault == nil {
+		writeErr(w, http.StatusServiceUnavailable, "шифрование ключей не настроено")
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(r.PathValue("provider")))
+	if !isPersonalKeyProvider(provider) {
+		writeErr(w, http.StatusBadRequest, "личный ключ доступен только для gemini или opencode")
+		return
+	}
+	var req struct {
+		Key       string `json:"key"`
+		SharePool bool   `json:"share_pool"`
+	}
+	if err := decodeJSON(r.Body, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+
+	id := s.myID()
+	now := s.clock().UTC()
+	day := now.Format("2006-01-02")
+	key := strings.TrimSpace(req.Key)
+
+	if key == "" {
+		existing, err := s.st.GetLLMKey(id, provider)
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		if existing == nil {
+			writeErr(w, http.StatusBadRequest, "введи API-ключ")
+			return
+		}
+		existing.SharePool = req.SharePool
+		existing.UpdatedAt = now
+		if err := s.st.PutLLMKey(*existing); err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		logx.Infof("panel", "llm key share tg=%d provider=%s share=%v", id, provider, req.SharePool)
+		writeJSON(w, map[string]any{"ok": true, "key": s.buildLLMKeyView(id, provider, existing, day, now)})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	if _, err := llm.TestProviderKey(ctx, s.cfg, provider, key); err != nil {
+		msg := strings.ReplaceAll(err.Error(), key, "***")
+		logx.Warnf("panel", "llm key probe failed tg=%d provider=%s: %s", id, provider, msg)
+		writeErr(w, http.StatusBadRequest, "проверка ключа не прошла: "+msg)
+		return
+	}
+
+	enc, err := s.vault.Seal(key)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "ошибка шифрования ключа")
+		return
+	}
+	rec := store.LLMKeyRecord{
+		TelegramID: id,
+		Provider:   provider,
+		SecretEnc:  enc,
+		Mask:       store.MaskKey(key),
+		SharePool:  req.SharePool,
+		UpdatedAt:  now,
+	}
+	if err := s.st.PutLLMKey(rec); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	logx.Infof("panel", "llm key saved tg=%d provider=%s mask=%s share=%v", id, provider, rec.Mask, rec.SharePool)
+	writeJSON(w, map[string]any{"ok": true, "key": s.buildLLMKeyView(id, provider, &rec, day, now)})
+}
+
+func (s *Server) handleLLMKeyDelete(w http.ResponseWriter, r *http.Request) {
+	if s.demo {
+		writeErr(w, http.StatusForbidden, "в демо-режиме управление API-ключами отключено")
+		return
+	}
+	if !s.needStore(w) {
+		return
+	}
+	provider := strings.ToLower(strings.TrimSpace(r.PathValue("provider")))
+	if !isPersonalKeyProvider(provider) {
+		writeErr(w, http.StatusBadRequest, "неизвестный провайдер")
+		return
+	}
+	id := s.myID()
+	if err := s.st.DeleteLLMKey(id, provider); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	logx.Infof("panel", "llm key deleted tg=%d provider=%s", id, provider)
+	writeJSON(w, map[string]any{"ok": true, "provider": provider})
+}
+
+func (s *Server) handleLLMLimits(w http.ResponseWriter, r *http.Request) {
+	if !s.needStore(w) {
+		return
+	}
+	id := s.myID()
+	now := s.clock().UTC()
+	// Единый день в UTC для согласованности с access.InitLLMBridge.
+	day := now.Format("2006-01-02")
+	dbKeys := s.personalKeyMap(id)
+
+	out := make([]llmLimitView, 0, len(personalProviders))
+	for _, pid := range personalProviders {
+		bp, _ := llm.BuiltinProvider(pid)
+		estDaily := estimatedGeminiDailyRequests
+		if pid == llm.OpenCode {
+			estDaily = estimatedOpenCodeDailyRequests
+		}
+		item := llmLimitView{
+			Provider:               pid,
+			Name:                   bp.Name,
+			Day:                    day,
+			EstimatedDailyRequests: estDaily,
+			RemainingEstimate:      estDaily,
+			EstimatedNote:          "ориентировочная оценка бесплатного тарифа",
+		}
+		var secret string
+		if rec, ok := dbKeys[pid]; ok {
+			item.Configured = true
+			if s.vault != nil {
+				if plain, err := s.vault.Open(rec.SecretEnc); err == nil {
+					secret = strings.TrimSpace(plain)
+				}
+			}
+		}
+		if u, err := s.st.GetLLMUsage(id, pid, day); err == nil && u != nil {
+			item.Requests = u.Requests
+			item.InputTokens = u.InputTokens
+			item.OutputTokens = u.OutputTokens
+			rem := estDaily - u.Requests
+			if rem < 0 {
+				rem = 0
+			}
+			item.RemainingEstimate = rem
+		}
+		until, sec := s.effectiveCooldown(id, pid, secret, day, now)
+		if sec > 0 {
+			item.CooldownUntil = until.UTC().Format(time.RFC3339)
+			item.CooldownSec = sec
+		}
+		out = append(out, item)
+	}
+	writeJSON(w, map[string]any{"day": day, "providers": out})
 }
 
 type personLLM struct {
@@ -220,7 +573,7 @@ func (s *Server) handleLLMPeople(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []personLLM{}
 	for _, id := range s.panelIDs() {
-		chain := access.QuizChain(s.cfg, s.st, id)
+		chain := access.QuizChainWithVault(s.cfg, s.st, s.vault, id)
 		first := ""
 		if len(chain) > 0 {
 			first = chain[0].String()

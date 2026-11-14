@@ -23,7 +23,11 @@ func main() {
 		os.Exit(2)
 	}
 	mLogin, mPass := envOr("UNI_MOODLE_LOGIN", login), envOr("UNI_MOODLE_PASSWORD", pass)
-	loc, _ := time.LoadLocation("Europe/Samara")
+	loc, err := time.LoadLocation("Europe/Samara")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "таймзона Europe/Samara:", err)
+		os.Exit(1)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	ok := checkLK(ctx, login, pass, loc)
@@ -42,7 +46,11 @@ func envOr(k, def string) string {
 
 func checkLK(ctx context.Context, login, pass string, loc *time.Location) bool {
 	fmt.Println("== ЛК ==")
-	c, _ := lk.New("")
+	c, err := lk.New("")
+	if err != nil {
+		fmt.Println("клиент ЛК:", err)
+		return false
+	}
 	if err := c.Login(ctx, login, pass); err != nil {
 		fmt.Println("вход:", err)
 		return false
@@ -59,13 +67,21 @@ func checkLK(ctx context.Context, login, pass string, loc *time.Location) bool {
 		return false
 	}
 	now := time.Now().In(loc)
-	yid, _ := lk.CurrentYearID(years, now)
+	yid, ok := lk.CurrentYearID(years, now)
+	if !ok {
+		fmt.Println("текущий учебный год не найден")
+		return false
+	}
 	first, err := c.Timetable(ctx, yid, 1, groups[0].ID)
 	if err != nil {
 		fmt.Println("расписание:", err)
 		return false
 	}
-	week, _ := lk.WeekOf(first.CurrentYear.StartDate, now, loc)
+	week, err := lk.WeekOf(first.CurrentYear.StartDate, now, loc)
+	if err != nil {
+		fmt.Println("неделя:", err)
+		return false
+	}
 	fmt.Printf("группа %s (id %d), год %d, старт %s, неделя %d\n", groups[0].Name, groups[0].ID, yid, first.CurrentYear.StartDate, week)
 	for _, w := range []int{week, week + 1} {
 		tt, err := c.Timetable(ctx, yid, w, groups[0].ID)
@@ -106,7 +122,11 @@ func checkLK(ctx context.Context, login, pass string, loc *time.Location) bool {
 		return false
 	}
 	// Повторный клиент на сохранённых куках — так работает синк между запусками.
-	c2, _ := lk.New("")
+	c2, err := lk.New("")
+	if err != nil {
+		fmt.Println("повторный клиент ЛК:", err)
+		return false
+	}
 	c2.Restore(c.Session())
 	if _, err := c2.Groups(ctx); err != nil {
 		fmt.Println("сессия из кук:", err)
@@ -118,7 +138,11 @@ func checkLK(ctx context.Context, login, pass string, loc *time.Location) bool {
 
 func checkMoodle(ctx context.Context, login, pass string, loc *time.Location) bool {
 	fmt.Println("== Moodle ==")
-	c, _ := moodle.New("")
+	c, err := moodle.New("")
+	if err != nil {
+		fmt.Println("клиент Moodle:", err)
+		return false
+	}
 	if err := c.Login(ctx, login, pass); err != nil {
 		fmt.Println("вход:", err)
 		return false

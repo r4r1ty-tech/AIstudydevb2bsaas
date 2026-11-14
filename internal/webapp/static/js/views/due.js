@@ -1,6 +1,6 @@
 // «Сдать»: дедлайны из Moodle по группам срочности.
 import { api } from "../api.js";
-import { html, setHTML, str } from "../dom.js";
+import { html, safeHref, setHTML, str } from "../dom.js";
 import { icon } from "../icons.js";
 import { ago, duration, now, plural, syncClock, whenLabel } from "../format.js";
 import { app, busy, empty, errorBlock, head, skeleton } from "../ui.js";
@@ -36,13 +36,13 @@ function letterText(items, fio) {
 }
 
 function askPanel(items, fio) {
-  const links = items.filter((d) => d.url);
+  const links = items.map((d) => ({ item: d, href: safeHref(d.url) })).filter((x) => x.href);
   return html`<div class="card card-pad stack ask-panel" role="region" aria-label="Письмо преподавателю">
     <div class="row"><span class="card-title">Письмо преподавателю</span><button type="button" class="btn btn-sm btn-ghost" data-ask-close>${icon("x")}Закрыть</button></div>
     <p class="field-hint">Текст можно поправить. Панель ничего не отправляет: скопируйте и отправьте сами.</p>
     ${fio ? "" : html`<p class="field-hint">Имя в профиле не задано: подпишите письмо сами.</p>`}
     <textarea class="input" rows="${Math.min(14, 7 + items.length)}" aria-label="Текст письма">${letterText(items, fio)}</textarea>
-    <div class="btn-row"><button type="button" class="btn btn-primary btn-sm" data-copy-letter>${icon("file")}Скопировать</button>${links.map((d) => html`<a class="btn btn-sm" href="${d.url}" target="_blank" rel="noopener noreferrer">${icon("ext")}${links.length > 1 ? `Moodle: ${d.title}` : "Открыть в Moodle"}</a>`)}</div>
+    <div class="btn-row"><button type="button" class="btn btn-primary btn-sm" data-copy-letter>${icon("file")}Скопировать</button>${links.map((x) => html`<a class="btn btn-sm" href="${x.href}" target="_blank" rel="noopener noreferrer">${icon("ext")}${links.length > 1 ? `Moodle: ${x.item.title}` : "Открыть в Moodle"}</a>`)}</div>
   </div>`;
 }
 
@@ -50,6 +50,7 @@ function item(d) {
   const hasDue = d.due && !d.due.startsWith("0001-");
   const ms = hasDue ? Date.parse(d.due) - now() : 0;
   const left = d.group === "done" || !hasDue ? "" : ms < 0 ? `просрочено на ${duration(-ms)}` : `осталось ${duration(ms)}`;
+  const href = safeHref(d.url);
   return html`<article class="due-item ${d.group}">
     <p class="due-course">${d.course}${d.section ? html` · ${d.section}` : ""}</p>
     <h3 class="due-title">${d.title}</h3>
@@ -59,7 +60,7 @@ function item(d) {
         <span class="chip">${icon(d.kind === "quiz" ? "quiz" : "assign")}${d.kind === "quiz" ? "Тест" : "Задание"}</span>
         ${statusChip(d.status, d.kind, d.closed)}
       </div>
-      ${d.url ? html`<a class="link-btn" href="${d.url}" target="_blank" rel="noopener noreferrer">Открыть в Moodle${icon("ext", "icon-sm")}</a>` : ""}
+      ${href ? html`<a class="link-btn" href="${href}" target="_blank" rel="noopener noreferrer">Открыть в Moodle${icon("ext", "icon-sm")}</a>` : ""}
     </div>
     ${d.kind === "quiz" && d.status !== "submitted" ? html`<div class="btn-row"><button type="button" class="btn btn-primary btn-sm" data-quiz-force="${d.id}">${icon("refresh")}Пройти</button>
       ${d.closed ? html`<button type="button" class="btn btn-sm" data-ask-open="${d.id}">${icon("file")}Попросить открыть</button>` : ""}

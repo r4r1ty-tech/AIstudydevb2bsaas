@@ -21,12 +21,40 @@ const demoAdminID int64 = 700000001
 
 var demoWhitelist = []int64{demoAdminID, 700000002, 700000003, 700000004, 700000005}
 
+// sanitizeDemoConfig обнуляет все реальные API-ключи, токены и пути к БД
+// в копии конфига для демо-режима.
+func sanitizeDemoConfig(c *config.Config) {
+	if c == nil {
+		return
+	}
+	c.BotToken = ""
+	c.PanelPassword = ""
+	c.LLMAPIKey = ""
+	c.LLMAPIURL = ""
+	c.LLMModel = ""
+	c.GeminiAPIKeys = nil
+	c.OpenCodeAPIKey = ""
+	c.OpenCodeAPIKeys = nil
+	c.AssemblyAPIKey = ""
+	c.FishStudioAPIKey = ""
+	c.GrokAPIKey = ""
+	c.GroqAPIKey = ""
+	c.GitHubToken = ""
+	c.SecretKey = ""
+	c.SecretKeyFile = ""
+	c.TavilyAPIKey = ""
+	c.ExaAPIKey = ""
+	c.SearXNGURL = ""
+	c.DBPath = ""
+}
+
 // NewDemo собирает панель на демо-данных. Telegram, база и ключи не нужны.
 func NewDemo(cfg *config.Config) *Server {
 	c := config.Config{ListenAddr: config.DefaultListen, Timezone: config.DefaultTimezone}
 	if cfg != nil {
 		c = *cfg
 	}
+	sanitizeDemoConfig(&c)
 	c.AdminID = demoAdminID
 	c.Whitelist = append([]int64(nil), demoWhitelist...)
 	c.PanelDemo = true

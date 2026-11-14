@@ -6,7 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
@@ -20,7 +23,91 @@ const (
 	sessionCookie = "panel_session"
 	sessionTTL    = 30 * 24 * time.Hour
 	sessionMaxAge = 90 * 24 * time.Hour
+
+	loginMaxFailures     = 5
+	loginFailWindow      = 10 * time.Minute
+	loginBlockDuration   = 5 * time.Minute
+	loginCleanupInterval = 5 * time.Minute
 )
+
+type loginFailEntry struct {
+	failures     int
+	firstFailAt  time.Time
+	blockedUntil time.Time
+}
+
+type loginLimiter struct {
+	mu          sync.Mutex
+	entries     map[string]*loginFailEntry
+	lastCleanup time.Time
+}
+
+func newLoginLimiter() *loginLimiter {
+	return &loginLimiter{entries: make(map[string]*loginFailEntry)}
+}
+
+func (l *loginLimiter) cleanupLocked(now time.Time) {
+	if len(l.entries) == 0 {
+		return
+	}
+	if !l.lastCleanup.IsZero() && now.Sub(l.lastCleanup) < loginCleanupInterval && len(l.entries) < 256 {
+		return
+	}
+	for k, e := range l.entries {
+		blockExpired := e.blockedUntil.IsZero() || !e.blockedUntil.After(now)
+		windowExpired := now.Sub(e.firstFailAt) >= loginFailWindow
+		if blockExpired && windowExpired {
+			delete(l.entries, k)
+		}
+	}
+	l.lastCleanup = now
+}
+
+func (l *loginLimiter) check(key string, now time.Time) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cleanupLocked(now)
+	e, ok := l.entries[key]
+	if !ok {
+		return false, 0
+	}
+	if e.blockedUntil.After(now) {
+		return true, e.blockedUntil.Sub(now)
+	}
+	if now.Sub(e.firstFailAt) >= loginFailWindow {
+		delete(l.entries, key)
+	}
+	return false, 0
+}
+
+func (l *loginLimiter) recordFailure(key string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cleanupLocked(now)
+	e, ok := l.entries[key]
+	if !ok || now.Sub(e.firstFailAt) >= loginFailWindow {
+		e = &loginFailEntry{firstFailAt: now}
+		l.entries[key] = e
+	}
+	e.failures++
+	if e.failures >= loginMaxFailures {
+		e.blockedUntil = now.Add(loginBlockDuration)
+	}
+}
+
+func (l *loginLimiter) reset(key string) {
+	l.mu.Lock()
+	delete(l.entries, key)
+	l.mu.Unlock()
+}
+
+func (s *Server) loginClientKey(r *http.Request) string {
+	trustProxy := s.cfg != nil && s.cfg.PanelTrustProxy
+	if ip, ok := clientIP(r, trustProxy); ok {
+		return ip.String()
+	}
+	return "unknown"
+}
 
 func hashToken(tok string) string {
 	sum := sha256.Sum256([]byte(tok))
@@ -149,11 +236,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "demo": true})
 		return
 	}
+	now := s.clock()
+	clientKey := s.loginClientKey(r)
+	if s.loginLim != nil {
+		if blocked, retryAfter := s.loginLim.check(clientKey, now); blocked {
+			sec := int(math.Ceil(retryAfter.Seconds()))
+			if sec < 1 {
+				sec = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(sec))
+			logx.Warnf("panel", "login: rate limited client=%s retry_after=%ds", clientKey, sec)
+			writeErr(w, http.StatusTooManyRequests, "слишком много неудачных попыток входа, попробуйте позже")
+			return
+		}
+	}
 	id, ok := s.passwordIdentity(r)
 	if !ok {
-		logx.Warnf("panel", "login: bad password")
+		if s.loginLim != nil {
+			s.loginLim.recordFailure(clientKey, now)
+		}
+		logx.Warnf("panel", "login: bad password client=%s", clientKey)
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
+	}
+	if s.loginLim != nil {
+		s.loginLim.reset(clientKey)
 	}
 	expires, err := s.startSession(w, r, id)
 	if err != nil {

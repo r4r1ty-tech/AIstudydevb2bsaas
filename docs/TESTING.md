@@ -70,23 +70,35 @@ S tail -n 200 /opt/ssau-bot/ssau.log          # общий файл всех п�
 Для подробностей — `LOG_LEVEL=debug` в `/opt/ssau-bot/.env` (человек) + рестарт.
 Формат строки: `[LEVEL] component: message`.
 
-### 2.3. Локальная сборка/тесты (без комнаты)
+### 2.3. Локальная сборка и автотесты (без комнаты)
 
 ```bash
 gofmt -l cmd internal
 go build ./...
 go vet ./...
+go test -race -count=1 ./...
 CGO_ENABLED=0 go test ./...          # то же, что CI
+node --check internal/webapp/static/js/*.js internal/webapp/static/js/views/*.js
+bash -n deploy/*.sh
 BBB_DRY_RUN=1 go run ./cmd/bbb       # сеть BBB не трогаем: DryJoiner всегда "room"
 PANEL_DEMO=1 LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/panel   # панель на тестовых данных
 ```
+
+Покрытие юнит- и интеграционными тестами (моки `httptest`, временный SQLite в `t.TempDir`, без живой сети):
+
+- **Одна запись и дедупликация паков:** [`internal/bbb/worker_dedup_test.go`](../internal/bbb/worker_dedup_test.go) (один рекордер на `MeetingKey`, предпочтение первого зашедшего, `recJoining`, 45-мин lease `ClaimPackForNotes`, таргетированная рассылка `announceNotes`), [`internal/bbb/slides_test.go`](../internal/bbb/slides_test.go) (`FirstShownAt`, `slides.json`, фильтрация небезопасных имён), [`internal/store/packs_test.go`](../internal/store/packs_test.go) (`EnsurePack`, `pack_lessons`, `migrateDeduplicatePacks`).
+- **4-стадийный кэш сборки конспектов:** [`internal/notes/run_test.go`](../internal/notes/run_test.go) (`.build_cache.json`, валидация аудио, `SlidesHash`, атомарная запись без мусорных файлов).
+- **Пул LLM и мультимодальность:** [`internal/llm/pool_test.go`](../internal/llm/pool_test.go) (семафор 2/ключ, cooldown на 429, разбор `Retry-After`/`retryDelay`, `ErrAllCooldown`, скраббинг секретов), [`internal/llm/media_test.go`](../internal/llm/media_test.go) (`AskParts`/`AskImage`/`AskAudio`).
+- **STT и Vision:** [`internal/notes/gemini_stt_test.go`](../internal/notes/gemini_stt_test.go) (нарезка чанков, сдвиг таймкодов, склейка перекрытий, фоллбэк на платный STT), [`internal/notes/vision_test.go`](../internal/notes/vision_test.go) (батчи по 6 слайдов через пул, исключение `cheaper`, поштучный фоллбэк на текстовый слой `slides.json`, блокировка path traversal).
+- **Личные ключи, мост и безопасность панели:** [`internal/store/llm_keys_test.go`](../internal/store/llm_keys_test.go) (`MaskKey`, CRUD `llm_keys`, атомарные счётчики `llm_usage`), [`internal/access/access_test.go`](../internal/access/access_test.go) (`QuizChainWithVault`, `InitLLMBridge`, `IsAdmin` игнорирует `ADMIN_LOGIN_SUFFIX`, кэш `ownerLookupCache`), [`internal/vault/vault_test.go`](../internal/vault/vault_test.go), [`internal/webapp/llm_keys_test.go`](../internal/webapp/llm_keys_test.go), [`internal/webapp/llm_api_test.go`](../internal/webapp/llm_api_test.go) (включая `TestAdminByLoginSuffix` и `TestDemoHidesRealKeysAndBlocksLLMProbes`), [`internal/webapp/api_more_test.go`](../internal/webapp/api_more_test.go) (`TestLessonAndRoomOwnerIsolation` — изоляция ИОТ), [`internal/webapp/session_test.go`](../internal/webapp/session_test.go) (`TestLoginBruteForceRateLimit` — 429 при переборе `/api/login`).
+- **Параллельный решатель тестов Moodle:** [`internal/uni/run_test.go`](../internal/uni/run_test.go) (`MOODLE_WORKERS`, приоритет kicked-задач, блокировки), [`internal/uni/quiz_parallel_test.go`](../internal/uni/quiz_parallel_test.go) (`parseTimeLeft`, параллельные страницы + последовательная отправка, фоллбэк на `sequential`, бюджет времени/`FastMode`, параллельные картинки, `collectCourseMaterials`, защита от SSRF в `openPage`, `TryLockQuiz`), [`internal/uni/quiz_research_test.go`](../internal/uni/quiz_research_test.go).
 
 `BBB_DRY_RUN=1` удобен для проверки логики `ensureTestN`, но **не** проверяет реальную
 работу с Greenlight/DDP/SFU, лобби и запись — это только TC-20…TC-28 в живой комнате.
 
 ### 2.4. Telegram и панель
 
-- Бот запущен под `TELEGRAM_BOT_TOKEN`, ты пишешь с `ADMIN_TELEGRAM_ID` (или с аккаунта, у которого логин универа на `ADMIN_LOGIN_SUFFIX`).
+- Бот запущен под `TELEGRAM_BOT_TOKEN`, для админских кейсов используется аккаунт `ADMIN_TELEGRAM_ID` (или общий `PANEL_PASSWORD` в панели — суффикс логина универа прав админа больше не даёт).
 - Пароль в панель — кнопка «🔑 Пароль в панель» в боте; панель открывать с VPN пула.
 - Ход теста и тревоги приходят админу сообщениями (`notify.Admin`).
 
@@ -323,7 +335,7 @@ S ls -la /opt/ssau-bot/recordings/test      # при желании удалит
 - **Шаги:** дать битую ссылку (`/b/несуществующая`) на пару/тест.
 - **Ожидаемо:** `presence=error`, событие `error`, пуш админу/пользователю; повтор — переключить у пары «Не заходить» → «Заходить» в панели; первый `dropDead` — тихий retry, второй — блок.
 - **Логи:** `join fail <key> tg=...: <причина>`, `drop retry`, `seat`.
-- **Тесты:** `internal/bbb/decide_test.go`, `worker_block_test.go`, `seat_test.go`.
+- **Тесты:** [`internal/bbb/decide_test.go`](../internal/bbb/decide_test.go), [`internal/bbb/worker_block_test.go`](../internal/bbb/worker_block_test.go), [`internal/bbb/worker_dedup_test.go`](../internal/bbb/worker_dedup_test.go), [`internal/bbb/worker_flow_test.go`](../internal/bbb/worker_flow_test.go).
 
 ## 5. Шпаргалка по логам
 
@@ -353,12 +365,11 @@ S sqlite3 /opt/ssau-bot/data/bot.db "delete from settings where key='test_join';
 # вернуть LOG_LEVEL=info и рестарт
 ```
 
-## 7. Известные ограничения
+## 7. Что по-прежнему требует живых ключей и сети
 
-- Реальная комната нужна для TC-20…TC-29; `BBB_DRY_RUN=1` их не заменяет.
+- Реальная комната на `bbb.ssau.ru` нужна для TC-20…TC-29 (Greenlight HTML/CSRF, лобби, DDP-подписки, WebRTC SFU + реальный Opus RTP); `BBB_DRY_RUN=1` и локальные mock-серверы их не заменяют полностью.
 - Тестовая запись (`recordings/test/`) **не** проходит пайплайн конспектов — это только
   лекционные паки (`lecture_packs`). TC-33 отдельный.
 - Лобби-таймаут >2 мин шлётся только для пар (`watchLobby`), не для теста.
 - Пока идёт пара, тест принудительно останавливается (приоритет лекции в `bbb`) — не баг.
-- Vosk/STT/vision требуют ключей и модели; без них соответствующие кейсы дают WARN,
-  а не падение.
+- Живые ключи LLM/STT (`GEMINI_API_KEYS`, `OPENCODE_API_KEYS`, `ASSEMBLYAI_API_KEY` / `FISH_STUDIO_API_KEY` / `GROQ_API_KEY` / `GROK_API_KEY`), живая сеть до `lk.ssau.ru` и `do.ssau.ru/moodle`, `GITHUB_TOKEN`, модель Vosk (`VOSK_MODEL`) и headless `chromium` на VDS нужны для ручной сквозной проверки TC-08, TC-12…TC-18, TC-27, TC-33; без них соответствующие шаги вживую не проверяются или дают ожидаемый WARN.

@@ -32,6 +32,19 @@ func chatOf(ctx *ext.Context, from *gotgbot.User) int64 {
 	return from.Id
 }
 
+func isPrivateChat(ctx *ext.Context, from *gotgbot.User) bool {
+	if ctx == nil || ctx.EffectiveChat == nil || from == nil {
+		return true
+	}
+	if ctx.EffectiveChat.Id != from.Id {
+		return false
+	}
+	if ctx.EffectiveChat.Type != "" && ctx.EffectiveChat.Type != "private" {
+		return false
+	}
+	return true
+}
+
 func (b *Bot) onStart(_ *gotgbot.Bot, ctx *ext.Context) error {
 	from := b.allowed(ctx)
 	if from == nil {
@@ -49,7 +62,7 @@ func (b *Bot) onText(_ *gotgbot.Bot, ctx *ext.Context) error {
 	chatID := chatOf(ctx, from)
 	text := strings.TrimSpace(ctx.EffectiveMessage.GetText())
 	if text == btnPanelPass {
-		return b.sendPanelPass(from.Id, chatID)
+		return b.sendPanelPass(from.Id, chatID, isPrivateChat(ctx, from))
 	}
 	if strings.HasPrefix(text, "/") {
 		return nil // /start и /pass ловят свои обработчики

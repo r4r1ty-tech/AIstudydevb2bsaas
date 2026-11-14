@@ -356,3 +356,579 @@ func TestReplaceLessonsKeepsIdentityAndCleansOrphans(t *testing.T) {
 		t.Fatalf("room lost: %v", keys)
 	}
 }
+
+func TestEnsurePackDeduplication(t *testing.T) {
+	s := openTemp(t)
+	root := t.TempDir()
+
+	l1 := model.Lesson{
+		ID:         101,
+		Date:       "2026-10-01",
+		Start:      "10:00",
+		Discipline: "Физика",
+		Subgroup:   1,
+		BBBURL:     "https://bbb.ssau.ru/b/phys-room",
+	}
+	l2 := model.Lesson{
+		ID:         102,
+		Date:       "2026-10-01",
+		Start:      "10:00",
+		Discipline: "Физика",
+		Subgroup:   2,
+		BBBURL:     "https://bbb.ssau.ru/b/phys-room",
+	}
+
+	p1, err := s.EnsurePack(l1, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack l1: %v", err)
+	}
+	if p1.Number != 1 {
+		t.Fatalf("expected number 1, got %d", p1.Number)
+	}
+
+	p2, err := s.EnsurePack(l2, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack l2: %v", err)
+	}
+	if p2.ID != p1.ID {
+		t.Fatalf("expected reused pack ID %d, got %d", p1.ID, p2.ID)
+	}
+	if p2.Number != 1 {
+		t.Fatalf("number should remain 1, got %d", p2.Number)
+	}
+
+	// Оба урока должны возвращать один и тот же пак
+	got1, err := s.PackByLesson(101)
+	if err != nil || got1 == nil || got1.ID != p1.ID {
+		t.Fatalf("PackByLesson 101: %+v, err: %v", got1, err)
+	}
+	got2, err := s.PackByLesson(102)
+	if err != nil || got2 == nil || got2.ID != p1.ID {
+		t.Fatalf("PackByLesson 102: %+v, err: %v", got2, err)
+	}
+
+	// PackLessonIDs должен возвращать оба lesson_id
+	lids, err := s.PackLessonIDs(p1.ID)
+	if err != nil {
+		t.Fatalf("PackLessonIDs: %v", err)
+	}
+	if len(lids) != 2 || lids[0] != 101 || lids[1] != 102 {
+		t.Fatalf("expected lesson IDs [101, 102], got %+v", lids)
+	}
+
+	// Создаем следующую лекцию по физике в другой день — номер должен увеличиться до 2
+	l3 := model.Lesson{
+		ID:         103,
+		Date:       "2026-10-08",
+		Start:      "10:00",
+		Discipline: "Физика",
+		BBBURL:     "https://bbb.ssau.ru/b/phys-room",
+	}
+	p3, err := s.EnsurePack(l3, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack l3: %v", err)
+	}
+	if p3.ID == p1.ID {
+		t.Fatalf("p3 must be a new pack")
+	}
+	if p3.Number != 2 {
+		t.Fatalf("expected lecture number 2, got %d", p3.Number)
+	}
+
+	// Проверяем случай личных пар ИОТ у нескольких разных владельцев (Owner)
+	lOwner1 := model.Lesson{
+		ID:         104,
+		Date:       "2026-10-15",
+		Start:      "11:30",
+		Discipline: "ИОТ Английский",
+		Owner:      10001,
+		BBBURL:     "https://bbb.ssau.ru/b/iot-eng",
+	}
+	lOwner2 := model.Lesson{
+		ID:         105,
+		Date:       "2026-10-15",
+		Start:      "11:30",
+		Discipline: "ИОТ Английский",
+		Owner:      10002,
+		BBBURL:     "https://bbb.ssau.ru/b/iot-eng",
+	}
+	pOwner1, err := s.EnsurePack(lOwner1, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack lOwner1: %v", err)
+	}
+	pOwner2, err := s.EnsurePack(lOwner2, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack lOwner2: %v", err)
+	}
+	if pOwner1.ID != pOwner2.ID {
+		t.Fatalf("expected same pack for both owners, got %d and %d", pOwner1.ID, pOwner2.ID)
+	}
+	if pOwner2.Number != 1 {
+		t.Fatalf("expected number 1 for first IOT lecture, got %d", pOwner2.Number)
+	}
+	gotOwner1, _ := s.PackByLesson(104)
+	gotOwner2, _ := s.PackByLesson(105)
+	if gotOwner1.ID != pOwner1.ID || gotOwner2.ID != pOwner1.ID {
+		t.Fatalf("both lessons must point to pack %d", pOwner1.ID)
+	}
+	ownerLids, _ := s.PackLessonIDs(pOwner1.ID)
+	if len(ownerLids) != 2 || ownerLids[0] != 104 || ownerLids[1] != 105 {
+		t.Fatalf("expected [104, 105], got %+v", ownerLids)
+	}
+}
+
+func TestMigrateDeduplicatePacks(t *testing.T) {
+	s := openTemp(t)
+	now := time.Now().UTC()
+
+	// Создаем уроки для одной встречи
+	_, err := s.db.Exec(`
+		INSERT INTO lessons (id, date, start, discipline, bbb_url) VALUES
+		(301, '2026-11-01', '12:00', 'Матан', 'https://bbb.ssau.ru/b/matan'),
+		(302, '2026-11-01', '12:00', 'Матан', 'https://bbb.ssau.ru/b/matan'),
+		(303, '2026-11-01', '12:00', 'Матан', 'https://bbb.ssau.ru/b/matan')
+	`)
+	if err != nil {
+		t.Fatalf("insert lessons: %v", err)
+	}
+
+	// Создаем паки с пустыми meeting_key и разными статусами
+	res1, err := s.db.Exec(`
+		INSERT INTO lecture_packs (lesson_id, discipline, number, date, bbb_url, meeting_key, status, created_at, updated_at)
+		VALUES (301, 'Матан', 1, '2026-11-01', 'https://bbb.ssau.ru/b/matan', '', 'recording', ?, ?)
+	`, timeArg(now), timeArg(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id1, _ := res1.LastInsertId()
+
+	res2, err := s.db.Exec(`
+		INSERT INTO lecture_packs (lesson_id, discipline, number, date, bbb_url, meeting_key, status, created_at, updated_at)
+		VALUES (302, 'Матан', 2, '2026-11-01', 'https://bbb.ssau.ru/b/matan', '', 'done', ?, ?)
+	`, timeArg(now), timeArg(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, _ := res2.LastInsertId()
+
+	res3, err := s.db.Exec(`
+		INSERT INTO lecture_packs (lesson_id, discipline, number, date, bbb_url, meeting_key, status, created_at, updated_at)
+		VALUES (303, 'Матан', 3, '2026-11-01', 'https://bbb.ssau.ru/b/matan', '', 'slides', ?, ?)
+	`, timeArg(now), timeArg(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id3, _ := res3.LastInsertId()
+
+	// Запускаем склейку дублей
+	if err := s.migrateDeduplicatePacks(); err != nil {
+		t.Fatalf("migrateDeduplicatePacks: %v", err)
+	}
+
+	expectedKey := "bbb:https://bbb.ssau.ru/b/matan|2026-11-01|12:00"
+
+	// Канонический пак (id2, статус done) должен сохранить meeting_key
+	pack2, err := s.PackByID(id2)
+	if err != nil || pack2 == nil {
+		t.Fatalf("pack2: %+v %v", pack2, err)
+	}
+	if pack2.MeetingKey != expectedKey {
+		t.Fatalf("expected meeting_key %q, got %q", expectedKey, pack2.MeetingKey)
+	}
+
+	// Дубли id1 и id3 должны иметь очищенный meeting_key
+	pack1, err := s.PackByID(id1)
+	if err != nil || pack1 == nil || pack1.MeetingKey != "" {
+		t.Fatalf("pack1 should have empty meeting_key, got %+v", pack1)
+	}
+	pack3, err := s.PackByID(id3)
+	if err != nil || pack3 == nil || pack3.MeetingKey != "" {
+		t.Fatalf("pack3 should have empty meeting_key, got %+v", pack3)
+	}
+
+	// Все lesson_id должны резолвиться в канонический pack2
+	for _, lid := range []int64{301, 302, 303} {
+		p, err := s.PackByLesson(lid)
+		if err != nil || p == nil || p.ID != id2 {
+			t.Fatalf("lesson %d must resolve to canonical pack %d, got %+v (err %v)", lid, id2, p, err)
+		}
+	}
+
+	// PackLessonIDs должен вернуть все три lesson_id
+	lids, err := s.PackLessonIDs(id2)
+	if err != nil {
+		t.Fatalf("PackLessonIDs: %v", err)
+	}
+	if len(lids) != 3 || lids[0] != 301 || lids[1] != 302 || lids[2] != 303 {
+		t.Fatalf("expected [301, 302, 303], got %+v", lids)
+	}
+
+	// Повторный запуск миграции (идемпотентность)
+	if err := s.migrateDeduplicatePacks(); err != nil {
+		t.Fatalf("second migrateDeduplicatePacks: %v", err)
+	}
+	pAfter, _ := s.PackByLesson(301)
+	if pAfter == nil || pAfter.ID != id2 {
+		t.Fatalf("after second migration lesson 301 should still point to pack %d", id2)
+	}
+}
+
+func TestClaimPackForNotes(t *testing.T) {
+	s := openTemp(t)
+	root := t.TempDir()
+
+	l := model.Lesson{
+		ID:         401,
+		Date:       "2026-11-14",
+		Start:      "08:00",
+		Discipline: "История",
+		BBBURL:     "https://bbb.ssau.ru/b/history",
+	}
+
+	p, err := s.EnsurePack(l, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack: %v", err)
+	}
+
+	// Устанавливаем статус slides, чтобы разрешить захват
+	p.Status = model.PackSlides
+	if err := s.SavePack(p); err != nil {
+		t.Fatalf("SavePack: %v", err)
+	}
+
+	now := time.Date(2026, 11, 14, 10, 0, 0, 0, time.UTC)
+
+	// 1. Первый захват успешен
+	claimed, err := s.ClaimPackForNotes(p.ID, now)
+	if err != nil {
+		t.Fatalf("ClaimPackForNotes: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("первый захват должен быть успешным")
+	}
+
+	// Проверяем, что claimed_at проставился
+	loaded, _ := s.PackByID(p.ID)
+	if loaded.ClaimedAt == nil || !loaded.ClaimedAt.Equal(now) {
+		t.Fatalf("claimed_at expected %s, got %v", now, loaded.ClaimedAt)
+	}
+
+	// 2. Повторный захват до истечения lease 45 минут возвращает false
+	claimedAgain, err := s.ClaimPackForNotes(p.ID, now.Add(15*time.Minute))
+	if err != nil {
+		t.Fatalf("ClaimPackForNotes: %v", err)
+	}
+	if claimedAgain {
+		t.Fatalf("захват во время активного lease должен возвращать false")
+	}
+
+	// Захват на 44-й минуте (до 45 минут) тоже false
+	claimed44, err := s.ClaimPackForNotes(p.ID, now.Add(44*time.Minute))
+	if err != nil {
+		t.Fatalf("ClaimPackForNotes: %v", err)
+	}
+	if claimed44 {
+		t.Fatalf("захват на 44 минуте должен возвращать false")
+	}
+
+	// 3. Захват после истечения lease 45 минут (на 46-й минуте) успешен
+	newNow := now.Add(46 * time.Minute)
+	claimedExpired, err := s.ClaimPackForNotes(p.ID, newNow)
+	if err != nil {
+		t.Fatalf("ClaimPackForNotes: %v", err)
+	}
+	if !claimedExpired {
+		t.Fatalf("захват после истечения lease должен быть успешным")
+	}
+
+	// 4. Явное освобождение захвата ReleasePackClaim
+	if err := s.ReleasePackClaim(p.ID); err != nil {
+		t.Fatalf("ReleasePackClaim: %v", err)
+	}
+
+	// Проверяем, что claimed_at сброшен
+	loaded, _ = s.PackByID(p.ID)
+	if loaded.ClaimedAt != nil {
+		t.Fatalf("claimed_at should be nil after release, got %v", loaded.ClaimedAt)
+	}
+
+	// Сразу после освобождения захват успешен
+	claimedAfterRelease, err := s.ClaimPackForNotes(p.ID, newNow.Add(time.Minute))
+	if err != nil || !claimedAfterRelease {
+		t.Fatalf("захват сразу после release должен быть успешен: claimed=%v err=%v", claimedAfterRelease, err)
+	}
+
+	// 5. Переход в финальный статус PackDone сбрасывает claimed_at
+	loaded, _ = s.PackByID(p.ID)
+	loaded.Status = model.PackDone
+	if err := s.SavePack(loaded); err != nil {
+		t.Fatalf("SavePack: %v", err)
+	}
+
+	loadedDone, _ := s.PackByID(p.ID)
+	if loadedDone.ClaimedAt != nil {
+		t.Fatalf("claimed_at must be reset on PackDone, got %v", loadedDone.ClaimedAt)
+	}
+
+	// Попытка захватить пак в статусе PackDone отклоняется
+	claimedOnDone, err := s.ClaimPackForNotes(p.ID, newNow.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("ClaimPackForNotes: %v", err)
+	}
+	if claimedOnDone {
+		t.Fatalf("пак со статусом PackDone не должен захватываться")
+	}
+
+	// 6. Пак в статусе PackNotes со свежим claimed_at не захватывается,
+	// а с просроченным (> 45 минут назад) — успешно захватывается.
+	notesFresh := now.Add(3 * time.Hour)
+	loaded.Status = model.PackNotes
+	loaded.ClaimedAt = &notesFresh
+	if err := s.SavePack(loaded); err != nil {
+		t.Fatalf("SavePack PackNotes: %v", err)
+	}
+	claimedFreshNotes, err := s.ClaimPackForNotes(p.ID, notesFresh.Add(10*time.Minute))
+	if err != nil {
+		t.Fatalf("ClaimPackForNotes fresh PackNotes: %v", err)
+	}
+	if claimedFreshNotes {
+		t.Fatalf("пак в статусе PackNotes со свежим claimed_at не должен захватываться")
+	}
+
+	claimedExpiredNotes, err := s.ClaimPackForNotes(p.ID, notesFresh.Add(46*time.Minute))
+	if err != nil {
+		t.Fatalf("ClaimPackForNotes expired PackNotes: %v", err)
+	}
+	if !claimedExpiredNotes {
+		t.Fatalf("пак в статусе PackNotes с просроченным claimed_at (> 45 мин) должен захватываться")
+	}
+}
+
+func TestBindLessonToPack(t *testing.T) {
+	s := openTemp(t)
+	root := t.TempDir()
+
+	l := model.Lesson{
+		ID:         501,
+		Date:       "2026-11-20",
+		Start:      "14:00",
+		Discipline: "Химия",
+	}
+	p, err := s.EnsurePack(l, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack: %v", err)
+	}
+
+	// Привязываем еще один урок к этому же паку
+	if err := s.BindLessonToPack(502, p.ID); err != nil {
+		t.Fatalf("BindLessonToPack: %v", err)
+	}
+
+	p502, err := s.PackByLesson(502)
+	if err != nil || p502 == nil || p502.ID != p.ID {
+		t.Fatalf("PackByLesson 502: %+v %v", p502, err)
+	}
+
+	ids, err := s.PackLessonIDs(p.ID)
+	if err != nil {
+		t.Fatalf("PackLessonIDs: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != 501 || ids[1] != 502 {
+		t.Fatalf("expected [501, 502], got %+v", ids)
+	}
+}
+
+func TestEnsurePackRebindsToCanonicalOnLateBBBURL(t *testing.T) {
+	s := openTemp(t)
+	root := t.TempDir()
+
+	const bbbURL = "https://bbb.ssau.ru/b/shared-room"
+	l1 := model.Lesson{
+		ID:         601,
+		Date:       "2026-11-21",
+		Start:      "10:00",
+		Discipline: "Алгоритмы",
+		Subgroup:   1,
+	}
+	l2 := model.Lesson{
+		ID:         602,
+		Date:       "2026-11-21",
+		Start:      "10:00",
+		Discipline: "Алгоритмы",
+		Subgroup:   2,
+		BBBURL:     bbbURL,
+	}
+
+	// Сначала создается пак для l1 с пустым bbb_url (meeting_key пустой)
+	p1, err := s.EnsurePack(l1, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack l1 empty url: %v", err)
+	}
+	if p1.MeetingKey != "" {
+		t.Fatalf("expected empty meeting_key for p1, got %q", p1.MeetingKey)
+	}
+
+	// Затем создается пак для l2 с заполненным MeetingKey — он становится каноническим
+	p2, err := s.EnsurePack(l2, "", root)
+	if err != nil {
+		t.Fatalf("EnsurePack l2: %v", err)
+	}
+	if p2.ID == p1.ID || p2.MeetingKey == "" {
+		t.Fatalf("expected separate canonical pack p2 with meeting_key, got p1=%+v p2=%+v", p1, p2)
+	}
+
+	// Повторный вызов EnsurePack(l1, bbbURL, root) не должен падать с UNIQUE constraint failed,
+	// а должен вернуть канонический пак p2 и перепривязать l1 к p2.
+	got, err := s.EnsurePack(l1, bbbURL, root)
+	if err != nil {
+		t.Fatalf("EnsurePack l1 with bbbURL failed: %v", err)
+	}
+	if got.ID != p2.ID {
+		t.Fatalf("expected canonical pack %d, got %d", p2.ID, got.ID)
+	}
+
+	bound, err := s.PackByLesson(l1.ID)
+	if err != nil || bound == nil || bound.ID != p2.ID {
+		t.Fatalf("expected l1 rebound to pack %d, got %+v (err=%v)", p2.ID, bound, err)
+	}
+
+	lids, err := s.PackLessonIDs(p2.ID)
+	if err != nil {
+		t.Fatalf("PackLessonIDs: %v", err)
+	}
+	if len(lids) != 2 || lids[0] != 601 || lids[1] != 602 {
+		t.Fatalf("expected [601, 602] on canonical pack, got %+v", lids)
+	}
+}
+
+func TestEnsurePackZeroLessonIDConflict(t *testing.T) {
+	s := openTemp(t)
+	root := t.TempDir()
+
+	l := model.Lesson{
+		ID:         0,
+		Date:       "2026-11-22",
+		Discipline: "Сети",
+	}
+	p1, err := s.EnsurePack(l, "", root)
+	if err != nil {
+		t.Fatalf("first EnsurePack(ID=0): %v", err)
+	}
+	p2, err := s.EnsurePack(l, "", root)
+	if err != nil {
+		t.Fatalf("second EnsurePack(ID=0): %v", err)
+	}
+	if p2.ID != p1.ID {
+		t.Fatalf("expected existing pack %d on lesson_id=0 conflict, got %d", p1.ID, p2.ID)
+	}
+}
+
+func TestMigrateDeduplicatePacksHistoricalWithoutLessonsAndRerun(t *testing.T) {
+	s := openTemp(t)
+	now := time.Now().UTC()
+
+	// 1. Два исторических пака разных недель без строк в lessons, но с одинаковым постоянным bbb_url.
+	// Они не должны склеиваться в один пак.
+	resHist1, err := s.db.Exec(`
+		INSERT INTO lecture_packs (lesson_id, discipline, number, date, bbb_url, meeting_key, status, created_at, updated_at)
+		VALUES (701, 'Физика', 1, '2026-09-07', 'https://bbb.ssau.ru/b/const-room', '', 'done', ?, ?)
+	`, timeArg(now), timeArg(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	histID1, _ := resHist1.LastInsertId()
+
+	resHist2, err := s.db.Exec(`
+		INSERT INTO lecture_packs (lesson_id, discipline, number, date, bbb_url, meeting_key, status, created_at, updated_at)
+		VALUES (702, 'Физика', 2, '2026-09-14', 'https://bbb.ssau.ru/b/const-room', '', 'done', ?, ?)
+	`, timeArg(now), timeArg(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	histID2, _ := resHist2.LastInsertId()
+
+	if err := s.migrateDeduplicatePacks(); err != nil {
+		t.Fatalf("migrateDeduplicatePacks historical: %v", err)
+	}
+
+	h1, err := s.PackByID(histID1)
+	if err != nil || h1 == nil || h1.MeetingKey != "" {
+		t.Fatalf("historical pack 1 must keep empty meeting_key, got %+v (err=%v)", h1, err)
+	}
+	h2, err := s.PackByID(histID2)
+	if err != nil || h2 == nil || h2.MeetingKey != "" {
+		t.Fatalf("historical pack 2 must keep empty meeting_key, got %+v (err=%v)", h2, err)
+	}
+	b1, err := s.PackByLesson(701)
+	if err != nil || b1 == nil || b1.ID != histID1 {
+		t.Fatalf("lesson 701 must stay bound to pack %d, got %+v (err=%v)", histID1, b1, err)
+	}
+	b2, err := s.PackByLesson(702)
+	if err != nil || b2 == nil || b2.ID != histID2 {
+		t.Fatalf("lesson 702 must stay bound to pack %d, got %+v (err=%v)", histID2, b2, err)
+	}
+
+	// 2. Повторная миграция при смене приоритета статусов у дублей не должна падать
+	// на частичном уникальном индексе idx_lecture_packs_meeting_key.
+	_, err = s.db.Exec(`
+		INSERT INTO lessons (id, date, start, discipline, bbb_url) VALUES
+		(801, '2026-11-25', '10:00', 'Базы данных', 'https://bbb.ssau.ru/b/db-room'),
+		(802, '2026-11-25', '10:00', 'Базы данных', 'https://bbb.ssau.ru/b/db-room')
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resD1, err := s.db.Exec(`
+		INSERT INTO lecture_packs (lesson_id, discipline, number, date, bbb_url, meeting_key, status, created_at, updated_at)
+		VALUES (801, 'Базы данных', 1, '2026-11-25', 'https://bbb.ssau.ru/b/db-room', '', 'slides', ?, ?)
+	`, timeArg(now), timeArg(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dupID1, _ := resD1.LastInsertId()
+
+	resD2, err := s.db.Exec(`
+		INSERT INTO lecture_packs (lesson_id, discipline, number, date, bbb_url, meeting_key, status, created_at, updated_at)
+		VALUES (802, 'Базы данных', 2, '2026-11-25', 'https://bbb.ssau.ru/b/db-room', '', 'recording', ?, ?)
+	`, timeArg(now), timeArg(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dupID2, _ := resD2.LastInsertId()
+
+	// Первый прогон: каноническим становится dupID1 (slides > recording)
+	if err := s.migrateDeduplicatePacks(); err != nil {
+		t.Fatalf("first migrateDeduplicatePacks: %v", err)
+	}
+	expectedDBKey := "bbb:https://bbb.ssau.ru/b/db-room|2026-11-25|10:00"
+	if p, _ := s.PackByID(dupID1); p == nil || p.MeetingKey != expectedDBKey {
+		t.Fatalf("expected dupID1 to hold meeting_key %q, got %+v", expectedDBKey, p)
+	}
+
+	// Меняем статус второго пака на done (теперь он приоритетнее первого)
+	if _, err := s.db.Exec(`UPDATE lecture_packs SET status = 'done' WHERE id = ?`, dupID2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Повторный прогон: сначала очищается meeting_key у старого канонического dupID1,
+	// затем проставляется новому каноническому dupID2 — без UNIQUE constraint failed.
+	if err := s.migrateDeduplicatePacks(); err != nil {
+		t.Fatalf("second migrateDeduplicatePacks after status change: %v", err)
+	}
+
+	after1, _ := s.PackByID(dupID1)
+	after2, _ := s.PackByID(dupID2)
+	if after1 == nil || after1.MeetingKey != "" {
+		t.Fatalf("expected dupID1 meeting_key cleared, got %+v", after1)
+	}
+	if after2 == nil || after2.MeetingKey != expectedDBKey {
+		t.Fatalf("expected dupID2 to become canonical with key %q, got %+v", expectedDBKey, after2)
+	}
+	for _, lid := range []int64{801, 802} {
+		p, err := s.PackByLesson(lid)
+		if err != nil || p == nil || p.ID != dupID2 {
+			t.Fatalf("lesson %d must point to new canonical pack %d, got %+v (err=%v)", lid, dupID2, p, err)
+		}
+	}
+}

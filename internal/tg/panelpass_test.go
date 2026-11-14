@@ -1,11 +1,14 @@
 package tg
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PaulSonOfLars/gotgbot/v2"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/panelpass"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/vault"
@@ -70,4 +73,70 @@ func TestMainKeyboardHasPanelPass(t *testing.T) {
 		}
 	}
 	t.Fatal("в нижнем меню нет кнопки пароля")
+}
+
+func groupMessageUpdate(updateID, chatID, userID int64, text string) *gotgbot.Update {
+	msg := &gotgbot.Message{
+		MessageId: updateID,
+		Date:      1,
+		Chat:      gotgbot.Chat{Id: chatID, Type: "supergroup"},
+		From:      &gotgbot.User{Id: userID, FirstName: "U", Username: fmt.Sprintf("u%d", userID)},
+		Text:      text,
+	}
+	if strings.HasPrefix(text, "/") {
+		cmd := strings.Fields(text)[0]
+		msg.Entities = []gotgbot.MessageEntity{{Type: "bot_command", Offset: 0, Length: int64(len(cmd))}}
+	}
+	return &gotgbot.Update{UpdateId: updateID, Message: msg}
+}
+
+func TestPanelPassGroupChatNeverLeaksPassword(t *testing.T) {
+	h := newHarness(t)
+	v, err := vault.Load("", filepath.Join(t.TempDir(), "secret.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.b.vault = v
+	h.onboarded(studentID, "Иванов И.И.", 1)
+
+	const groupID int64 = -100123456
+	for _, cmd := range []string{"/pass", btnPanelPass} {
+		h.api.Reset()
+		h.upd++
+		h.do(groupMessageUpdate(h.upd, groupID, studentID, cmd))
+
+		dmText := h.lastTo(studentID)
+		if !pwRe.MatchString(dmText) {
+			t.Fatalf("%s: пароль должен прийти в личку studentID, получили: %q", cmd, dmText)
+		}
+		groupText := h.lastTo(groupID)
+		if pwRe.MatchString(groupText) || strings.Contains(groupText, "<code>") {
+			t.Fatalf("%s: пароль утёк в групповой чат: %q", cmd, groupText)
+		}
+		if !strings.Contains(groupText, "Отправил в личные сообщения") {
+			t.Fatalf("%s: в группу ждали уведомление об отправке в личку, получили: %q", cmd, groupText)
+		}
+	}
+
+	// При ошибке доставки в личку в групповой чат уходит предупреждение без пароля.
+	h.api.Reset()
+	h.api.Fail("sendMessage", "Forbidden: bot can't initiate conversation with a user")
+	h.upd++
+	h.do(groupMessageUpdate(h.upd, groupID, studentID, "/pass"))
+
+	var sawGroupWarn bool
+	for _, c := range h.api.Calls("sendMessage") {
+		if c.Param("chat_id") == itoa(groupID) {
+			txt := c.Param("text")
+			if pwRe.MatchString(txt) || strings.Contains(txt, "<code>") {
+				t.Fatalf("при ошибке доставки пароль утёк в группу: %q", txt)
+			}
+			if strings.Contains(txt, "Не удалось отправить пароль") {
+				sawGroupWarn = true
+			}
+		}
+	}
+	if !sawGroupWarn {
+		t.Fatalf("при ошибке доставки в личку не пришло предупреждение в группу: %+v", h.api.Calls("sendMessage"))
+	}
 }

@@ -27,31 +27,53 @@ need() {
 }
 
 set_env_vars() {
-  python3 - "$APP/.env" "$@" <<'PY'
-import sys
+  local kv key val
+  {
+    for kv in "$@"; do
+      key=${kv%%=*}
+      val=${kv#*=}
+      if [[ -n "$key" && -n "$val" ]]; then
+        if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
+          echo "invalid newline in $key" >&2
+          return 1
+        fi
+        printf '%s=%s\0' "$key" "$val"
+      fi
+    done
+  } | ENV_FILE="$APP/.env" python3 -c '
+import os, sys, tempfile
 from pathlib import Path
 
-path = Path(sys.argv[1])
+path = Path(os.environ["ENV_FILE"])
 pairs = []
-for arg in sys.argv[2:]:
-    key, _, val = arg.partition("=")
+for entry in sys.stdin.read().split("\0"):
+    if not entry:
+        continue
+    key, _, val = entry.partition("=")
     if key and val:
         pairs.append((key, val))
 if not pairs:
     sys.exit(0)
-lines = path.read_text().splitlines() if path.exists() else []
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 for key, val in pairs:
-    found = False
     for i, line in enumerate(lines):
         if line.startswith(key + "="):
             lines[i] = key + "=" + val
-            found = True
             break
-    if not found:
+    else:
         lines.append(key + "=" + val)
-path.write_text("\n".join(lines) + "\n")
-path.chmod(0o600)
-PY
+path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+try:
+    os.chmod(tmp_name, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp_name, path)
+except Exception:
+    if os.path.exists(tmp_name):
+        os.unlink(tmp_name)
+    raise
+'
 }
 
 tg=$(need tg)

@@ -15,35 +15,37 @@ func TestChooseRecorderKeepsLiveAndPicksMinID(t *testing.T) {
 	w := NewWorker(&config.Config{BBBDryRun: true}, nil, time.UTC)
 	now := time.Date(2026, 9, 15, 8, 10, 0, 0, time.UTC)
 	lesson := model.Lesson{ID: 7, Type: "Лекция"}
+	meetKey := meetingGroupKey(lesson, "")
 	here := []pending{
-		{u: model.User{TelegramID: 20}, lesson: lesson, key: sessionKey(20, 7)},
-		{u: model.User{TelegramID: 10}, lesson: lesson, key: sessionKey(10, 7)},
+		{u: model.User{TelegramID: 20}, lesson: lesson, key: sessionKey(20, 7), meetKey: meetKey},
+		{u: model.User{TelegramID: 10}, lesson: lesson, key: sessionKey(10, 7), meetKey: meetKey},
 	}
-	if i := w.chooseRecorder(lesson, here, now); i != 1 {
+	if i := w.chooseRecorder(meetKey, here, now); i != 1 {
 		t.Fatalf("min id: got %d", i)
 	}
 	// Живой рекордер 20 остаётся, второй запис не начинаем.
 	w.sessions[sessionKey(20, 7)] = stubSess{room: true}
-	w.recorder[7] = sessionKey(20, 7)
-	if i := w.chooseRecorder(lesson, here, now); i != 0 {
+	w.recorder[meetKey] = sessionKey(20, 7)
+	if i := w.chooseRecorder(meetKey, here, now); i != 0 {
 		t.Fatalf("live recorder: got %d", i)
 	}
 	// Рекордер выпал (его нет среди тех, кто должен быть в комнате) — передаём 10.
-	if i := w.chooseRecorder(lesson, here[1:], now); i != 0 {
+	if i := w.chooseRecorder(meetKey, here[1:], now); i != 0 {
 		t.Fatalf("handover: got %d", i)
 	}
 	// Запись только что не стартовала — пауза, не дёргаем вкладки каждые 15 с.
-	delete(w.recorder, 7)
-	w.recFailAt[7] = now
-	if i := w.chooseRecorder(lesson, here, now.Add(time.Minute)); i != -1 {
+	delete(w.recorder, meetKey)
+	delete(w.sessions, sessionKey(20, 7))
+	w.recFailAt[meetKey] = now
+	if i := w.chooseRecorder(meetKey, here, now.Add(time.Minute)); i != -1 {
 		t.Fatalf("rec retry gap: got %d", i)
 	}
-	if i := w.chooseRecorder(lesson, here, now.Add(3*time.Minute)); i != 1 {
+	if i := w.chooseRecorder(meetKey, here, now.Add(3*time.Minute)); i != 1 {
 		t.Fatalf("after gap: got %d", i)
 	}
 	// Запись не стартует раз за разом — больше не перезаходим, пара без записи.
-	w.recFailN[7] = maxRecFails
-	if i := w.chooseRecorder(lesson, here, now.Add(time.Hour)); i != -1 {
+	w.recFailN[meetKey] = maxRecFails
+	if i := w.chooseRecorder(meetKey, here, now.Add(time.Hour)); i != -1 {
 		t.Fatalf("после %d неудач рекордера не выбираем: got %d", maxRecFails, i)
 	}
 }
@@ -68,7 +70,7 @@ func TestBuildNotesDaySkipsLiveRecording(t *testing.T) {
 	w := NewWorker(&config.Config{BBBDryRun: true, RecordingsDir: root}, st, time.UTC)
 	key := sessionKey(5, lesson.ID)
 	w.sessions[key] = drySession{}
-	w.recorder[lesson.ID] = key
+	w.recorder[meetingGroupKey(lesson, p.BBBURL)] = key
 	if w.buildNotesDay(context.Background(), "2026-09-13") {
 		t.Fatal("live recording must wait")
 	}

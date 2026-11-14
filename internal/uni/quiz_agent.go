@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -35,12 +37,21 @@ import (
 //
 // Попытку сдаём, только если на каждый вопрос есть годный ответ.
 const (
-	quizMaxRounds   = 3 // раундов уточнения после первого ответа
-	quizMaxOpens    = 3 // страниц за раунд
-	quizOpenRunes   = 4000
-	quizMaxImages   = 4 // рисунков на вопрос
-	quizTextAnsRune = 200
+	quizMaxRounds         = 3 // раундов уточнения после первого ответа
+	quizMaxOpens          = 3 // страниц за раунд
+	quizOpenRunes         = 4000
+	quizMaxImages         = 4 // рисунков на вопрос
+	quizImageWorkers      = 4 // воркеров параллельного распознавания рисунков
+	quizTextAnsRune       = 200
+	quizFastModeRemaining = 60 * time.Second
+	quizMaxRedirects      = 5
 )
+
+// solvePageOpts управляет бюджетом времени и режимом решения одной страницы.
+type solvePageOpts struct {
+	FastMode bool
+	Deadline time.Time
+}
 
 type llmAnswerItem struct {
 	Slot    int               `json:"slot"`
@@ -100,6 +111,10 @@ func (t quizTag) String() string {
 }
 
 func (s *Syncer) solvePage(ctx context.Context, tag quizTag, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, questions []moodle.QuizQuestion) (map[int]moodle.QuizAnswer, llm.Result, quizlog.Page, error) {
+	return s.solvePageWithOpts(ctx, tag, c, ws, chain, course, materials, questions, solvePageOpts{})
+}
+
+func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, questions []moodle.QuizQuestion, opts solvePageOpts) (map[int]moodle.QuizAnswer, llm.Result, quizlog.Page, error) {
 	var pl quizlog.Page
 	var res llm.Result
 	if len(questions) == 0 {
@@ -116,6 +131,15 @@ func (s *Syncer) solvePage(ctx context.Context, tag quizTag, c *moodle.Client, w
 	if len(unsup) > 0 {
 		logx.Warnf("uni", "quiz %s: тип не поддерживается: %s", tag, strings.Join(unsup, ", "))
 		return nil, res, pl, fmt.Errorf("решатель не умеет заполнять %s — пройди его руками", strings.Join(unsup, ", "))
+	}
+
+	fast := opts.FastMode
+	if !fast && !opts.Deadline.IsZero() && time.Until(opts.Deadline) < quizFastModeRemaining {
+		fast = true
+	}
+	if fast {
+		ws = nil
+		logx.Debugf("uni", "quiz %s: быстрый режим (без веб-поиска и уточнений)", tag)
 	}
 
 	qs := s.describeQuestionImages(ctx, tag, c, questions, &pl)
@@ -174,8 +198,16 @@ func (s *Syncer) solvePage(ctx context.Context, tag quizTag, c *moodle.Client, w
 		}
 		bad := validateAnswers(qs, final)
 		logValidation(tag, rn, qs, bad)
+		if fast {
+			logx.Debugf("uni", "quiz %s: раунд %d: быстрый режим, без уточнений", tag, rn)
+			break
+		}
 		if round >= quizMaxRounds {
 			logx.Debugf("uni", "quiz %s: раунд %d: лимит раундов (%d), стоп", tag, rn, quizMaxRounds)
+			break
+		}
+		if !opts.Deadline.IsZero() && time.Until(opts.Deadline) < quizFastModeRemaining {
+			logx.Debugf("uni", "quiz %s: раунд %d: мало времени до дедлайна, без уточнений", tag, rn)
 			break
 		}
 		progressed := len(bad) > 0
@@ -651,28 +683,79 @@ const quizImagePrompt = "Это рисунок из вопроса универ�
 
 // describeQuestionImages — копии вопросов, где рисунки условия переписаны
 // текстом. Не вышло — так и пишем: модель хотя бы знает, что рисунок был.
+// Картинки описываются параллельно пулом воркеров, а результаты записываются
+// обратно в исходном детерминированном порядке.
 func (s *Syncer) describeQuestionImages(ctx context.Context, tag quizTag, c *moodle.Client, qs []moodle.QuizQuestion, pl *quizlog.Page) []moodle.QuizQuestion {
 	out := make([]moodle.QuizQuestion, len(qs))
 	copy(out, qs)
+
+	type imgJob struct {
+		qIdx   int
+		imgIdx int
+		slot   int
+		src    string
+	}
+	type imgResult struct {
+		desc string
+		err  error
+	}
+
+	var jobs []imgJob
 	for i := range out {
-		q := &out[i]
-		for n, src := range q.Images {
-			if n >= quizMaxImages {
-				break
-			}
-			desc, err := s.describeImage(ctx, c, src)
-			if err != nil {
-				logx.Warnf("uni", "quiz %s: рисунок слота %d #%d: %v", tag, q.Slot, n+1, err)
-				logx.Debugf("uni", "quiz %s: рисунок слота %d #%d %s: не распознан: %v", tag, q.Slot, n+1, src, err)
-				pl.Notes = append(pl.Notes, fmt.Sprintf("вопрос %d, рисунок %d: %v", q.Slot, n+1, err))
-				q.Text += fmt.Sprintf("\nРисунок %d: (не удалось распознать)", n+1)
-				continue
-			}
-			logx.Debugf("uni", "quiz %s: рисунок слота %d #%d %s: распознан, %d симв., начало: %q",
-				tag, q.Slot, n+1, src, len([]rune(desc)), truncRunes(desc, 300))
-			pl.Notes = append(pl.Notes, fmt.Sprintf("вопрос %d, рисунок %d распознан (%d симв.)", q.Slot, n+1, len([]rune(desc))))
-			q.Text += fmt.Sprintf("\nРисунок %d:\n%s", n+1, desc)
+		limit := min(len(out[i].Images), quizMaxImages)
+		for n := 0; n < limit; n++ {
+			jobs = append(jobs, imgJob{
+				qIdx:   i,
+				imgIdx: n,
+				slot:   out[i].Slot,
+				src:    out[i].Images[n],
+			})
 		}
+	}
+	if len(jobs) == 0 {
+		return out
+	}
+
+	results := make([]imgResult, len(jobs))
+	workers := min(quizImageWorkers, len(jobs))
+	if workers == 1 {
+		for k, j := range jobs {
+			results[k].desc, results[k].err = s.describeImage(ctx, c, j.src)
+		}
+	} else {
+		var next atomic.Int64
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					k := int(next.Add(1) - 1)
+					if k >= len(jobs) {
+						return
+					}
+					desc, err := s.describeImage(ctx, c, jobs[k].src)
+					results[k] = imgResult{desc: desc, err: err}
+				}
+			}()
+		}
+		wg.Wait()
+	}
+
+	for k, j := range jobs {
+		q := &out[j.qIdx]
+		r := results[k]
+		if r.err != nil {
+			logx.Warnf("uni", "quiz %s: рисунок слота %d #%d: %v", tag, j.slot, j.imgIdx+1, r.err)
+			logx.Debugf("uni", "quiz %s: рисунок слота %d #%d %s: не распознан: %v", tag, j.slot, j.imgIdx+1, j.src, r.err)
+			pl.Notes = append(pl.Notes, fmt.Sprintf("вопрос %d, рисунок %d: %v", j.slot, j.imgIdx+1, r.err))
+			q.Text += fmt.Sprintf("\nРисунок %d: (не удалось распознать)", j.imgIdx+1)
+			continue
+		}
+		logx.Debugf("uni", "quiz %s: рисунок слота %d #%d %s: распознан, %d симв., начало: %q",
+			tag, j.slot, j.imgIdx+1, j.src, len([]rune(r.desc)), truncRunes(r.desc, 300))
+		pl.Notes = append(pl.Notes, fmt.Sprintf("вопрос %d, рисунок %d распознан (%d симв.)", j.slot, j.imgIdx+1, len([]rune(r.desc))))
+		q.Text += fmt.Sprintf("\nРисунок %d:\n%s", j.imgIdx+1, r.desc)
 	}
 	return out
 }
@@ -700,18 +783,102 @@ func (s *Syncer) describeImage(ctx context.Context, c *moodle.Client, src string
 // openPageFn — подмена в тестах (httptest слушает loopback, а он запрещён).
 var openPageFn = openPage
 
+// openPageLookupIP и openPageDialer — точки подмены в тестах для проверки
+// DNS-резолва и редиректов без реальных сетевых запросов.
+var (
+	openPageLookupIP = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		return net.DefaultResolver.LookupIPAddr(ctx, host)
+	}
+	openPageDialer = safeDialContext
+)
+
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	// CGNAT 100.64.0.0/10 (RFC 6598)
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return true
+	}
+	return false
+}
+
+func validatePageURL(u *url.URL) error {
+	if u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return errors.New("плохой адрес")
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return errors.New("плохой адрес")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedIP(ip) {
+			return errors.New("внутренний адрес")
+		}
+		return nil
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+		strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") ||
+		strings.HasSuffix(host, ".arpa") {
+		return errors.New("внутренний адрес")
+	}
+	return nil
+}
+
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	var ips []net.IPAddr
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IPAddr{{IP: ip}}
+	} else {
+		ips, err = openPageLookupIP(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(ips) == 0 {
+		return nil, errors.New("адрес не резолвится")
+	}
+	for _, ipa := range ips {
+		if isBlockedIP(ipa.IP) {
+			return nil, errors.New("внутренний адрес")
+		}
+	}
+	dialer := &net.Dialer{Timeout: quizSearchTimeout}
+	var lastErr error
+	for _, ipa := range ips {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ipa.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("не удалось подключиться")
+}
+
 // openPage — текст страницы из выдачи. Только http(s) и не внутренние адреса:
 // адрес приходит от модели, это не должен быть путь в локальную сеть VDS.
 func openPage(ctx context.Context, raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+	if err != nil {
 		return "", errors.New("плохой адрес")
 	}
-	if ip := net.ParseIP(u.Hostname()); ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
-		return "", errors.New("внутренний адрес")
-	}
-	if h := strings.ToLower(u.Hostname()); h == "localhost" || strings.HasSuffix(h, ".local") || strings.HasSuffix(h, ".internal") {
-		return "", errors.New("внутренний адрес")
+	if err := validatePageURL(u); err != nil {
+		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -719,7 +886,31 @@ func openPage(ctx context.Context, raw string) (string, error) {
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 	req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.6")
-	resp, err := (&http.Client{Timeout: quizSearchTimeout}).Do(req)
+	client := &http.Client{
+		Timeout: quizSearchTimeout,
+		Transport: &http.Transport{
+			DialContext: openPageDialer,
+		},
+		CheckRedirect: func(r *http.Request, via []*http.Request) error {
+			if len(via) > quizMaxRedirects {
+				return errors.New("слишком много редиректов")
+			}
+			if err := validatePageURL(r.URL); err != nil {
+				return err
+			}
+			if host := r.URL.Hostname(); net.ParseIP(host) == nil {
+				if ips, err := openPageLookupIP(r.Context(), host); err == nil {
+					for _, ipa := range ips {
+						if isBlockedIP(ipa.IP) {
+							return errors.New("внутренний адрес")
+						}
+					}
+				}
+			}
+			return nil
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -727,7 +918,7 @@ func openPage(ctx context.Context, raw string) (string, error) {
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("status %d", resp.StatusCode)
 	}
-	ct := resp.Header.Get("Content-Type")
+	ct := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
 	body := io.LimitReader(resp.Body, 2<<20)
 	var text string
 	if strings.Contains(ct, "html") || ct == "" {

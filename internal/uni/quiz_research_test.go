@@ -71,7 +71,8 @@ func fakeLLM(t *testing.T, replies ...string) (*httptest.Server, *[]string) {
 }
 
 func chainFor(srv *httptest.Server) []llm.Target {
-	return llm.DefaultChain(&config.Config{LLMAPIKey: "k", LLMAPIURL: srv.URL, LLMModel: "m"})
+	cfg := &config.Config{LLMAPIKey: "k", LLMAPIURL: srv.URL, LLMModel: "m"}
+	return llm.ChainFor(cfg, llm.Choice{}, true, "")
 }
 
 func tcpQuestions() []moodle.QuizQuestion {

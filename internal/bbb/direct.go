@@ -113,6 +113,7 @@ type stunsEnvelope struct {
 }
 
 type slideMeta struct {
+	DocID          string // ID документа в коллекции Meteor DDP slides
 	ID             string
 	PresentationID string
 	Num            int
@@ -121,6 +122,7 @@ type slideMeta struct {
 	TxtURI         string
 	Content        string
 	Current        bool
+	FirstShownAt   time.Time
 }
 
 type presMeta struct {
@@ -298,16 +300,17 @@ type directSession struct {
 	msgAddedMu sync.Mutex
 	msgAdded   map[string]chan struct{}
 
-	presMu      sync.Mutex
-	pres        map[string]presMeta
-	slides      map[string]slideMeta
-	allPres     map[string]presMeta
-	allSlides   map[string]slideMeta
-	presOrder   []string
-	savedSlides map[string]string
-	presLogged  string // последний состав презентаций, записанный в лог (под presMu)
-	slidesSub   chan struct{}
-	slidesOnce  sync.Once
+	slidesGrabMu sync.Mutex // сериализация параллельных вызовов GrabSlides (без удержания presMu)
+	presMu       sync.Mutex
+	pres         map[string]presMeta
+	slides       map[string]slideMeta
+	allPres      map[string]presMeta
+	allSlides    map[string]slideMeta
+	presOrder    []string
+	savedSlides  map[string]string
+	presLogged   string // последний состав презентаций, записанный в лог (под presMu)
+	slidesSub    chan struct{}
+	slidesOnce   sync.Once
 
 	voiceJoined atomic.Bool
 	voiceReady  chan struct{}
@@ -322,6 +325,10 @@ type directSession struct {
 }
 
 func (s *directSession) httpDo(ctx context.Context, req *http.Request) (*http.Response, []byte, error) {
+	return s.httpDoLimit(ctx, req, 4<<20)
+}
+
+func (s *directSession) httpDoLimit(ctx context.Context, req *http.Request, maxBytes int64) (*http.Response, []byte, error) {
 	if ctx != nil {
 		req = req.WithContext(ctx)
 	}
@@ -334,7 +341,7 @@ func (s *directSession) httpDo(ctx context.Context, req *http.Request) (*http.Re
 		return nil, nil, scrubErr(err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 	if err != nil {
 		return resp, nil, err
 	}
@@ -977,10 +984,20 @@ func (s *directSession) handleDDPCollection(msgType string, m map[string]any, se
 	case "presentations":
 		s.presMu.Lock()
 		if msgType == "removed" {
-			delete(s.pres, docID)
-		} else if fields != nil {
 			pm := s.pres[docID]
-			if v, ok := fields["id"].(string); ok {
+			delete(s.pres, docID)
+			if pm.ID != "" {
+				delete(s.pres, pm.ID)
+			}
+		} else if fields != nil {
+			pm := s.allPres[docID]
+			if pm.ID == "" {
+				pm = s.pres[docID]
+			}
+			if pm.ID == "" {
+				pm.ID = docID
+			}
+			if v, ok := fields["id"].(string); ok && v != "" {
 				pm.ID = v
 			}
 			if v, ok := fields["name"].(string); ok {
@@ -991,15 +1008,33 @@ func (s *directSession) handleDDPCollection(msgType string, m map[string]any, se
 			}
 			s.pres[docID] = pm
 			s.allPres[docID] = pm
+			if pm.ID != "" {
+				s.pres[pm.ID] = pm
+				s.allPres[pm.ID] = pm
+			}
 			found := false
 			for _, pid := range s.presOrder {
-				if pid == docID {
+				if pid == docID || pid == pm.ID {
 					found = true
 					break
 				}
 			}
 			if !found {
 				s.presOrder = append(s.presOrder, docID)
+			}
+			if pm.Current {
+				now := time.Now().UTC()
+				for sid, sl := range s.allSlides {
+					if sl.PresentationID == docID || sl.PresentationID == pm.ID {
+						if sl.Current && sl.FirstShownAt.IsZero() {
+							sl.FirstShownAt = now
+							s.allSlides[sid] = sl
+							if _, inPres := s.slides[sid]; inPres {
+								s.slides[sid] = sl
+							}
+						}
+					}
+				}
 			}
 		}
 		s.presMu.Unlock()
@@ -1008,36 +1043,100 @@ func (s *directSession) handleDDPCollection(msgType string, m map[string]any, se
 		if msgType == "removed" {
 			delete(s.slides, docID)
 		} else if fields != nil {
-			sm := s.slides[docID]
-			if v, ok := fields["id"].(string); ok {
+			sm := s.allSlides[docID]
+			if sm.ID == "" {
+				sm = s.slides[docID]
+			}
+			if sm.DocID == "" {
+				sm.DocID = docID
+			}
+			if sm.ID == "" {
+				sm.ID = docID
+			}
+			if v, ok := fields["id"].(string); ok && v != "" {
 				sm.ID = v
 			}
-			if v, ok := fields["presentationId"].(string); ok {
+			if v, ok := fields["presentationId"].(string); ok && v != "" {
 				sm.PresentationID = v
 			}
 			if v, ok := fields["num"].(float64); ok {
 				sm.Num = int(v)
 			}
-			if v, ok := fields["imageUri"].(string); ok {
+			if v, ok := fields["imageUri"].(string); ok && v != "" {
 				sm.ImageURI = v
 			}
-			if v, ok := fields["thumbUri"].(string); ok {
+			if v, ok := fields["thumbUri"].(string); ok && v != "" {
 				sm.ThumbURI = v
 			}
-			if v, ok := fields["txtUri"].(string); ok {
+			if v, ok := fields["txtUri"].(string); ok && v != "" {
 				sm.TxtURI = v
 			}
-			if v, ok := fields["content"].(string); ok {
+			if v, ok := fields["content"].(string); ok && v != "" {
 				sm.Content = v
 			}
 			if v, ok := fields["current"].(bool); ok {
 				sm.Current = v
+			}
+			if sm.Current && sm.FirstShownAt.IsZero() {
+				if s.isPresentationActiveLocked(sm.PresentationID) {
+					sm.FirstShownAt = time.Now().UTC()
+				}
 			}
 			s.slides[docID] = sm
 			s.allSlides[docID] = sm
 		}
 		s.presMu.Unlock()
 	}
+}
+
+func (s *directSession) isPresentationActiveLocked(presID string) bool {
+	if presID == "" {
+		return true
+	}
+	pm, ok := s.allPres[presID]
+	if !ok {
+		pm, ok = s.pres[presID]
+	}
+	if !ok {
+		for _, p := range s.allPres {
+			if p.ID == presID {
+				pm = p
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			for _, p := range s.pres {
+				if p.ID == presID {
+					pm = p
+					ok = true
+					break
+				}
+			}
+		}
+	}
+	if !ok {
+		return true
+	}
+	if pm.Current {
+		return true
+	}
+	hasAnyCurrent := false
+	for _, p := range s.allPres {
+		if p.Current {
+			hasAnyCurrent = true
+			break
+		}
+	}
+	if !hasAnyCurrent {
+		for _, p := range s.pres {
+			if p.Current {
+				hasAnyCurrent = true
+				break
+			}
+		}
+	}
+	return !hasAnyCurrent
 }
 
 func (s *directSession) advanceLobby(ctx context.Context) error {

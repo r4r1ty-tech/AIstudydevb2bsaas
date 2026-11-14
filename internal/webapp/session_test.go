@@ -408,3 +408,75 @@ func TestLoginWithoutStore(t *testing.T) {
 		t.Fatalf("login без базы: %d", rec.Code)
 	}
 }
+
+func loginFromIP(s *Server, ip, pw string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodPost, "/api/login", nil)
+	r.RemoteAddr = ip + ":1234"
+	if pw != "" {
+		r.Header.Set("X-Panel-Password", pw)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, r)
+	return rec
+}
+
+func TestLoginBruteForceRateLimit(t *testing.T) {
+	s, key, clk := newSessionServer(t)
+	goodPw, _ := panelpass.Issue(key, config.DefaultAdminID, clk.now())
+	attackerIP := "198.51.100.10"
+	otherIP := "198.51.100.11"
+
+	for i := 0; i < loginMaxFailures; i++ {
+		rec := loginFromIP(s, attackerIP, "wrong-password")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("попытка #%d: код %d, ждали 401", i+1, rec.Code)
+		}
+	}
+
+	// После порога даже правильный пароль с этого IP блокируется с 429.
+	rec := loginFromIP(s, attackerIP, goodPw)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("ожидали 429 после %d ошибок, получили %d (%s)", loginMaxFailures, rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("отсутствует заголовок Retry-After при 429")
+	}
+
+	// Другой IP не затронут.
+	if other := loginFromIP(s, otherIP, goodPw); other.Code != http.StatusOK {
+		t.Fatalf("другой IP не должен быть заблокирован: %d", other.Code)
+	}
+
+	// После окончания блокировки вход снова разрешён, счётчик сбрасывается.
+	clk.advance(loginBlockDuration + time.Second)
+	if ok := loginFromIP(s, attackerIP, goodPw); ok.Code != http.StatusOK {
+		t.Fatalf("после снятия блокировки ожидали 200, получили %d (%s)", ok.Code, ok.Body.String())
+	}
+
+	// Частичные неудачи (меньше лимита) сбрасываются успешным входом.
+	for i := 0; i < loginMaxFailures-2; i++ {
+		if fail := loginFromIP(s, attackerIP, "wrong-password"); fail.Code != http.StatusUnauthorized {
+			t.Fatalf("частичная ошибка #%d: %d", i+1, fail.Code)
+		}
+	}
+	if ok := loginFromIP(s, attackerIP, goodPw); ok.Code != http.StatusOK {
+		t.Fatalf("успешный вход до порога: %d", ok.Code)
+	}
+	for i := 0; i < loginMaxFailures-1; i++ {
+		if fail := loginFromIP(s, attackerIP, "wrong-password"); fail.Code != http.StatusUnauthorized {
+			t.Fatalf("новая серия ошибок #%d не должна была сразу блокировать: %d", i+1, fail.Code)
+		}
+	}
+
+	// Очистка протухших записей срабатывает при обращении после интервала очистки.
+	clk.advance(loginFailWindow + loginCleanupInterval + time.Second)
+	if ok := loginFromIP(s, "198.51.100.12", goodPw); ok.Code != http.StatusOK {
+		t.Fatalf("чистый IP: %d", ok.Code)
+	}
+	s.loginLim.mu.Lock()
+	_, exists := s.loginLim.entries[attackerIP]
+	s.loginLim.mu.Unlock()
+	if exists {
+		t.Fatalf("устаревшая запись для %s не удалена из лимитера", attackerIP)
+	}
+}

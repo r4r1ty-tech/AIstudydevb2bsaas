@@ -43,20 +43,25 @@ func TestParseBBBKey(t *testing.T) {
 
 func TestLessonIdentity(t *testing.T) {
 	t.Parallel()
-	a := Lesson{Date: "2026-09-14", Start: "09:45", Discipline: "С", Teacher: "К", Place: "online", Subgroup: 0, Online: true}
+	a := Lesson{Date: "2026-09-14", Start: "09:45", Discipline: "С", Teacher: "К", Type: "Лекция", Place: "online", Subgroup: 0, Online: true}
 	b := a
-	b.Type = "Лекция"
-	if a.Identity() != b.Identity() {
-		t.Fatal("type should not change identity")
-	}
 	b.Place = "ауд. 1"
-	b.Teacher = "Другой"
 	b.Online = false
 	if a.Identity() != b.Identity() {
-		t.Fatal("place/teacher/online change must keep identity")
+		t.Fatal("place/online change must keep identity")
 	}
 	if a.DetailKey() == b.DetailKey() {
 		t.Fatal("details must differ")
+	}
+	c := a
+	c.Type = "Практика"
+	if a.Identity() == c.Identity() {
+		t.Fatal("type changes identity")
+	}
+	d := a
+	d.Teacher = "Другой"
+	if a.Identity() == d.Identity() {
+		t.Fatal("teacher changes identity")
 	}
 	b.Subgroup = 2
 	if a.Identity() == b.Identity() {

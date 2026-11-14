@@ -153,6 +153,7 @@ func (s *Store) migrate() error {
 			date TEXT,
 			dir TEXT,
 			bbb_url TEXT,
+			meeting_key TEXT DEFAULT '',
 			status TEXT,
 			audio TEXT,
 			transcript TEXT,
@@ -161,9 +162,15 @@ func (s *Store) migrate() error {
 			publish_status TEXT,
 			published_at TEXT,
 			cleaned_at TEXT,
+			claimed_at TEXT DEFAULT '',
 			created_at TEXT,
 			updated_at TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS pack_lessons (
+			lesson_id INTEGER PRIMARY KEY,
+			pack_id INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pack_lessons_pack_id ON pack_lessons(pack_id)`,
 		`CREATE TABLE IF NOT EXISTS accounts (
 			telegram_id INTEGER,
 			kind TEXT,
@@ -201,6 +208,27 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(telegram_id, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_web_sessions_exp ON web_sessions(expires_at)`,
+		// Личные API-ключи пользователей (шифрованный секрет и маска) и учёт расхода/cooldown по дням.
+		`CREATE TABLE IF NOT EXISTS llm_keys (
+			telegram_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			secret_enc TEXT NOT NULL,
+			mask TEXT NOT NULL,
+			share_pool INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (telegram_id, provider)
+		)`,
+		`CREATE TABLE IF NOT EXISTS llm_usage (
+			telegram_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			day TEXT NOT NULL,
+			requests INTEGER NOT NULL DEFAULT 0,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			cooldown_until TEXT DEFAULT '',
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (telegram_id, provider, day)
+		)`,
 	}
 	logx.Debugf("store", "migrate: statements=%d", len(stmts))
 	tx, err := s.db.Begin()
@@ -258,6 +286,8 @@ func (s *Store) ensurePackColumns() error {
 		`ALTER TABLE lecture_packs ADD COLUMN publish_status TEXT`,
 		`ALTER TABLE lecture_packs ADD COLUMN published_at TEXT`,
 		`ALTER TABLE lecture_packs ADD COLUMN cleaned_at TEXT`,
+		`ALTER TABLE lecture_packs ADD COLUMN meeting_key TEXT DEFAULT ''`,
+		`ALTER TABLE lecture_packs ADD COLUMN claimed_at TEXT DEFAULT ''`,
 	}
 	for i, q := range alters {
 		if _, err := s.db.Exec(q); err != nil {
@@ -270,6 +300,26 @@ func (s *Store) ensurePackColumns() error {
 		}
 		logx.Debugf("store", "ensurePackColumns: alter %d applied", i)
 	}
+
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS pack_lessons (lesson_id INTEGER PRIMARY KEY, pack_id INTEGER NOT NULL)`); err != nil {
+		logx.Errorf("store", "ensurePackColumns: create pack_lessons: %v", err)
+		return fmt.Errorf("store: create pack_lessons: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_pack_lessons_pack_id ON pack_lessons(pack_id)`); err != nil {
+		logx.Errorf("store", "ensurePackColumns: create idx_pack_lessons_pack_id: %v", err)
+		return fmt.Errorf("store: create idx_pack_lessons_pack_id: %w", err)
+	}
+
+	if err := s.migrateDeduplicatePacks(); err != nil {
+		logx.Errorf("store", "ensurePackColumns: deduplicate packs: %v", err)
+		return err
+	}
+
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lecture_packs_meeting_key ON lecture_packs(meeting_key) WHERE meeting_key != ''`); err != nil {
+		logx.Errorf("store", "ensurePackColumns: create idx_lecture_packs_meeting_key: %v", err)
+		return fmt.Errorf("store: create idx_lecture_packs_meeting_key: %w", err)
+	}
+
 	logx.Debugf("store", "ensurePackColumns: done")
 	return nil
 }

@@ -3,6 +3,7 @@ package webapp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -284,5 +285,236 @@ func TestHandleLessonsShowsInheritedRoom(t *testing.T) {
 	}
 	if b, _ := st.GetBBB(model.BBBRoomKey(lesson.Discipline, lesson.Teacher, lesson.Type)); b == nil || b.URL != "https://bbb.ssau.ru/b/new" {
 		t.Fatalf("room not updated from panel: %+v", b)
+	}
+}
+
+func TestLessonAndRoomOwnerIsolation(t *testing.T) {
+	s, st, key, _ := newAdminServer(t)
+	s.recordingsDir = t.TempDir()
+	studentA := config.DefaultWhitelist[1]
+	studentB := config.DefaultWhitelist[2]
+	if err := st.UpsertUser(&model.User{TelegramID: studentA, FIO: "Студент А", Onboarded: true, Enabled: true, Subgroup: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertUser(&model.User{TelegramID: studentB, FIO: "Студент Б", Onboarded: true, Enabled: true, Subgroup: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().In(s.loc)
+	today := now.Format("2006-01-02")
+	begin := now.Add(time.Hour)
+	finish := begin.Add(90 * time.Minute)
+	if err := st.ReplaceLessons([]model.Lesson{
+		{
+			Date: today, Start: begin.Format("15:04"), End: finish.Format("15:04"),
+			Begin: begin, Finish: finish,
+			Discipline: "Общая лекция", Teacher: "Общий", Type: "Лекция", Online: true, Owner: 0,
+		},
+		{
+			Date: today, Start: begin.Format("15:04"), End: finish.Format("15:04"),
+			Begin: begin, Finish: finish,
+			Discipline: "ИОТ Студента А", Teacher: "Препод А", Type: "Лекция", Online: true, Owner: studentA,
+		},
+		{
+			Date: today, Start: begin.Format("15:04"), End: finish.Format("15:04"),
+			Begin: begin, Finish: finish,
+			Discipline: "ИОТ Студента Б", Teacher: "Препод Б", Type: "Лекция", Online: true, Owner: studentB,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := st.ListLessons()
+	if err != nil || len(all) != 3 {
+		t.Fatalf("ListLessons: %v %+v", err, all)
+	}
+	var lessonShared, lessonA, lessonB model.Lesson
+	for _, l := range all {
+		switch l.Owner {
+		case 0:
+			lessonShared = l
+		case studentA:
+			lessonA = l
+		case studentB:
+			lessonB = l
+		}
+	}
+	idA, idB := lessonA.ID, lessonB.ID
+	if err := st.SetLessonBBB(idA, "https://bbb.ssau.ru/b/secret-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetLessonBBB(idB, "https://bbb.ssau.ru/b/secret-b"); err != nil {
+		t.Fatal(err)
+	}
+
+	packShared, err := st.EnsurePack(lessonShared, "https://bbb.ssau.ru/b/shared-rec", s.recordingsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packA, err := st.EnsurePack(lessonA, "https://bbb.ssau.ru/b/secret-a", s.recordingsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packB, err := st.EnsurePack(lessonB, "https://bbb.ssau.ru/b/secret-b", s.recordingsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// /api/lessons: студент А видит общую и свою пары, но не пару и не BBB студента Б.
+	rec := reqAs(s, key, studentA, http.MethodGet, "/api/lessons", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/lessons: %d %s", rec.Code, rec.Body.String())
+	}
+	var lResp lessonsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &lResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(lResp.Lessons) != 2 {
+		t.Fatalf("ожидали 2 пары в /api/lessons, получили %d: %+v", len(lResp.Lessons), lResp.Lessons)
+	}
+	for _, l := range lResp.Lessons {
+		if l.ID == idB || l.Owner == studentB {
+			t.Fatalf("чужой ИОТ попал в /api/lessons: %+v", l)
+		}
+	}
+	for _, b := range lResp.BBB {
+		if b.Key == model.BBBLessonKey(idB) {
+			t.Fatalf("чужая ссылка BBB попала в /api/lessons: %+v", b)
+		}
+	}
+
+	// /api/rooms: нет комнаты чужого ИОТ.
+	rec = reqAs(s, key, studentA, http.MethodGet, "/api/rooms", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/rooms: %d %s", rec.Code, rec.Body.String())
+	}
+	var rResp roomsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &rResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(rResp.Rooms) != 2 {
+		t.Fatalf("ожидали 2 комнаты в /api/rooms, получили %d: %+v", len(rResp.Rooms), rResp.Rooms)
+	}
+	for _, rm := range rResp.Rooms {
+		if rm.Discipline == "ИОТ Студента Б" {
+			t.Fatalf("чужой ИОТ попал в /api/rooms: %+v", rm)
+		}
+	}
+
+	// /api/day и /api/week: только общая и своя пары.
+	rec = reqAs(s, key, studentA, http.MethodGet, "/api/day?date="+today, "")
+	var dResp dayResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &dResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(dResp.Lessons) != 2 {
+		t.Fatalf("ожидали 2 пары в /api/day, получили %d", len(dResp.Lessons))
+	}
+	for _, l := range dResp.Lessons {
+		if l.ID == idB {
+			t.Fatalf("чужой ИОТ попал в /api/day: %+v", l)
+		}
+	}
+
+	rec = reqAs(s, key, studentA, http.MethodGet, "/api/week?from="+today, "")
+	var wResp weekResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &wResp); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range wResp.Days {
+		for _, l := range d.Lessons {
+			if l.ID == idB {
+				t.Fatalf("чужой ИОТ попал в /api/week: %+v", l)
+			}
+		}
+	}
+
+	// Чужой lesson_id нельзя трогать через /api/intent и /api/bbb (в т.ч. через key:"lesson:<id>" и чужую комнату).
+	if c := reqAs(s, key, studentA, http.MethodPost, "/api/intent", fmt.Sprintf(`{"lesson_id":%d,"decision":"yes"}`, idB)).Code; c != http.StatusNotFound {
+		t.Fatalf("/api/intent для чужого ИОТ: %d, ждали 404", c)
+	}
+	if c := reqAs(s, key, studentA, http.MethodPost, "/api/bbb", fmt.Sprintf(`{"lesson_id":%d,"url":"https://bbb.ssau.ru/b/x"}`, idB)).Code; c != http.StatusNotFound {
+		t.Fatalf("/api/bbb для чужого ИОТ: %d, ждали 404", c)
+	}
+	if c := reqAs(s, key, studentA, http.MethodPost, "/api/bbb", fmt.Sprintf(`{"lesson_id":0,"key":"lesson:%d","url":"https://bbb.ssau.ru/b/x"}`, idB)).Code; c != http.StatusForbidden {
+		t.Fatalf("/api/bbb key=lesson:<idB> для чужого ИОТ: %d, ждали 403", c)
+	}
+	if c := reqAs(s, key, studentA, http.MethodPost, "/api/bbb", fmt.Sprintf(`{"lesson_id":0,"key":%q,"url":"https://bbb.ssau.ru/b/x"}`, model.BBBRoomKey(lessonB.Discipline, lessonB.Teacher, lessonB.Type))).Code; c != http.StatusForbidden {
+		t.Fatalf("/api/bbb чужой room key: %d, ждали 403", c)
+	}
+	if c := reqAs(s, key, studentA, http.MethodPost, "/api/bbb", fmt.Sprintf(`{"lesson_id":0,"key":%q,"url":"https://bbb.ssau.ru/b/shared-room"}`, model.BBBRoomKey(lessonShared.Discipline, lessonShared.Teacher, lessonShared.Type))).Code; c != http.StatusOK {
+		t.Fatalf("/api/bbb общий room key: %d, ждали 200", c)
+	}
+	if c := reqAs(s, key, studentA, http.MethodPost, "/api/bbb", fmt.Sprintf(`{"lesson_id":0,"key":"lesson:%d","url":"https://bbb.ssau.ru/b/own-a"}`, idA)).Code; c != http.StatusOK {
+		t.Fatalf("/api/bbb свой key=lesson:<idA>: %d, ждали 200", c)
+	}
+
+	// /api/lessons: recordings не содержит пак чужого ИОТ.
+	if len(lResp.Recordings) != 2 {
+		t.Fatalf("ожидали 2 записи в /api/lessons, получили %d: %+v", len(lResp.Recordings), lResp.Recordings)
+	}
+	for _, r := range lResp.Recordings {
+		if r.Rel == packB.Dir {
+			t.Fatalf("пак чужого ИОТ попал в /api/lessons: %+v", r)
+		}
+	}
+	_ = packShared
+	_ = packA
+
+	// /api/notes: студент А видит общий и свой паки, но не пак студента Б.
+	checkNotesNoB := func(stage string) {
+		t.Helper()
+		rec := reqAs(s, key, studentA, http.MethodGet, "/api/notes", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("/api/notes (%s): %d %s", stage, rec.Code, rec.Body.String())
+		}
+		var nResp notesResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &nResp); err != nil {
+			t.Fatal(err)
+		}
+		if nResp.Total != 2 {
+			t.Fatalf("/api/notes (%s): ожидали 2 пака, получили %d: %+v", stage, nResp.Total, nResp.Subjects)
+		}
+		for _, subj := range nResp.Subjects {
+			if subj.Discipline == lessonB.Discipline {
+				t.Fatalf("/api/notes (%s): чужой ИОТ-пак попал в выдачу: %+v", stage, subj)
+			}
+		}
+	}
+	checkNotesNoB("active")
+
+	// Алиас в pack_lessons и удаление ИОТ-урока (pruneLesson) не должны открывать чужой пак.
+	if err := st.BindLessonToPack(888001, packB.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceLessons([]model.Lesson{lessonShared, lessonA}); err != nil {
+		t.Fatal(err)
+	}
+	checkNotesNoB("after prune + pack_lessons alias")
+
+	rec = reqAs(s, key, studentA, http.MethodGet, "/api/lessons", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/lessons after prune: %d %s", rec.Code, rec.Body.String())
+	}
+	var lAfter lessonsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &lAfter); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range lAfter.Recordings {
+		if r.Rel == packB.Dir {
+			t.Fatalf("чужой ИОТ-пак после prune попал в /api/lessons: %+v", r)
+		}
+	}
+
+	// Админ по-прежнему видит все 3 пака в /api/notes.
+	rec = reqAs(s, key, config.DefaultAdminID, http.MethodGet, "/api/notes", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/api/notes admin: %d %s", rec.Code, rec.Body.String())
+	}
+	var nAdmin notesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &nAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if nAdmin.Total != 3 {
+		t.Fatalf("/api/notes admin: ожидали 3 пака, получили %d", nAdmin.Total)
 	}
 }

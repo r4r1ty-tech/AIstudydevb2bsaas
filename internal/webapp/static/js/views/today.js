@@ -1,7 +1,7 @@
 // «Сегодня»: что сейчас, что дальше, зайдёт ли бот. Обновляется раз в 10 секунд
 // патчем по ключам — без дёрганья вёрстки и сброса прокрутки.
 import { api } from "../api.js";
-import { html, patch, setHTML } from "../dom.js";
+import { html, patch, safeHref, setHTML } from "../dom.js";
 import { icon } from "../icons.js";
 import { dateLong, duration, now, syncClock, timeOf, weekdayShort, dateShort } from "../format.js";
 import { app, empty, errorBlock, head, kindLabel, skeleton } from "../ui.js";
@@ -78,6 +78,7 @@ function nowCard(v, me, pending, next) {
   const pct = Math.min(100, Math.max(0, ((t - begin) / (finish - begin)) * 100));
   const left = leftParts(finish - t);
   const off = v.online && v.mine && v.decision === "no";
+  const roomHref = safeHref(v.bbb_url);
   return html`<article class="now-card${off || !v.online ? " is-off" : ""}" aria-labelledby="now-title">
     <div class="now-top">
       <span class="live-tag"><span class="live-dot" aria-hidden="true"></span>Идёт сейчас</span>
@@ -93,9 +94,9 @@ function nowCard(v, me, pending, next) {
     <div class="progress" role="progressbar" aria-label="Прошло от пары" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><span style="width:${pct.toFixed(1)}%"></span></div>
     ${v.online ? html`<div class="status-grid">${statusBox(botStatus(v, me))}${statusBox(recStatus(v))}</div>` : html`<div class="status-grid">${statusBox(botStatus(v, me))}</div>`}
     ${v.online && v.mine
-      ? html`<div class="now-actions${v.bbb_url ? " has-room" : ""}">
+      ? html`<div class="now-actions${roomHref ? " has-room" : ""}">
           ${joinToggle(v, me, { pending })}
-          ${v.bbb_url ? html`<a class="btn room-btn" href="${v.bbb_url}" target="_blank" rel="noopener noreferrer" aria-label="Открыть комнату самому" title="Открыть комнату самому">${icon("ext")}<span>Комната</span></a>` : ""}
+          ${roomHref ? html`<a class="btn room-btn" href="${roomHref}" target="_blank" rel="noopener noreferrer" aria-label="Открыть комнату самому" title="Открыть комнату самому">${icon("ext")}<span>Комната</span></a>` : ""}
         </div>${linkGoto(v)}`
       : ""}
     ${next ? html`<p class="now-next">${icon("clock", "icon-sm")}<span>Дальше в <b class="mono">${next.start}</b> — ${next.discipline} · ${joinShort(next, me)}</span></p>` : ""}

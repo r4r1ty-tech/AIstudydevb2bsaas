@@ -38,9 +38,10 @@ type Worker struct {
 	probeErr     map[string]int       // ошибки проверки живой сессии подряд
 	done         map[string]struct{}  // вышли по времени — до конца пары не заходим
 	lobbyAlertAt map[string]time.Time // последний алерт «долго в лобби»
-	recorder     map[int64]string     // пара → ключ сессии, которая пишет звук
-	recFailAt    map[int64]time.Time  // пара → когда не стартовала запись
-	recFailN     map[int64]int        // пара → сколько раз подряд запись не стартовала
+	recorder     map[string]string    // ключ встречи → ключ сессии, которая пишет звук
+	recJoining   map[string]string    // ключ встречи → ключ сессии, для которой идёт заход/старт записи
+	recFailAt    map[string]time.Time // ключ встречи → когда не стартовала запись
+	recFailN     map[string]int       // ключ встречи → сколько раз подряд запись не стартовала
 	noBBBAdmin   map[int64]struct{}   // пара → админу про «нет ссылки» уже писали
 	audioMiss    map[string]int       // пишущая вкладка не в аудио, тиков подряд
 	joining      map[string]struct{}
@@ -87,9 +88,10 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		probeErr:     make(map[string]int),
 		done:         make(map[string]struct{}),
 		lobbyAlertAt: make(map[string]time.Time),
-		recorder:     make(map[int64]string),
-		recFailAt:    make(map[int64]time.Time),
-		recFailN:     make(map[int64]int),
+		recorder:     make(map[string]string),
+		recJoining:   make(map[string]string),
+		recFailAt:    make(map[string]time.Time),
+		recFailN:     make(map[string]int),
 		noBBBAdmin:   make(map[int64]struct{}),
 		audioMiss:    make(map[string]int),
 		joining:      make(map[string]struct{}),
@@ -97,6 +99,15 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 	}
 	logx.Debugf("bbb", "NewWorker: joiner=%T hogs=%T", j, hogs)
 	return w
+}
+
+// meetingGroupKey возвращает ключ встречи для группировки нескольких строк расписания
+// (подгруппы, личные ИОТ) на один рекордер.
+func meetingGroupKey(lesson model.Lesson, url string) string {
+	if k := model.MeetingKey(lesson, url); k != "" {
+		return k
+	}
+	return fmt.Sprintf("lesson:%d", lesson.ID)
 }
 
 // lessonTag — «lesson=<id> <предмет>»: по нему грепается одна пара от захода до конспекта.
@@ -159,6 +170,7 @@ func (w *Worker) tick(ctx context.Context) {
 	var joins []pending
 	needLecture := false
 	validLessons := make(map[int64]struct{})
+	validMeetings := make(map[string]struct{})
 	// dbErr: тик видел неполную картину — живые сессии не трогаем, иначе
 	// один сбой SQLite выкинет всех из комнат и оборвёт запись.
 	dbErr := false
@@ -174,6 +186,7 @@ func (w *Worker) tick(ctx context.Context) {
 		logx.Debugf("bbb", "tick: lessons=%d users=%d", len(lessons), len(users))
 		for _, lesson := range lessons {
 			validLessons[lesson.ID] = struct{}{}
+			validMeetings[fmt.Sprintf("lesson:%d", lesson.ID)] = struct{}{}
 			url, _, err := w.Store.LessonBBB(lesson.ID)
 			if err != nil {
 				// Сбой БД — не «нет ссылки»: не шлём ложное «пришли ссылку».
@@ -182,6 +195,11 @@ func (w *Worker) tick(ctx context.Context) {
 				continue
 			}
 			url = strings.TrimSpace(url)
+			var meetKey string
+			if url != "" {
+				meetKey = meetingGroupKey(lesson, url)
+				validMeetings[meetKey] = struct{}{}
+			}
 			var here []pending
 			for i := range users {
 				u := users[i]
@@ -209,7 +227,7 @@ func (w *Worker) tick(ctx context.Context) {
 					continue
 				}
 				leave := w.ensureLeave(key, lesson.Finish)
-				if w.isRecorder(lesson.ID, key) {
+				if w.isRecorder(meetKey, key) {
 					// Пишущая вкладка сидит до звонка: хвост лекции не теряем.
 					leave = lesson.Finish
 				}
@@ -226,19 +244,48 @@ func (w *Worker) tick(ctx context.Context) {
 					logx.Debugf("bbb", "tick: key=%s blocked, skip", key)
 					continue
 				}
-				here = append(here, pending{u: u, lesson: lesson, url: url, key: key})
+				here = append(here, pending{
+					u:       u,
+					lesson:  lesson,
+					url:     url,
+					key:     key,
+					meetKey: meetKey,
+					intent:  intent,
+				})
 			}
 			if len(here) == 0 {
 				continue
 			}
-			if model.IsLecture(lesson.Type) {
-				if i := w.chooseRecorder(lesson, here, now); i >= 0 {
-					here[i].record = true
-					w.promoteRecorder(ctx, here[i])
-				}
-			}
 			needLecture = true
 			joins = append(joins, here...)
+		}
+
+		// На одну встречу BBB (даже если в расписании несколько строк подгрупп/ИОТ)
+		// выбираем ровно одного рекордера в стабильном порядке.
+		var lectureKeys []string
+		lectureGroups := make(map[string][]int)
+		for idx := range joins {
+			if !model.IsLecture(joins[idx].lesson.Type) {
+				continue
+			}
+			mk := joins[idx].meetKey
+			if _, exists := lectureGroups[mk]; !exists {
+				lectureKeys = append(lectureKeys, mk)
+			}
+			lectureGroups[mk] = append(lectureGroups[mk], idx)
+		}
+		for _, mk := range lectureKeys {
+			idxs := lectureGroups[mk]
+			group := make([]pending, len(idxs))
+			for g, jIdx := range idxs {
+				group[g] = joins[jIdx]
+			}
+			if win := w.chooseRecorder(mk, group, now); win >= 0 {
+				winIdx := idxs[win]
+				joins[winIdx].record = true
+				w.promoteRecorder(ctx, mk, joins[winIdx])
+				w.reserveRecorder(mk, joins[winIdx].key)
+			}
 		}
 	}
 
@@ -287,7 +334,7 @@ func (w *Worker) tick(ctx context.Context) {
 		w.leave(ctx, tgID, lessonID, key, "slot over")
 	}
 
-	w.forget(ctx, validLessons)
+	w.forget(ctx, validLessons, validMeetings)
 
 	w.maybeHarvest(ctx, now)
 	w.maybeNotes(ctx, now)
@@ -320,11 +367,13 @@ const (
 )
 
 type pending struct {
-	u      model.User
-	lesson model.Lesson
-	url    string
-	key    string
-	record bool
+	u       model.User
+	lesson  model.Lesson
+	url     string
+	key     string
+	meetKey string
+	intent  *model.JoinIntent
+	record  bool
 }
 
 func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Lesson, key string) {
@@ -370,14 +419,27 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 	))
 }
 
-// chooseRecorder: одна пишущая вкладка на пару. Живой рекордер среди тех, кто
-// сейчас должен быть в комнате, остаётся; иначе берём кандидата с меньшим id.
-func (w *Worker) chooseRecorder(lesson model.Lesson, here []pending, now time.Time) int {
+// chooseRecorder: одна пишущая вкладка на встречу. Живой рекордер среди тех,
+// кто сейчас должен быть в комнате, остаётся; иначе выбираем того, кто зашёл
+// раньше (сначала уже сидящих в комнате по seatedAt, затем по EnterAt),
+// при равенстве — детерминированный тай-брейк по TelegramID и lesson.ID.
+func (w *Worker) chooseRecorder(meetKey string, here []pending, now time.Time) int {
+	if len(here) == 0 {
+		return -1
+	}
 	w.mu.Lock()
-	cur := w.recorder[lesson.ID]
+	cur := w.recorder[meetKey]
 	_, curLive := w.sessions[cur]
-	failAt, failed := w.recFailAt[lesson.ID]
-	fails := w.recFailN[lesson.ID]
+	rj := w.recJoining[meetKey]
+	_, rjJoining := w.joining[rj]
+	failAt, failed := w.recFailAt[meetKey]
+	fails := w.recFailN[meetKey]
+	live := make([]bool, len(here))
+	seated := make([]time.Time, len(here))
+	for i := range here {
+		_, live[i] = w.sessions[here[i].key]
+		seated[i] = w.seatedAt[here[i].key]
+	}
 	w.mu.Unlock()
 	if cur != "" && curLive {
 		for i := range here {
@@ -385,6 +447,16 @@ func (w *Worker) chooseRecorder(lesson model.Lesson, here []pending, now time.Ti
 				return i
 			}
 		}
+	}
+	// Пока выбранный рекордер заходит или запускает запись, не отдаём запись
+	// другому кандидату на повторных тиках.
+	if rj != "" && rjJoining {
+		for i := range here {
+			if here[i].key == rj {
+				return i
+			}
+		}
+		return -1
 	}
 	// Каждая новая попытка — перезаход вкладки на глазах у преподавателя.
 	// Запись не стартует раз за разом — сидим до конца пары просто присутствием.
@@ -394,9 +466,34 @@ func (w *Worker) chooseRecorder(lesson model.Lesson, here []pending, now time.Ti
 	if failed && now.Sub(failAt) < recRetryGap {
 		return -1
 	}
-	best := -1
+	enter := make([]time.Time, len(here))
 	for i := range here {
-		if best < 0 || here[i].u.TelegramID < here[best].u.TelegramID {
+		enter[i] = EnterAt(here[i].lesson.Begin, here[i].intent)
+	}
+	better := func(i, j int) bool {
+		if live[i] != live[j] {
+			return live[i]
+		}
+		if live[i] {
+			si, sj := !seated[i].IsZero(), !seated[j].IsZero()
+			if si != sj {
+				return si
+			}
+			if si && !seated[i].Equal(seated[j]) {
+				return seated[i].Before(seated[j])
+			}
+		}
+		if !enter[i].Equal(enter[j]) {
+			return enter[i].Before(enter[j])
+		}
+		if here[i].u.TelegramID != here[j].u.TelegramID {
+			return here[i].u.TelegramID < here[j].u.TelegramID
+		}
+		return here[i].lesson.ID < here[j].lesson.ID
+	}
+	best := 0
+	for i := 1; i < len(here); i++ {
+		if better(i, best) {
 			best = i
 		}
 	}
@@ -405,22 +502,65 @@ func (w *Worker) chooseRecorder(lesson model.Lesson, here []pending, now time.Ti
 
 // promoteRecorder: выбранный рекордер сидит без звука (presence) — переоткрываем
 // его вкладку с записью. Если он уже пишет, ничего не делаем.
-func (w *Worker) promoteRecorder(ctx context.Context, p pending) {
+func (w *Worker) promoteRecorder(ctx context.Context, meetKey string, p pending) {
 	w.mu.Lock()
 	_, live := w.sessions[p.key]
-	isRec := w.recorder[p.lesson.ID] == p.key
+	isRec := w.recorder[meetKey] == p.key
 	w.mu.Unlock()
 	if !live || isRec {
 		return
 	}
-	logx.Infof("bbb", "recorder handover lesson=%d -> %s", p.lesson.ID, p.key)
+	logx.Infof("bbb", "recorder handover meet=%s lesson=%d -> %s", meetKey, p.lesson.ID, p.key)
 	w.closeSession(ctx, p.u.TelegramID, p.lesson.ID, p.key, "recorder handover", false)
 }
 
-func (w *Worker) isRecorder(lessonID int64, key string) bool {
+func (w *Worker) reserveRecorder(meetKey, key string) {
+	if w == nil || meetKey == "" || key == "" {
+		return
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.recorder[lessonID] == key
+	// Если этот ключ уже является живым рекордером, ensureIn уйдёт в watchLobby
+	// без beginJoin/endJoin, поэтому резерв в recJoining не нужен.
+	if w.recorder[meetKey] == key {
+		if _, live := w.sessions[key]; live {
+			return
+		}
+	}
+	if w.recJoining == nil {
+		w.recJoining = make(map[string]string)
+	}
+	w.recJoining[meetKey] = key
+}
+
+func (w *Worker) clearRecJoiningIfIdle(meetKey, key string) {
+	if w == nil || meetKey == "" || key == "" {
+		return
+	}
+	w.mu.Lock()
+	if w.recJoining[meetKey] == key {
+		if _, joining := w.joining[key]; !joining {
+			delete(w.recJoining, meetKey)
+		}
+	}
+	w.mu.Unlock()
+}
+
+func (w *Worker) isRecorder(meetKey, key string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.recorder[meetKey] == key
+}
+
+func (w *Worker) isRecorderSession(key string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, rk := range w.recorder {
+		if rk == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *Worker) isDone(key string) bool {
@@ -438,7 +578,11 @@ func (w *Worker) markDone(key string) {
 
 func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson, url, key string, now time.Time, record bool) {
 	logx.Debugf("bbb", "ensureIn: key=%s tg=%d lesson=%d record=%v url=%s", key, u.TelegramID, lesson.ID, record, redactURL(url))
+	meetKey := meetingGroupKey(lesson, url)
 	if ctx.Err() != nil {
+		if record {
+			w.clearRecJoiningIfIdle(meetKey, key)
+		}
 		return
 	}
 	w.mu.Lock()
@@ -447,9 +591,15 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	w.mu.Unlock()
 	if blocked {
 		logx.Debugf("bbb", "ensureIn: key=%s blocked", key)
+		if record {
+			w.clearRecJoiningIfIdle(meetKey, key)
+		}
 		return
 	}
 	if live {
+		if record {
+			w.clearRecJoiningIfIdle(meetKey, key)
+		}
 		w.watchLobby(ctx, u, lesson, key, now)
 		return
 	}
@@ -516,7 +666,26 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	logx.Debugf("bbb", "ensureIn: key=%s lobby=%v room=%v", key, lobby, room)
 	w.hogs().Hold()
 	recording := false
+	shouldRecord := false
 	if record {
+		w.mu.Lock()
+		cur := w.recorder[meetKey]
+		_, curLive := w.sessions[cur]
+		rj := w.recJoining[meetKey]
+		_, rjJoining := w.joining[rj]
+		if (cur != "" && cur != key && curLive) || (rj != "" && rj != key && rjJoining) {
+			logx.Warnf("bbb", "ensureIn: meet=%s рекордер уже активен/заходит (rec=%q joining=%q), пропускаю attachRecorder для %s", meetKey, cur, rj, key)
+			role = RolePresence
+		} else {
+			if w.recJoining == nil {
+				w.recJoining = make(map[string]string)
+			}
+			w.recJoining[meetKey] = key
+			shouldRecord = true
+		}
+		w.mu.Unlock()
+	}
+	if shouldRecord {
 		sess, recording = w.attachRecorder(ctx, sess, lesson, url)
 	}
 	state := model.PresenceRoom
@@ -529,15 +698,18 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	delete(w.failN, key)
 	delete(w.retryAt, key)
 	delete(w.probeErr, key)
-	if record {
+	if shouldRecord {
 		if recording {
-			w.recorder[lesson.ID] = key
-			delete(w.recFailAt, lesson.ID)
-			delete(w.recFailN, lesson.ID)
+			w.recorder[meetKey] = key
+			delete(w.recFailAt, meetKey)
+			delete(w.recFailN, meetKey)
 		} else {
-			w.recFailAt[lesson.ID] = now
-			w.recFailN[lesson.ID]++
-			recGaveUp = w.recFailN[lesson.ID] == maxRecFails
+			w.recFailAt[meetKey] = now
+			w.recFailN[meetKey]++
+			recGaveUp = w.recFailN[meetKey] == maxRecFails
+		}
+		if w.recJoining[meetKey] == key {
+			delete(w.recJoining, meetKey)
 		}
 	}
 	if state == model.PresenceLobby {
@@ -551,7 +723,7 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	logx.Infof("bbb", "seated: %s key=%s tg=%d состояние=%s (%s) роль=%s запись=%v вход=%s",
 		lessonTag(lesson), key, u.TelegramID, state, seatName(lobby, room, false), role, recording, time.Since(joinStart).Round(time.Millisecond))
 	if recGaveUp {
-		logx.Warnf("bbb", "lesson=%d: запись не стартовала %d раз — больше не пробую, пара без записи", lesson.ID, maxRecFails)
+		logx.Warnf("bbb", "meet=%s lesson=%d: запись не стартовала %d раз — больше не пробую, пара без записи", meetKey, lesson.ID, maxRecFails)
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("«%s» %s: запись не стартовала %d раз подряд — больше не перезахожу, пара останется без записи и конспекта.", lesson.Discipline, lesson.SlotLabel(), maxRecFails))
 	}
 	if err := w.Store.SetPresence(model.Presence{
@@ -758,7 +930,7 @@ const audioAlertAfter = 4
 // checkAudio: пишущая вкладка в комнате должна быть в аудио — иначе пишем тишину.
 // Каждый тик короткая попытка подключить, через ~минуту — одно сообщение админу.
 func (w *Worker) checkAudio(ctx context.Context, lesson model.Lesson, key string, sess Session) {
-	if !w.isRecorder(lesson.ID, key) {
+	if !w.isRecorderSession(key) {
 		return
 	}
 	ac, ok := sess.(AudioChecker)
@@ -838,8 +1010,10 @@ func (w *Worker) closeSession(ctx context.Context, telegramID, lessonID int64, k
 	delete(w.lobbyAlertAt, key)
 	delete(w.probeErr, key)
 	delete(w.audioMiss, key)
-	if w.recorder[lessonID] == key {
-		delete(w.recorder, lessonID)
+	for mk, rk := range w.recorder {
+		if rk == key {
+			delete(w.recorder, mk)
+		}
 	}
 	w.mu.Unlock()
 	if err := w.Store.ClearPresenceFor(telegramID, lessonID); err != nil {
@@ -870,7 +1044,7 @@ func (w *Worker) closeSession(ctx context.Context, telegramID, lessonID int64, k
 
 // forget чистит состояние ключей пар, ушедших из окна входа, и снимает их
 // залипшие presence (ошибки «нет ссылки» / «не зашёл»).
-func (w *Worker) forget(ctx context.Context, valid map[int64]struct{}) {
+func (w *Worker) forget(ctx context.Context, valid map[int64]struct{}, validMeetings map[string]struct{}) {
 	gone := func(key string) bool {
 		_, lessonID := splitKey(key)
 		_, ok := valid[lessonID]
@@ -909,15 +1083,27 @@ func (w *Worker) forget(ctx context.Context, valid map[int64]struct{}) {
 			delete(w.noBBBAdmin, id)
 		}
 	}
-	for id := range w.recFailAt {
-		if _, ok := valid[id]; !ok {
-			delete(w.recFailAt, id)
-			delete(w.recFailN, id)
+	for mk := range w.recFailAt {
+		if _, ok := validMeetings[mk]; !ok {
+			delete(w.recFailAt, mk)
+			delete(w.recFailN, mk)
 		}
 	}
-	for id, key := range w.recorder {
+	for mk := range w.recFailN {
+		if _, ok := validMeetings[mk]; !ok {
+			delete(w.recFailN, mk)
+		}
+	}
+	for mk, key := range w.recorder {
 		if _, live := w.sessions[key]; !live {
-			delete(w.recorder, id)
+			delete(w.recorder, mk)
+		}
+	}
+	for mk, key := range w.recJoining {
+		if _, joining := w.joining[key]; !joining {
+			if _, ok := validMeetings[mk]; !ok {
+				delete(w.recJoining, mk)
+			}
 		}
 	}
 	w.mu.Unlock()
@@ -987,6 +1173,11 @@ func (w *Worker) endJoin(key string) {
 	}
 	w.mu.Lock()
 	delete(w.joining, key)
+	for mk, rk := range w.recJoining {
+		if rk == key {
+			delete(w.recJoining, mk)
+		}
+	}
 	w.mu.Unlock()
 	logx.Debugf("bbb", "endJoin: key=%s released", key)
 }
