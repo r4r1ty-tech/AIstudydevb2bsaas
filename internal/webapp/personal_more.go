@@ -28,8 +28,9 @@ const (
 	dueSoon    = "soon" // сегодня и завтра
 	dueWeek    = "week" // до конца этой недели
 	dueLater   = "later"
-	dueDone    = "done"  // сдано
-	dueNone    = "nodue" // срока нет
+	dueDone    = "done"   // сдано
+	dueNone    = "nodue"  // срока нет
+	dueClosed  = "closed" // тест закрыт для попыток и не пройден
 )
 
 type deadlineView struct {
@@ -47,6 +48,9 @@ type deadlinesResponse struct {
 func dueGroup(d Deadline, now time.Time) string {
 	if d.Status == DeadlineSubmitted {
 		return dueDone
+	}
+	if d.Closed {
+		return dueClosed
 	}
 	if d.Due.IsZero() {
 		return dueNone
@@ -74,7 +78,7 @@ func (s *Server) handleDeadlines(w http.ResponseWriter, r *http.Request) {
 		Moodle:    s.moodle.Status(),
 		Now:       now,
 		Deadlines: []deadlineView{},
-		Counts:    map[string]int{dueOverdue: 0, dueSoon: 0, dueWeek: 0, dueLater: 0, dueDone: 0, dueNone: 0},
+		Counts:    map[string]int{dueOverdue: 0, dueSoon: 0, dueWeek: 0, dueLater: 0, dueDone: 0, dueNone: 0, dueClosed: 0},
 	}
 	if resp.Moodle.Connected {
 		list, err := s.moodle.Deadlines(r.Context(), now)

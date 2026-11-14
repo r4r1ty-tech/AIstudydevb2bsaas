@@ -63,19 +63,19 @@ func (m *storeMoodle) Deadlines(_ context.Context, now time.Time) ([]Deadline, e
 		if it.Due == nil {
 			// Без срока — только несделанное и уже открытое.
 			if !it.Finished() && (it.Opens == nil || it.Opens.Before(now)) {
-				out = append(out, deadlineFromItem(it))
+				out = append(out, deadlineFromItem(it, now))
 			}
 			continue
 		}
 		if age := now.Sub(*it.Due); (it.Finished() && age > doneWindow) || (!it.Finished() && age > overdueWindow) {
 			continue
 		}
-		out = append(out, deadlineFromItem(it))
+		out = append(out, deadlineFromItem(it, now))
 	}
 	return out, nil
 }
 
-func deadlineFromItem(it model.MoodleItem) Deadline {
+func deadlineFromItem(it model.MoodleItem, now time.Time) Deadline {
 	kind := DeadlineAssign
 	if it.Kind == model.MoodleQuiz {
 		kind = DeadlineQuiz
@@ -89,7 +89,7 @@ func deadlineFromItem(it model.MoodleItem) Deadline {
 	}
 	d := Deadline{
 		ID: strconv.FormatInt(it.CMID, 10), Course: it.Course, Title: it.Title, Kind: kind, Status: status,
-		URL: it.URL, Section: it.Section, Todo: it.Todo,
+		URL: it.URL, Section: it.Section, Todo: it.Todo, Closed: it.Closed(now),
 	}
 	if it.Due != nil {
 		d.Due = *it.Due

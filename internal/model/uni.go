@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Аккаунты универа: личный кабинет (lk.ssau.ru) и Moodle (do.ssau.ru).
 const (
@@ -64,4 +67,24 @@ type MoodleItem struct {
 // Finished — больше ничего делать не нужно.
 func (m MoodleItem) Finished() bool {
 	return m.Status == MoodleSubmitted || m.Status == MoodleDone
+}
+
+// QuizNotOpenNote — фраза, которой страница теста описывает закрытый для попыток
+// тест (internal/moodle/pages.go кладёт её в Todo).
+const QuizNotOpenNote = "не открыт для попыток"
+
+// Closed — тест закрыт для попыток и не пройден: не сдан, и либо срок уже прошёл,
+// либо Moodle пишет, что попыток сейчас нет. Тест, который ещё не открылся
+// (Opens в будущем), закрытым не считается: он откроется сам.
+func (m MoodleItem) Closed(now time.Time) bool {
+	if m.Kind != MoodleQuiz || m.Finished() {
+		return false
+	}
+	if m.Due != nil && m.Due.Before(now) {
+		return true
+	}
+	if m.Opens != nil && m.Opens.After(now) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(m.Todo), QuizNotOpenNote)
 }

@@ -90,3 +90,28 @@ func TestStoreMoodleWindowsAndNoDue(t *testing.T) {
 		t.Fatalf("no-due must go last: %+v", last)
 	}
 }
+
+func TestDueGroupClosedQuiz(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	cases := []struct {
+		name       string
+		item       model.MoodleItem
+		wantClosed bool
+		wantGroup  string
+	}{
+		{"тест, срок прошёл, не сдан", model.MoodleItem{CMID: 1, Kind: model.MoodleQuiz, Title: "Т", Status: model.MoodleTodo, Due: &past}, true, dueClosed},
+		{"тест, сдан", model.MoodleItem{CMID: 2, Kind: model.MoodleQuiz, Title: "Т", Status: model.MoodleSubmitted, Due: &past}, false, dueDone},
+		{"задание, срок прошёл", model.MoodleItem{CMID: 3, Kind: model.MoodleAssign, Title: "З", Status: model.MoodleTodo, Due: &past}, false, dueOverdue},
+		{"тест без срока, не открыт", model.MoodleItem{CMID: 4, Kind: model.MoodleQuiz, Title: "Т", Status: model.MoodleTodo, Todo: "Тест сейчас не открыт для попыток"}, true, dueClosed},
+	}
+	for _, c := range cases {
+		d := deadlineFromItem(c.item, now)
+		if d.Closed != c.wantClosed {
+			t.Errorf("%s: Closed=%v want %v", c.name, d.Closed, c.wantClosed)
+		}
+		if g := dueGroup(d, now); g != c.wantGroup {
+			t.Errorf("%s: group=%q want %q", c.name, g, c.wantGroup)
+		}
+	}
+}

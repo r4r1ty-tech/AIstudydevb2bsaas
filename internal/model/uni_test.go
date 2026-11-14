@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLessonForAndLKLink(t *testing.T) {
 	me := User{TelegramID: 7, Subgroup: 2}
@@ -34,5 +37,34 @@ func TestLessonForAndLKLink(t *testing.T) {
 	manual := BBBLink{Key: BBBLessonKey(5), URL: "https://bbb.ssau.ru/b/manual"}
 	if u, _ := ResolveBBB(l, []BBBLink{room, manual}); u != "https://bbb.ssau.ru/b/manual" {
 		t.Fatalf("manual lesson link must win: %q", u)
+	}
+}
+
+func TestMoodleItemClosed(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	closedTodo := "Тест сейчас не открыт для попыток"
+	cases := []struct {
+		name string
+		item MoodleItem
+		want bool
+	}{
+		{"не сдан, срок прошёл", MoodleItem{Kind: MoodleQuiz, Status: MoodleTodo, Due: &past}, true},
+		{"не сдан, срок впереди", MoodleItem{Kind: MoodleQuiz, Status: MoodleTodo, Due: &future}, false},
+		{"не сдан, без срока, не открыт", MoodleItem{Kind: MoodleQuiz, Status: MoodleTodo, Todo: closedTodo}, true},
+		{"не сдан, срок впереди, не открыт", MoodleItem{Kind: MoodleQuiz, Status: MoodleTodo, Due: &future, Todo: closedTodo}, true},
+		{"не сдан, без срока, открыт", MoodleItem{Kind: MoodleQuiz, Status: MoodleTodo, Todo: "Разрешено попыток: 2"}, false},
+		{"ещё не открылся: опенинг впереди", MoodleItem{Kind: MoodleQuiz, Status: MoodleTodo, Opens: &future, Todo: closedTodo}, false},
+		{"черновик, срок прошёл", MoodleItem{Kind: MoodleQuiz, Status: MoodleDraft, Due: &past}, true},
+		{"сдан, срок прошёл", MoodleItem{Kind: MoodleQuiz, Status: MoodleSubmitted, Due: &past}, false},
+		{"сдан, не открыт", MoodleItem{Kind: MoodleQuiz, Status: MoodleDone, Todo: closedTodo}, false},
+		{"задание, срок прошёл", MoodleItem{Kind: MoodleAssign, Status: MoodleTodo, Due: &past}, false},
+		{"задание, не открыт", MoodleItem{Kind: MoodleAssign, Status: MoodleTodo, Todo: closedTodo}, false},
+	}
+	for _, c := range cases {
+		if got := c.item.Closed(now); got != c.want {
+			t.Errorf("%s: Closed() = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
