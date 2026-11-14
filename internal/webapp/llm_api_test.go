@@ -171,3 +171,68 @@ func TestQuizRunsAndResolve(t *testing.T) {
 		t.Fatalf("друг перерешивает чужое: %d", c)
 	}
 }
+
+func TestQuizForceAll(t *testing.T) {
+	s, st, key, _ := newAdminServer(t)
+	admin := config.DefaultAdminID
+	friend := config.DefaultWhitelist[1]
+	if err := st.PutAccount(model.Account{TelegramID: friend, Kind: model.AccountMoodle, Login: "2021-000123", Status: model.AccountOK}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	at := func(d time.Duration) *time.Time { x := now.Add(d); return &x }
+	day := 24 * time.Hour
+	items := []model.MoodleItem{
+		{CMID: 101, Kind: model.MoodleQuiz, Title: "В работе", Due: at(2 * day), Status: model.MoodleTodo},
+		{CMID: 102, Kind: model.MoodleQuiz, Title: "Незавершённая попытка", Status: model.MoodleDraft},
+		{CMID: 103, Kind: model.MoodleQuiz, Title: "Сдан", Due: at(-day), Status: model.MoodleSubmitted},
+		{CMID: 104, Kind: model.MoodleAssign, Title: "Задание, не тест", Due: at(day), Status: model.MoodleTodo},
+		{CMID: 105, Kind: model.MoodleQuiz, Title: "Прошлый год, вне окна", Due: at(-200 * day), Status: model.MoodleTodo},
+	}
+	if err := st.ReplaceMoodleItems(friend, items); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting(fmt.Sprintf("quiz_solved:%d:101", friend), "x"); err != nil {
+		t.Fatal(err)
+	}
+
+	var got struct {
+		OK    bool `json:"ok"`
+		Count int  `json:"count"`
+	}
+	rec := reqAs(s, key, friend, http.MethodPost, "/api/quiz/force-all", "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if rec.Code != http.StatusOK || got.Count != 2 {
+		t.Fatalf("force-all: %d %s", rec.Code, rec.Body)
+	}
+	for _, cmid := range []int64{101, 102} {
+		if v, _, _ := st.GetSetting(fmt.Sprintf("quiz_force:%d:%d", friend, cmid)); v == "" {
+			t.Errorf("нет флага у cmid %d", cmid)
+		}
+	}
+	for _, cmid := range []int64{103, 104, 105} {
+		if v, _, _ := st.GetSetting(fmt.Sprintf("quiz_force:%d:%d", friend, cmid)); v != "" {
+			t.Errorf("лишний флаг у cmid %d", cmid)
+		}
+	}
+	if v, _, _ := st.GetSetting(fmt.Sprintf("quiz_solved:%d:101", friend)); v != "" {
+		t.Error("отметка «решён» не снята")
+	}
+	if v, _, _ := st.GetSetting(fmt.Sprintf("moodle_kick:%d", friend)); v == "" {
+		t.Error("нет пинка синка")
+	}
+
+	// у админа Moodle не подключён: ноль и без пинка
+	got = struct {
+		OK    bool `json:"ok"`
+		Count int  `json:"count"`
+	}{}
+	rec = reqAs(s, key, admin, http.MethodPost, "/api/quiz/force-all", "")
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if rec.Code != http.StatusOK || got.Count != 0 {
+		t.Fatalf("без Moodle: %d %s", rec.Code, rec.Body)
+	}
+	if v, _, _ := st.GetSetting(fmt.Sprintf("moodle_kick:%d", admin)); v != "" {
+		t.Error("пинок без постановки")
+	}
+}

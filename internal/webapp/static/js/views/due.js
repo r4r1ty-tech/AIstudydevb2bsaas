@@ -75,12 +75,15 @@ export function mountDue(root, ctx) {
     const nodue = by.nodue || [];
     const c = d.counts || {};
     const groups = GROUPS.filter((g) => by[g.id] && by[g.id].length);
+    // Несданные тесты — те же, что получат «Пройти» у себя в карточке (сервер считает так же).
+    const queued = d.deadlines.filter((x) => x.kind === "quiz" && x.status !== "submitted");
     setHTML(root, html`${head({ eyebrow: html`Moodle · ${m.synced_at ? `обновлено ${ago(m.synced_at)}` : "подключён"}`, title: "Сдать" })}
       <div class="due-summary">
         <button type="button" class="due-stat${c.overdue ? " is-coral" : ""}" data-jump="overdue" ${c.overdue ? "" : "disabled"} aria-label="Просрочено: ${c.overdue || 0}. Показать"><b>${c.overdue || 0}</b><span>просрочено</span></button>
         <button type="button" class="due-stat${c.soon ? " is-amber" : ""}" data-jump="soon" ${c.soon ? "" : "disabled"} aria-label="Сегодня и завтра: ${c.soon || 0}. Показать"><b>${c.soon || 0}</b><span>сегодня и завтра</span></button>
         <button type="button" class="due-stat" data-jump="open" ${open ? "" : "disabled"} aria-label="Всего не сдано: ${open}. Показать"><b>${open}</b><span>всего не сдано</span></button>
       </div>
+      ${queued.length ? html`<div class="btn-row due-all"><button type="button" class="btn btn-primary btn-sm" data-quiz-force-all data-count="${queued.length}">${icon("refresh")}Пройти все (${queued.length})</button></div>` : ""}
       ${groups.length ? "" : empty({ ico: "check", title: nodue.length ? "Горящих сроков нет" : "Всё сдано", text: nodue.length ? "Со сроками всё сдано. Ниже — задания без срока." : "Открытых сроков нет. Новые появятся здесь сами." })}
       ${groups.map((g) => html`<section class="due-group ${g.id}" id="due-${g.id}" aria-labelledby="dg-${g.id}">
         <h2 class="due-group-title" id="dg-${g.id}">${icon(g.ico)}${g.title} <span class="count mono">· ${by[g.id].length}</span></h2>
@@ -120,6 +123,23 @@ export function mountDue(root, ctx) {
   }
 
   root.addEventListener("click", async (ev) => {
+    const qa = ev.target.closest("[data-quiz-force-all]");
+    if (qa) {
+      const n = Number(qa.dataset.count) || 0;
+      if (!n || !confirm(`Поставить на авторешение ${n} несданных тестов? Бот решит их по очереди, результаты придут в Telegram.`)) return;
+      busy(qa, true);
+      try {
+        const r = await api("api/quiz/force-all", { method: "POST" });
+        busy(qa, false);
+        toast(`Поставил ${r.count} тестов в очередь`);
+        qa.disabled = true;
+        qa.textContent = "В очереди";
+      } catch (e) {
+        busy(qa, false);
+        toast(e.message, "error");
+      }
+      return;
+    }
     const qf = ev.target.closest("[data-quiz-force]");
     if (qf) {
       busy(qf, true);

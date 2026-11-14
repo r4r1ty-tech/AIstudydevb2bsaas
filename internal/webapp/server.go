@@ -345,6 +345,7 @@ func (s *Server) apiMux() http.Handler {
 	api.HandleFunc("POST /api/llm/test", s.handleLLMTest)
 	// «Пройти» у теста в «Сдать»: решить свой тест сейчас, даже просроченный.
 	api.HandleFunc("POST /api/quiz/force", s.handleQuizForce)
+	api.HandleFunc("POST /api/quiz/force-all", s.handleQuizForceAll)
 	// Админ: кто какую модель выбрал, журнал решателя у всех, перерешать.
 	api.HandleFunc("GET /api/admin/llm/people", admin(s.handleLLMPeople))
 	api.HandleFunc("GET /api/admin/quiz-runs", admin(s.handleQuizRuns))
