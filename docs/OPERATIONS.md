@@ -13,6 +13,7 @@
 | `PANEL_PASSWORD` | — | Пароль API панели (заголовок `X-Panel-Password` или `Authorization: Bearer`) |
 | `PANEL_ALLOW_IPS` | — | IP и CIDR через запятую, которым открыта панель; остальным 403. Пусто — без фильтра. Без `PANEL_PASSWORD` API отвечает только при непустом списке. Кривой элемент закрывает панель для всех |
 | `PANEL_TRUST_PROXY` | `0` | `1` — IP клиента берётся из правого элемента `X-Forwarded-For`, но только если запрос пришёл с loopback (то есть от Caddy на этой же машине) |
+| `PANEL_TUNNEL` | `1` | `0` — `remote.sh` выключает `ssau-tunnel` (cloudflared) и не трогает `WEBAPP_URL_FILE`: панель за своим Caddy |
 | `PANEL_DEMO` | `0` | `1` — демо: панель на тестовых данных в памяти, без бота, базы и пароля |
 | `WEBAPP_PUBLIC_URL` | — | HTTPS-адрес туннеля для Mini App (фолбэк, если нет файла) |
 | `WEBAPP_URL_FILE` | — | Файл с текущим URL туннеля. Если задан и непуст — важнее `WEBAPP_PUBLIC_URL` |
@@ -64,6 +65,29 @@ PANEL_ALLOW_IPS=203.0.113.10,198.51.100.0/24   # свои IP
 ```bash
 PANEL_DEMO=1 LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/panel
 ```
+
+## Прод (ГлебПрод)
+
+- VDS 392601 «ГлебПрод», OneDash, Прага, 4 CPU / 4 ГБ, Debian 13, `13.143.234.228`. На нём же живут выход VPN-пула (`xray-exit`), OpenFlux и сайт `gandon.broodmother.me` — их не трогать.
+- Из РФ IP напрямую недоступен: SSH — через `ProxyJump` с ПродАлексей, панель — через VPN пула.
+- DNS: `A ssau.r4r1ty.fun → 13.143.234.228`. Блок в `/etc/caddy/Caddyfile`:
+
+  ```caddy
+  ssau.r4r1ty.fun {
+      header {
+          -Server
+          -Via
+          defer
+          Strict-Transport-Security "max-age=31536000"
+      }
+      encode zstd gzip
+      reverse_proxy 127.0.0.1:8080
+  }
+  ```
+
+  В Caddy там `admin off`, поэтому `systemctl reload caddy` падает — только `systemctl restart caddy`.
+- `.env`: `LISTEN_ADDR=127.0.0.1:8080`, `PANEL_TRUST_PROXY=1`, `PANEL_TUNNEL=0`, `WEBAPP_PUBLIC_URL=https://ssau.r4r1ty.fun`, `WEBAPP_URL_FILE=` пусто, `PANEL_ALLOW_IPS` — четыре хельсинкских выхода пула (`177.3.196.241,242,243,245`), сам ГлебПрод и ПродАлексей (`194.87.52.18`), плюс `PANEL_PASSWORD`.
+- CI ходит ключом `gh-actions-ssau-deploy` (публичная часть в `/root/.ssh/authorized_keys`, приватная — секрет `VDS_SSH_KEY`).
 
 ## ЛК и Moodle
 
@@ -147,8 +171,8 @@ cat /etc/systemd/system/ssau-bbb.service
 
 ```bash
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bin/bbb ./cmd/bbb
-scp bin/bbb root@95.182.114.82:/tmp/ssau-deploy/
-ssh root@95.182.114.82 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
+scp bin/bbb root@13.143.234.228:/tmp/ssau-deploy/
+ssh root@13.143.234.228 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 ```
 
 `remote.sh`:
@@ -158,7 +182,7 @@ ssh root@95.182.114.82 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 - ставит Vosk-модель (если нет);
 - при отсутствии `/opt/ssau-bot/.env` останавливается и просит скопировать его.
 
-Секреты Actions: `VDS_SSH_KEY` (обязателен), `VDS_HOST`, `VDS_USER`, `VDS_PORT`.
+Секреты Actions: `VDS_SSH_KEY` (обязателен), `VDS_HOST`, `VDS_USER`, `VDS_PORT`; для конспектов `LLM_API_KEY/URL/MODEL` или `DEEPSEEK_API_KEY`, для выгрузки `LECTURES_TOKEN`. Деплой срабатывает на пуш в `main`, с другой ветки — `gh workflow run deploy.yml --ref <ветка>`.
 
 ## Сброс данных
 

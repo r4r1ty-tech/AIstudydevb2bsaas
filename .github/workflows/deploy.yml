@@ -44,7 +44,7 @@ jobs:
       - name: Залить на VDS
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          host: ${{ secrets.VDS_HOST || '13.143.234.228' }}
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
@@ -56,15 +56,16 @@ jobs:
       - name: Перезапустить systemd
         uses: appleboy/ssh-action@v1.2.2
         env:
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
-          LLM_API_URL: ${{ secrets.LLM_API_URL }}
-          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          # Нет LLM_* — берём DeepSeek из DEEPSEEK_API_KEY с его адресом и моделью.
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || secrets.DEEPSEEK_API_KEY }}
+          LLM_API_URL: ${{ secrets.LLM_API_URL || (secrets.DEEPSEEK_API_KEY && 'https://api.deepseek.com') || '' }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL || (secrets.DEEPSEEK_API_KEY && 'deepseek-chat') || '' }}
           LECTURES_TOKEN: ${{ secrets.LECTURES_TOKEN }}
           LECTURES_OWNER: r4r1ty-tech
           LECTURES_REPO: LectionsSSAU
           LECTURES_BRANCH: main
         with:
-          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          host: ${{ secrets.VDS_HOST || '13.143.234.228' }}
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}

@@ -12,7 +12,7 @@ jobs:
       - name: Залить reset-data.sh
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          host: ${{ secrets.VDS_HOST || '13.143.234.228' }}
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
@@ -24,7 +24,7 @@ jobs:
       - name: Сбросить БД и конспекты
         uses: appleboy/ssh-action@v1.2.2
         with:
-          host: ${{ secrets.VDS_HOST || '95.182.114.82' }}
+          host: ${{ secrets.VDS_HOST || '13.143.234.228' }}
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
