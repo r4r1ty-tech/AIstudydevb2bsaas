@@ -3,6 +3,8 @@ package uni
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
@@ -18,12 +20,50 @@ const WakeKickKey = "moodle_wake_kick"
 
 // Kick просит rasp пересобрать задания пользователя на ближайшем тике.
 func Kick(st *store.Store, telegramID int64) error {
-	return st.SetSetting(KickKey(telegramID), "1")
+	logx.Infof("uni", "moodle tg=%d: запрошен синк (kick) из %s", telegramID, callerOf())
+	if err := st.SetSetting(KickKey(telegramID), "1"); err != nil {
+		logx.Warnf("uni", "moodle tg=%d: kick не записан: %v", telegramID, err)
+		return err
+	}
+	return nil
 }
 
 // WakeKick просит rasp немедленно проверить и синхронизировать Moodle при обнаружении вейкворда.
 func WakeKick(st *store.Store) error {
-	return st.SetSetting(WakeKickKey, "1")
+	logx.Infof("uni", "moodle: запрошен внеочередной синк всех аккаунтов (wake_kick) из %s", callerOf())
+	if err := st.SetSetting(WakeKickKey, "1"); err != nil {
+		logx.Warnf("uni", "wake_kick не записан: %v", err)
+		return err
+	}
+	return nil
+}
+
+// callerOf — имя функции, которая вызвала Kick/WakeKick, для журнала.
+func callerOf() string {
+	pc, _, _, ok := runtime.Caller(2)
+	if !ok {
+		return "?"
+	}
+	name := runtime.FuncForPC(pc).Name()
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return name
+}
+
+// triggerKey — причина синка Moodle, которую кладём в контекст (для журнала).
+type triggerKey struct{}
+
+func withTrigger(ctx context.Context, trigger string) context.Context {
+	return context.WithValue(ctx, triggerKey{}, trigger)
+}
+
+// syncTrigger — что запустило синк: пинок, вейкворд, таймер; def — если причина не задана.
+func syncTrigger(ctx context.Context, def string) string {
+	if t, ok := ctx.Value(triggerKey{}).(string); ok && t != "" {
+		return t
+	}
+	return def
 }
 
 func consumeKick(st *store.Store, telegramID int64) bool {
@@ -76,23 +116,32 @@ func (s *Syncer) moodleTick(ctx context.Context) {
 	now := s.now()
 	wakeKicked := hasWakeKick(s.Store)
 	if wakeKicked {
+		logx.Infof("uni", "moodle: вейкворд на паре — внеочередной синк Moodle для %d аккаунтов", len(accs))
 		defer consumeWakeKick(s.Store)
 	}
 	for _, acc := range accs {
 		if ctx.Err() != nil {
 			return
 		}
-		kicked := consumeKick(s.Store, acc.TelegramID) || wakeKicked
-		if !kicked && !s.moodleDue(acc, now) {
+		kickedByUser := consumeKick(s.Store, acc.TelegramID)
+		if !kickedByUser && !wakeKicked && !s.moodleDue(acc, now) {
 			continue
 		}
 		s.mu.Lock()
 		last := s.lastFull[acc.TelegramID]
 		s.mu.Unlock()
-		full := kicked || now.Sub(last) >= moodleFull
-		if err := s.SyncMoodle(ctx, acc, full); err != nil {
-			logx.Warnf("uni", "moodle tg=%d: %v", acc.TelegramID, err)
+		full := kickedByUser || wakeKicked || now.Sub(last) >= moodleFull
+		trigger := "по таймеру, раз в 30 мин"
+		switch {
+		case kickedByUser:
+			trigger = "пинок kick (панель или бот)"
+		case wakeKicked:
+			trigger = "вейкворд на паре (wake_kick)"
+		case full:
+			trigger = "по таймеру, полный обход раз в 6 ч"
 		}
+		// Ошибку SyncMoodle уже записал с контекстом (tg, что делали).
+		_ = s.SyncMoodle(withTrigger(ctx, trigger), acc, full)
 	}
 }
 

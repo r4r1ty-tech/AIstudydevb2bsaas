@@ -4,15 +4,23 @@
 package websess
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -24,6 +32,7 @@ const (
 )
 
 type Session struct {
+	Name   string // подпись в подробном логе
 	Base   *url.URL
 	Client *http.Client
 	jar    http.CookieJar
@@ -68,18 +77,177 @@ func (s *Session) Request(ctx context.Context, method, path string, body io.Read
 	return req, nil
 }
 
-// Do выполняет запрос и читает тело целиком (с потолком).
+// Do выполняет запрос и читает тело целиком (с потолком). Каждый запрос —
+// строка в подробном логе (метод, путь, форма, статус, редиректы, время,
+// размер; пароли/sesskey/токены замаскированы). Ответ с ошибкой или
+// выкидыванием на страницу входа сохраняется снимком целиком.
 func (s *Session) Do(req *http.Request) (*http.Response, []byte, error) {
-	resp, err := s.Client.Do(req)
+	verbose := logx.Verbose()
+	start := time.Now()
+	form := ""
+	if verbose {
+		form = formForLog(req)
+	}
+	redirects := 0
+	resp, err := s.client(&redirects).Do(req)
+	comp := s.name()
 	if err != nil {
+		logx.Warnf(comp, "%s %s%s → ошибка за %s: %v", req.Method, MaskURL(req.URL), form, time.Since(start).Round(time.Millisecond), err)
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if verbose {
+		final := ""
+		if resp.Request != nil && resp.Request.URL.String() != req.URL.String() {
+			final = " → " + MaskURL(resp.Request.URL)
+		}
+		logx.Debugf(comp, "%s %s%s → %d%s редиректов=%d %s %dБ за %s%s", req.Method, MaskURL(req.URL), form, resp.StatusCode, final,
+			redirects, resp.Header.Get("Content-Type"), len(body), time.Since(start).Round(time.Millisecond), cookieNames(resp))
+		kicked := resp.Request != nil && strings.Contains(resp.Request.URL.Path, "/login") && !strings.Contains(req.URL.Path, "/login")
+		if resp.StatusCode >= 400 || kicked {
+			logx.Dump(comp+"-http", fmt.Sprintf("%d-%s", resp.StatusCode, strings.Trim(req.URL.Path, "/")), body)
+		}
+	}
 	if err != nil {
 		return resp, nil, err
 	}
 	return resp, body, nil
+}
+
+// Name — подпись в логе: «moodle», «lk».
+func (s *Session) name() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	return "websess"
+}
+
+// client — тот же клиент, но со счётчиком редиректов для лога.
+func (s *Session) client(n *int) *http.Client {
+	c := *s.Client
+	prev := c.CheckRedirect
+	c.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		*n = len(via)
+		if prev != nil {
+			return prev(r, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &c
+}
+
+var secretKeys = []string{"password", "pass", "sesskey", "logintoken", "token", "wstoken", "key", "secret", "authtoken", "sessiontoken"}
+
+func secretKey(k string) bool {
+	k = strings.ToLower(k)
+	for _, s := range secretKeys {
+		if k == s || strings.HasSuffix(k, "_"+s) || strings.HasSuffix(k, "["+s+"]") {
+			return true
+		}
+	}
+	return false
+}
+
+// MaskURL — адрес для лога без секретов в query.
+func MaskURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	c := *u
+	q := c.Query()
+	for k := range q {
+		if secretKey(k) {
+			q.Set(k, "***")
+		}
+	}
+	c.RawQuery = q.Encode()
+	if c.RawQuery == "" {
+		return c.Path
+	}
+	return c.Path + "?" + c.RawQuery
+}
+
+// formForLog — поля формы POST (urlencoded) для лога, секреты замаскированы.
+// multipart (ответы теста) — имена и значения тоже: это и надо дебажить.
+func formForLog(req *http.Request) string {
+	if req.Method == http.MethodGet || req.GetBody == nil {
+		return ""
+	}
+	rc, err := req.GetBody()
+	if err != nil {
+		return ""
+	}
+	defer rc.Close()
+	raw, _ := io.ReadAll(io.LimitReader(rc, 64<<10))
+	ct := req.Header.Get("Content-Type")
+	var parts []string
+	switch {
+	case strings.HasPrefix(ct, "application/x-www-form-urlencoded"):
+		vals, err := url.ParseQuery(string(raw))
+		if err != nil {
+			return fmt.Sprintf(" форма=%dБ", len(raw))
+		}
+		for k, vs := range vals {
+			for _, v := range vs {
+				if secretKey(k) {
+					v = "***"
+				}
+				parts = append(parts, k+"="+clip(v, 200))
+			}
+		}
+	case strings.HasPrefix(ct, "multipart/form-data"):
+		_, params, err := mime.ParseMediaType(ct)
+		if err != nil {
+			return fmt.Sprintf(" форма=%dБ", len(raw))
+		}
+		mr := multipart.NewReader(bytes.NewReader(raw), params["boundary"])
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			v, _ := io.ReadAll(io.LimitReader(part, 4096))
+			k := part.FormName()
+			val := string(v)
+			if secretKey(k) {
+				val = "***"
+			}
+			parts = append(parts, k+"="+clip(val, 200))
+		}
+	case strings.Contains(ct, "json"):
+		return " json=" + clip(maskJSON(string(raw)), 2000)
+	default:
+		return fmt.Sprintf(" тело=%dБ", len(raw))
+	}
+	sort.Strings(parts)
+	return " форма{" + strings.Join(parts, " ") + "}"
+}
+
+var jsonSecret = regexp.MustCompile(`(?i)"(password|sesskey|token|logintoken|secret)"\s*:\s*"[^"]*"`)
+
+func maskJSON(s string) string { return jsonSecret.ReplaceAllString(s, `"$1":"***"`) }
+
+func clip(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
+func cookieNames(resp *http.Response) string {
+	var names []string
+	for _, c := range resp.Cookies() {
+		names = append(names, c.Name)
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return " set-cookie=" + strings.Join(names, ",")
 }
 
 // Get — GET с Accept, тело и финальный ответ (после редиректов).

@@ -46,6 +46,7 @@ func New(base string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.Name = "lk"
 	return &Client{s: s}, nil
 }
 
@@ -101,7 +102,7 @@ func (c *Client) Login(ctx context.Context, login, password string) error {
 		return fmt.Errorf("lk: login post: %w", err)
 	}
 	if bytes.Contains(body, []byte("Неверный логин")) {
-		logx.Infof("lk", "login rejected")
+		logx.Debugf("lk", "login: отказ — сайт вернул «Неверный логин» (status=%d)", resp.StatusCode)
 		return ErrBadLogin
 	}
 	// Успешный вход ставит куку и редиректит; проверяем по API, а не по вёрстке.
@@ -112,7 +113,7 @@ func (c *Client) Login(ctx context.Context, login, password string) error {
 		}
 		return err
 	}
-	logx.Infof("lk", "login ok")
+	logx.Debugf("lk", "login: ok (сессия подтверждена через /personal/groups)")
 	return nil
 }
 
@@ -160,21 +161,22 @@ func fieldOrder(v url.Values) []string {
 	return append(action, rest...)
 }
 
-func (c *Client) getJSON(ctx context.Context, path string, out any) error {
+// getJSON тянет JSON и возвращает сырой ответ (для снимка, если разбор ничего не нашёл).
+func (c *Client) getJSON(ctx context.Context, path string, out any) ([]byte, error) {
 	resp, body, err := c.s.Get(ctx, path, "application/json")
 	if err != nil {
-		return fmt.Errorf("lk: GET %s: %w", path, err)
+		return nil, fmt.Errorf("lk: GET %s: %w", path, err)
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return ErrUnauthorized
+		return body, ErrUnauthorized
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("lk: GET %s: status %d", path, resp.StatusCode)
+		return body, fmt.Errorf("lk: GET %s: status %d", path, resp.StatusCode)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("lk: GET %s: decode: %w", path, err)
+		return body, fmt.Errorf("lk: GET %s: decode: %w", path, err)
 	}
-	return nil
+	return body, nil
 }
 
 type Group struct {
@@ -185,8 +187,14 @@ type Group struct {
 // Groups — группы студента (обычно одна).
 func (c *Client) Groups(ctx context.Context) ([]Group, error) {
 	var out []Group
-	err := c.getJSON(ctx, "/api/proxy/personal/groups", &out)
-	return out, err
+	if _, err := c.getJSON(ctx, "/api/proxy/personal/groups", &out); err != nil {
+		return out, err
+	}
+	logx.Debugf("lk", "группы: %d", len(out))
+	for _, g := range out {
+		logx.Debugf("lk", "группа id=%d %q", g.ID, g.Name)
+	}
+	return out, nil
 }
 
 type Year struct {
@@ -197,8 +205,15 @@ type Year struct {
 // Years — учебные годы ЛК; id нужен расписанию.
 func (c *Client) Years(ctx context.Context) ([]Year, error) {
 	var out []Year
-	err := c.getJSON(ctx, "/api/proxy/statements/student/years", &out)
-	return out, err
+	if _, err := c.getJSON(ctx, "/api/proxy/statements/student/years", &out); err != nil {
+		return out, err
+	}
+	names := make([]string, 0, len(out))
+	for _, y := range out {
+		names = append(names, fmt.Sprintf("%d=%s", y.ID, y.Name))
+	}
+	logx.Debugf("lk", "учебные годы: %d [%s]", len(out), strings.Join(names, ", "))
+	return out, nil
 }
 
 // CurrentYearID — год, в который попадает now (учебный год с сентября).
@@ -230,6 +245,8 @@ type Timetable struct {
 		StartDate string `json:"startDate"` // понедельник первой недели
 		Weeks     int    `json:"weeks"`
 	} `json:"currentYear"`
+
+	raw []byte // сырой ответ ЛК: снимок, если разбор не нашёл пар
 }
 
 type named struct {
@@ -280,9 +297,13 @@ func (c *Client) Timetable(ctx context.Context, yearID int64, week int, groupID 
 	q.Set("userType", "student")
 	q.Set("groupId", strconv.FormatInt(groupID, 10))
 	var out Timetable
-	if err := c.getJSON(ctx, "/api/proxy/timetable/get-timetable?"+q.Encode(), &out); err != nil {
+	raw, err := c.getJSON(ctx, "/api/proxy/timetable/get-timetable?"+q.Encode(), &out)
+	if err != nil {
 		return nil, err
 	}
+	out.raw = raw
+	logx.Debugf("lk", "расписание год=%d неделя=%d группа=%d: lessons=%d ietLessons=%d, начало года %s, hasSession=%v",
+		yearID, week, groupID, len(out.Lessons), len(out.IET), out.CurrentYear.StartDate, out.HasSession)
 	return &out, nil
 }
 

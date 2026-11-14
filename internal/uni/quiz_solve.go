@@ -6,9 +6,11 @@ import (
 	"html"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/access"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
@@ -124,12 +126,14 @@ func (s *Syncer) takeForced(id int64, prev, cur []model.MoodleItem) []model.Mood
 // и при наличии ключа LLM решает тест и отправляет отчёт, либо присылает текст вопросов.
 // forced — «Пройти» из панели: почему не вышло, человеку сообщаем всегда.
 func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.Client, it model.MoodleItem, forced bool) {
+	tag := quizTag{TG: acc.TelegramID, CMID: it.CMID, Page: quizNoPage}
+	logx.Infof("uni", "quiz %s: вход: курс=%q название=%q forced=%v", tag, it.Course, it.Title, forced)
 	solvedKey := fmt.Sprintf("quiz_solved:%d:%d", acc.TelegramID, it.CMID)
 	if v, ok, err := s.Store.GetSetting(solvedKey); err == nil && ok && v != "" {
-		return // тест уже успешно решён ранее
+		logx.Infof("uni", "quiz %s: выход: тест уже решён ранее (%s), пропуск", tag, v)
+		return
 	}
 	refuse := func(why string) {
-		logx.Warnf("uni", "quiz %d tg=%d: %s", it.CMID, acc.TelegramID, why)
 		if !forced {
 			return
 		}
@@ -154,12 +158,14 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	info, err := c.InspectQuiz(ctx, it.CMID)
 	if err != nil {
 		markRetry()
+		logx.Infof("uni", "quiz %s: выход: ошибка — страница теста не открылась: %v", tag, err)
 		refuse("не открылась страница теста: " + err.Error())
 		return
 	}
 	if !info.CanStart && info.InProgressAttemptID == 0 {
 		// Тест закрыт — повторять нечего.
 		_ = s.Store.SetSetting(quizFailKey(acc.TelegramID, it.CMID), "")
+		logx.Infof("uni", "quiz %s: выход: тест закрыт для попыток (can_start=false, незавершённой попытки нет)", tag)
 		refuse("Moodle не даёт начать попытку (тест закрыт или попытки кончились)")
 		return
 	}
@@ -167,6 +173,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	attempt, err := c.StartOrResumeAttempt(ctx, it.CMID)
 	if err != nil {
 		markRetry()
+		logx.Infof("uni", "quiz %s: выход: ошибка — попытка не началась: %v", tag, err)
 		refuse("попытка не началась: " + err.Error())
 		return
 	}
@@ -177,7 +184,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	for cur.NextPage > 0 {
 		next, err := c.GetAttemptPage(ctx, it.CMID, cur.AttemptID, cur.NextPage)
 		if err != nil {
-			logx.Warnf("uni", "quiz %d get page %d: %v", it.CMID, cur.NextPage, err)
+			logx.Warnf("uni", "quiz %s: страница попытки %d: %v", tag, cur.NextPage, err)
 			pageErr = fmt.Errorf("не загрузилась страница %d попытки: %w", cur.NextPage+1, err)
 			break
 		}
@@ -192,9 +199,17 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	}
 	hasLLM := len(chain) > 0
 	run := &quizlog.Run{At: s.now(), TelegramID: acc.TelegramID, CMID: it.CMID, Course: it.Course, Title: it.Title}
+	var chainNames []string
 	for _, t := range chain {
 		run.Chain = append(run.Chain, t.String())
+		chainNames = append(chainNames, t.String())
 	}
+	questions := 0
+	for _, p := range pages {
+		questions += len(p.Questions)
+	}
+	logx.Infof("uni", "quiz %s: страниц %d, вопросов %d, цепочка ИИ (%d): [%s], ошибка загрузки страниц: %v",
+		tag, len(pages), questions, len(chain), strings.Join(chainNames, " > "), pageErr)
 	started := time.Now()
 	saveRun := func() {
 		run.TookMS = time.Since(started).Milliseconds()
@@ -202,7 +217,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 			return
 		}
 		if err := quizlog.Write(quizlog.Dir(cfg.DBPath), run); err != nil {
-			logx.Warnf("uni", "quiz log: %v", err)
+			logx.Warnf("uni", "quiz %s: журнал: %v", tag, err)
 		}
 	}
 
@@ -211,6 +226,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		run.Status = quizlog.Failed
 		run.Error = pageErr.Error()
 		saveRun()
+		logx.Infof("uni", "quiz %s: выход: ошибка — %v", tag, pageErr)
 		s.reportQuizFailure(ctx, acc.TelegramID, it, pageErr, false)
 		return
 	}
@@ -219,6 +235,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		// Ключ ИИ не задан: отправляем полное содержание теста пользователю
 		parsedKey := fmt.Sprintf("quiz_parsed:%d:%d", acc.TelegramID, it.CMID)
 		if v, ok, err := s.Store.GetSetting(parsedKey); err == nil && ok && v != "" {
+			logx.Infof("uni", "quiz %s: выход: ИИ не настроен, текст теста уже отправлялся (%s), пропуск", tag, v)
 			return // уже отправляли текст вопросов, не спамим
 		}
 
@@ -249,8 +266,9 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		}
 		s.notify(ctx, acc.TelegramID, b.String())
 		if err := s.Store.SetSetting(parsedKey, s.now().Format(time.RFC3339)); err != nil {
-			logx.Warnf("uni", "save parsed key: %v", err)
+			logx.Warnf("uni", "quiz %s: сохранить отметку «текст отправлен»: %v", tag, err)
 		}
+		logx.Infof("uni", "quiz %s: выход: ИИ не настроен, отправлено содержание теста (вопросов %d)", tag, questions)
 		run.Status = quizlog.Parsed
 		saveRun()
 		return
@@ -259,7 +277,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	// Авторешение теста через LLM. Сначала решаем все страницы и только если
 	// на каждую пришли ответы — отправляем и завершаем попытку. Иначе попытка
 	// остаётся открытой (пустые ответы в Moodle не уходят), человеку — сообщение.
-	materials := s.collectCourseMaterials(it.Course)
+	materials := s.collectCourseMaterials(tag, it.Course)
 	allAnswers := make(map[int]moodle.QuizAnswer)
 	pageAnswers := make([]map[int]moodle.QuizAnswer, len(pages))
 	usedModels := map[string]bool{}
@@ -267,7 +285,9 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 
 	ws := s.webSearcher()
 	for i, p := range pages {
-		answers, res, pl, err := s.solvePage(ctx, c, ws, chain, it.Course, materials, p.Questions)
+		ptag := tag
+		ptag.Page = p.Page
+		answers, res, pl, err := s.solvePage(ctx, ptag, c, ws, chain, it.Course, materials, p.Questions)
 		pl.Page = p.Page
 		if res.Used != nil {
 			pl.Used = res.Used.String()
@@ -278,11 +298,13 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		}
 		if err != nil {
 			pl.Error = err.Error()
-			logx.Warnf("uni", "quiz %d solve page %d: %v", it.CMID, p.Page, err)
+			logx.Warnf("uni", "quiz %s: решение страницы: %v", ptag, err)
 			if solveErr == nil {
 				solveErr = err
 			}
 		}
+		logx.Debugf("uni", "quiz %s: страница решена: ответов %d из %d, модель %s, ошибка=%v",
+			ptag, len(answers), len(p.Questions), pl.Used, err)
 		pl.Answers = map[int]string{}
 		for _, q := range p.Questions {
 			if a, ok := answers[q.Slot]; ok {
@@ -300,6 +322,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		run.Status = quizlog.Failed
 		run.Error = solveErr.Error()
 		saveRun()
+		logx.Infof("uni", "quiz %s: выход: ошибка решения — %v", tag, solveErr)
 		s.reportQuizFailure(ctx, acc.TelegramID, it, solveErr, false)
 		return
 	}
@@ -322,23 +345,28 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		}
 
 		if _, err := c.SubmitAnswers(ctx, p, answers, 0); err != nil {
-			logx.Warnf("uni", "quiz %d submit page %d: %v", it.CMID, p.Page, err)
+			ptag := tag
+			ptag.Page = p.Page
+			logx.Warnf("uni", "quiz %s: сохранение ответов страницы: %v", ptag, err)
 			// Ответы страницы не сохранились — не завершаем попытку, иначе
 			// Moodle засчитает её с пустыми ответами.
 			run.Status = quizlog.Failed
 			run.Error = fmt.Sprintf("ответы страницы %d не сохранились: %v", i+1, err)
 			saveRun()
+			logx.Infof("uni", "quiz %s: выход: ошибка — ответы страницы %d не сохранились: %v", tag, i+1, err)
 			s.reportQuizFailure(ctx, acc.TelegramID, it, fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", i+1, err), i > 0)
 			return
 		}
+		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, p.Page)
 	}
 
 	result, err := c.FinishAttempt(ctx, it.CMID, attempt.AttemptID)
 	if err != nil {
-		logx.Warnf("uni", "quiz %d finish attempt: %v", it.CMID, err)
+		logx.Warnf("uni", "quiz %s: завершение попытки: %v", tag, err)
 		run.Status = quizlog.Failed
 		run.Error = "завершение попытки: " + err.Error()
 		saveRun()
+		logx.Infof("uni", "quiz %s: выход: ошибка — попытку не удалось завершить: %v", tag, err)
 		s.reportQuizFailure(ctx, acc.TelegramID, it, fmt.Errorf("ответы сохранены, но попытку не удалось завершить: %w", err), true)
 		return
 	}
@@ -348,8 +376,10 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	saveRun()
 
 	if err := s.Store.SetSetting(solvedKey, s.now().Format(time.RFC3339)); err != nil {
-		logx.Warnf("uni", "save solved key: %v", err)
+		logx.Warnf("uni", "quiz %s: сохранить отметку «решён»: %v", tag, err)
 	}
+	logx.Infof("uni", "quiz %s: выход: успех — оценка=%q, модели=%v, за %s",
+		tag, result.Grade, usedModelList(usedModels), time.Since(started).Round(time.Millisecond))
 
 	// Формируем отчёт пользователю
 	var b strings.Builder
@@ -382,35 +412,45 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 	s.notify(ctx, acc.TelegramID, b.String())
 }
 
-func (s *Syncer) collectCourseMaterials(course string) string {
+func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 	if s.Store == nil {
 		return ""
 	}
 	packs, err := s.Store.ListPacks()
 	if err != nil {
-		logx.Warnf("uni", "list packs: %v", err)
+		logx.Warnf("uni", "quiz %s: список лекций: %v", tag, err)
 		return ""
 	}
 
 	var b strings.Builder
 	const maxTotalChars = 32000
+	var used []string
 	for _, p := range packs {
 		if !matchDiscipline(p.Discipline, course) {
+			logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d не относится к курсу %q, пропуск", tag, p.ID, p.Discipline, p.Number, course)
 			continue
 		}
+		notesRunes, transRunes := 0, 0
 		if p.Dir != "" {
 			notesPath := filepath.Join(p.Dir, "notes.md")
 			if data, err := os.ReadFile(notesPath); err == nil && len(data) > 0 {
 				b.WriteString(fmt.Sprintf("\n--- Конспект лекции %s №%d ---\n", p.Discipline, p.Number))
 				b.Write(data)
 				b.WriteString("\n")
+				notesRunes = utf8.RuneCount(data)
 			}
 			transPath := filepath.Join(p.Dir, "transcript.txt")
 			if data, err := os.ReadFile(transPath); err == nil && len(data) > 0 {
 				b.WriteString(fmt.Sprintf("\n--- Транскрипт лекции %s №%d ---\n", p.Discipline, p.Number))
 				b.Write(data)
 				b.WriteString("\n")
+				transRunes = utf8.RuneCount(data)
 			}
+		}
+		logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d: конспект %d симв., транскрипт %d симв.",
+			tag, p.ID, p.Discipline, p.Number, notesRunes, transRunes)
+		if notesRunes+transRunes > 0 {
+			used = append(used, fmt.Sprintf("%s №%d", p.Discipline, p.Number))
 		}
 		if b.Len() >= maxTotalChars {
 			break
@@ -420,7 +460,18 @@ func (s *Syncer) collectCourseMaterials(course string) string {
 	if len(res) > maxTotalChars {
 		res = res[:maxTotalChars]
 	}
+	logx.Infof("uni", "quiz %s: материалы курса: %d симв. из пакетов [%s]", tag, utf8.RuneCountInString(res), strings.Join(used, ", "))
 	return res
+}
+
+// usedModelList — модели, которые отвечали на тест, по алфавиту (для лога).
+func usedModelList(m map[string]bool) string {
+	var ms []string
+	for k := range m {
+		ms = append(ms, k)
+	}
+	sort.Strings(ms)
+	return strings.Join(ms, ", ")
 }
 
 func matchDiscipline(discipline, course string) bool {

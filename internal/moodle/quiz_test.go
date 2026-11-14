@@ -439,3 +439,38 @@ func TestExtractQTextTableAndImage(t *testing.T) {
 		t.Fatalf("images=%v", imgs)
 	}
 }
+
+// Со страницы review достаём правильный ответ и отзыв; текст правильного
+// ответа не дублируется в отзыве.
+func TestParseReviewRightAnswerAndFeedback(t *testing.T) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(`<div id="region-main">
+<div class="que" id="question-5-1"><div class="info"><div class="state">Неверно</div><div class="grade">Баллов: 0,00 из 1,00</div></div><div class="outcome"><div class="feedback"><div class="rightanswer">Правильный ответ: 101</div></div></div></div>
+<div class="que" id="question-5-2"><div class="info"><div class="state">Частично правильно</div><div class="grade">Баллов: 0,50 из 1,00</div></div><div class="outcome"><div class="feedback"><div class="rightanswer">Правильный ответ: 0110</div><div class="specificfeedback">Ошибка на втором шаге</div></div></div></div>
+</div>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	qs := parseReview(doc)
+	if len(qs) != 2 {
+		t.Fatalf("вопросов = %d, ожидали 2: %+v", len(qs), qs)
+	}
+
+	q := qs[0]
+	if q.Slot != 1 || q.Status != "Неверно" || q.Grade != "Баллов: 0,00 из 1,00" {
+		t.Errorf("вопрос 1: %+v", q)
+	}
+	if q.RightAnswer != "Правильный ответ: 101" {
+		t.Errorf("RightAnswer = %q", q.RightAnswer)
+	}
+	if q.Feedback != "" {
+		t.Errorf("Feedback = %q, ожидали пусто (только правильный ответ)", q.Feedback)
+	}
+
+	q = qs[1]
+	if q.Slot != 2 || q.RightAnswer != "Правильный ответ: 0110" {
+		t.Errorf("вопрос 2: %+v", q)
+	}
+	if q.Feedback != "Ошибка на втором шаге" {
+		t.Errorf("Feedback = %q, ожидали отзыв без правильного ответа", q.Feedback)
+	}
+}

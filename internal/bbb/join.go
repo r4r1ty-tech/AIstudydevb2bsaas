@@ -2,6 +2,7 @@ package bbb
 
 import (
 	"context"
+	"errors"
 	"net/url"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
@@ -16,6 +17,33 @@ func redactURL(raw string) string {
 	u.Fragment = ""
 	u.User = nil
 	return u.String()
+}
+
+// scrubErr убирает query из URL внутри ошибки HTTP-клиента: там sessionToken
+// (/bigbluebutton/api/enter?sessionToken=…), а текст ошибки уходит в лог и в БД.
+func scrubErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) && ue != nil {
+		ue.URL = redactURL(ue.URL)
+	}
+	return err
+}
+
+// seatName — где сейчас вкладка: для логов захода и выхода.
+func seatName(lobby, room, greenlight bool) string {
+	switch {
+	case greenlight:
+		return "лобби Greenlight (ждём модератора)"
+	case lobby:
+		return "лобби BBB guestWait"
+	case room:
+		return "в комнате"
+	default:
+		return "неизвестно"
+	}
 }
 
 type Role int

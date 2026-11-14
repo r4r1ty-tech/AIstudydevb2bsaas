@@ -24,6 +24,7 @@ import (
 var pdfTimeout = 3 * time.Minute
 
 func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
+	started := time.Now()
 	// RECORDINGS_DIR на VDS относительный, а file://recordings/... Chromium
 	// читает как хост «recordings» и отвечает ERR_INVALID_URL.
 	abs, err := filepath.Abs(pdfPath)
@@ -34,6 +35,7 @@ func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 	pdfPath = abs
 	htmlPath := strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + ".html"
 	page := markdownHTML(title, md)
+	logx.Debugf("notes", "WritePDF: html path=%s bytes=%d notes_chars=%d", htmlPath, len(page), len([]rune(md)))
 	if err := os.WriteFile(htmlPath, []byte(page), 0644); err != nil {
 		logx.Errorf("notes", "WritePDF: write html %s: %v", htmlPath, err)
 		return fmt.Errorf("WritePDF: write html %s: %w", htmlPath, err)
@@ -59,6 +61,7 @@ func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 	)
 	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
+	logx.Debugf("notes", "WritePDF: chromium bin=%s out=%q", bin, truncate(string(out), 200))
 	if ctx.Err() != nil {
 		// Chrome иногда печатает файл и не выходит: готовый PDF важнее кода возврата.
 		if st, serr := os.Stat(pdfPath); serr == nil && st.Size() >= 100 {
@@ -77,7 +80,7 @@ func WritePDF(cfg *config.Config, title, md, pdfPath string) error {
 		logx.Errorf("notes", "WritePDF: pdf не записался path=%s stat_err=%v out=%q", pdfPath, err, truncate(string(out), 400))
 		return fmt.Errorf("pdf не записался")
 	}
-	logx.Infof("notes", "WritePDF: pdf built path=%s bytes=%d", pdfPath, st.Size())
+	logx.Infof("notes", "WritePDF: pdf built path=%s bytes=%d за %s", pdfPath, st.Size(), time.Since(started).Round(time.Millisecond))
 	return nil
 }
 

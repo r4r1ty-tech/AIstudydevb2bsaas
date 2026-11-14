@@ -20,12 +20,13 @@ import (
 //  2. если модель в ответе не уверена (confidence < quizUnsure) и предложила
 //     свой запрос "search" — ищем его и переспрашиваем страницу ещё раз.
 const (
-	quizSearchHits    = 5
-	quizSearchWorkers = 4
-	quizSearchTimeout = 15 * time.Second
-	quizQueryRunes    = 220
-	quizSnippetRunes  = 400
-	quizUnsure        = 0.6
+	quizSearchHits      = 5
+	quizSearchWorkers   = 4
+	quizSearchTimeout   = 15 * time.Second
+	quizQueryRunes      = 220
+	quizSnippetRunes    = 400
+	quizUnsure          = 0.6
+	quizLogSnippetRunes = 200 // сниппет в подробном логе
 )
 
 // webSearcher — поиск из Syncer.Web или из конфига; nil — поиск выключен.
@@ -81,11 +82,12 @@ func quizQuery(q moodle.QuizQuestion) string {
 
 // research ищет параллельно по запросам slot→query. Ошибки поиска не валят
 // решение: вопрос просто останется без подсказок из сети.
-func (s *Syncer) research(ctx context.Context, ws *websearch.Searcher, queries map[int]string) (map[int]webFinding, []quizlog.Search) {
+func (s *Syncer) research(ctx context.Context, tag quizTag, ws *websearch.Searcher, queries map[int]string) (map[int]webFinding, []quizlog.Search) {
 	out := map[int]webFinding{}
 	if ws == nil || len(queries) == 0 {
 		return out, nil
 	}
+	logx.Debugf("uni", "quiz %s: поиск, запросов %d", tag, len(queries))
 	var (
 		mu   sync.Mutex
 		logs []quizlog.Search
@@ -107,8 +109,9 @@ func (s *Syncer) research(ctx context.Context, ws *websearch.Searcher, queries m
 			l := quizlog.Search{Slot: slot, Query: q, Provider: who, Hits: len(hits)}
 			if err != nil {
 				l.Error = err.Error()
-				logx.Warnf("uni", "quiz search slot %d: %v", slot, err)
+				logx.Warnf("uni", "quiz %s: поиск slot=%d: %v", tag, slot, err)
 			}
+			logSearch(tag, slot, q, who, hits, err)
 			mu.Lock()
 			defer mu.Unlock()
 			logs = append(logs, l)
@@ -119,6 +122,29 @@ func (s *Syncer) research(ctx context.Context, ws *websearch.Searcher, queries m
 	}
 	wg.Wait()
 	return out, logs
+}
+
+// logSearch — подробный лог одного поискового запроса: поставщик, число
+// результатов и каждый результат (заголовок, адрес, начало сниппета).
+func logSearch(tag quizTag, slot int, q, who string, hits []websearch.Hit, err error) {
+	errText := ""
+	if err != nil {
+		errText = " ошибка=" + err.Error()
+	}
+	logx.Debugf("uni", "quiz %s: поиск slot=%d запрос=%q поставщик=%s результатов=%d%s",
+		tag, slot, q, who, len(hits), errText)
+	for i, h := range hits {
+		logx.Debugf("uni", "quiz %s: поиск slot=%d результат #%d title=%q url=%s snippet=%q",
+			tag, slot, i+1, h.Title, h.URL, truncRunes(h.Snippet, quizLogSnippetRunes))
+	}
+}
+
+// truncRunes — первые n рун строки (для логов).
+func truncRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // mergeFindings добавляет новые находки к старым без повторов по URL.

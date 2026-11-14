@@ -83,7 +83,23 @@ type pageAsk struct {
 	open   []string
 }
 
-func (s *Syncer) solvePage(ctx context.Context, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, questions []moodle.QuizQuestion) (map[int]moodle.QuizAnswer, llm.Result, quizlog.Page, error) {
+// quizTag — метка для подробного лога: по ней grep'ом находятся человек (tg),
+// тест (cmid) и страница попытки (page). Page < 0 — строка про тест целиком.
+type quizTag struct {
+	TG, CMID int64
+	Page     int
+}
+
+const quizNoPage = -1
+
+func (t quizTag) String() string {
+	if t.Page < 0 {
+		return fmt.Sprintf("tg=%d cmid=%d", t.TG, t.CMID)
+	}
+	return fmt.Sprintf("tg=%d cmid=%d page=%d", t.TG, t.CMID, t.Page)
+}
+
+func (s *Syncer) solvePage(ctx context.Context, tag quizTag, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, questions []moodle.QuizQuestion) (map[int]moodle.QuizAnswer, llm.Result, quizlog.Page, error) {
 	var pl quizlog.Page
 	var res llm.Result
 	if len(questions) == 0 {
@@ -98,10 +114,12 @@ func (s *Syncer) solvePage(ctx context.Context, c *moodle.Client, ws *websearch.
 		}
 	}
 	if len(unsup) > 0 {
+		logx.Warnf("uni", "quiz %s: тип не поддерживается: %s", tag, strings.Join(unsup, ", "))
 		return nil, res, pl, fmt.Errorf("решатель не умеет заполнять %s — пройди его руками", strings.Join(unsup, ", "))
 	}
 
-	qs := s.describeQuestionImages(ctx, c, questions, &pl)
+	qs := s.describeQuestionImages(ctx, tag, c, questions, &pl)
+	logx.Debugf("uni", "quiz %s: вопросов %d, цепочка ИИ %d, материалы %d симв.", tag, len(qs), len(chain), len([]rune(materials)))
 
 	pc := &pageCtx{web: map[int]webFinding{}, opened: map[string]string{}, allowed: map[string]bool{}, queried: map[string]bool{}}
 	if ws != nil {
@@ -112,51 +130,72 @@ func (s *Syncer) solvePage(ctx context.Context, c *moodle.Client, ws *websearch.
 				pc.queried[qq] = true
 			}
 		}
-		found, logs := s.research(ctx, ws, queries)
+		found, logs := s.research(ctx, tag, ws, queries)
 		pc.addFindings(found)
 		pl.Search = append(pl.Search, logs...)
+	} else {
+		logx.Debugf("uni", "quiz %s: веб-поиск выключен", tag)
 	}
 
 	final := map[int]moodle.QuizAnswer{}
 	refined := map[int]bool{}
+	rounds := 0
 	for round := 0; ; round++ {
-		ans, ask, r, err := s.askPage(ctx, chain, course, materials, qs, pc)
+		rn := round + 1
+		rounds = rn
+		ans, ask, r, err := s.askPage(ctx, tag, rn, chain, course, materials, qs, pc)
 		pl.Attempts = append(pl.Attempts, r.Attempts...)
 		if r.Text != "" {
-			pl.Raw += fmt.Sprintf("--- раунд %d ---\n%s\n", round+1, r.Text)
+			pl.Raw += fmt.Sprintf("--- раунд %d ---\n%s\n", rn, r.Text)
 		}
 		if err != nil {
 			if round == 0 {
 				return nil, r, pl, err
 			}
 			// Уточнение упало — остаёмся с ответами прошлых раундов.
-			logx.Warnf("uni", "quiz round %d: %v", round+1, err)
+			logx.Warnf("uni", "quiz %s: раунд %d: %v", tag, rn, err)
 			break
 		}
 		res = r
-		for slot, a := range ans {
-			if round > 0 {
-				refined[slot] = true
+		for _, q := range qs {
+			a, ok := ans[q.Slot]
+			if !ok {
+				continue
 			}
-			final[slot] = a
+			if round > 0 {
+				refined[q.Slot] = true
+				if prev, had := final[q.Slot]; had {
+					if was, now := formatAnswerText(q, prev), formatAnswerText(q, a); was != now {
+						logx.Debugf("uni", "quiz %s: раунд %d: слот %d поменялся: %q → %q", tag, rn, q.Slot, was, now)
+					}
+				}
+			}
+			final[q.Slot] = a
 		}
 		bad := validateAnswers(qs, final)
+		logValidation(tag, rn, qs, bad)
 		if round >= quizMaxRounds {
+			logx.Debugf("uni", "quiz %s: раунд %d: лимит раундов (%d), стоп", tag, rn, quizMaxRounds)
 			break
 		}
 		progressed := len(bad) > 0
 		pc.feedback = bad
-		if ws != nil && s.followUp(ctx, ws, pc, ask, &pl) {
+		if ws != nil && s.followUp(ctx, tag, ws, pc, ask, &pl) {
 			progressed = true
 		}
 		if !progressed {
+			logx.Debugf("uni", "quiz %s: раунд %d: уточнять нечего, стоп", tag, rn)
 			break
 		}
+		logx.Debugf("uni", "quiz %s: раунд %d: уточнение, непринятых слотов %d", tag, rn, len(bad))
 	}
 	for slot := range refined {
 		pl.Refined = append(pl.Refined, slot)
 	}
 	sort.Ints(pl.Refined)
+	if len(pl.Refined) > 0 {
+		logx.Debugf("uni", "quiz %s: на уточнении поменялись слоты %v", tag, pl.Refined)
+	}
 
 	if bad := validateAnswers(qs, final); len(bad) > 0 {
 		var why []string
@@ -165,24 +204,47 @@ func (s *Syncer) solvePage(ctx context.Context, c *moodle.Client, ws *websearch.
 				why = append(why, fmt.Sprintf("вопрос %d — %s", q.Slot, w))
 			}
 		}
+		logx.Debugf("uni", "quiz %s: страница не решена за %d раунд(ов): %s", tag, rounds, strings.Join(why, "; "))
 		return final, res, pl, fmt.Errorf("нет годного ответа: %s", strings.Join(why, "; "))
 	}
+	logx.Debugf("uni", "quiz %s: страница решена за %d раунд(ов), ответов %d", tag, rounds, len(final))
 	return final, res, pl, nil
+}
+
+// logValidation — подробный лог результата validateAnswers по раунду:
+// какие слоты годны и почему остальные нет.
+func logValidation(tag quizTag, round int, qs []moodle.QuizQuestion, bad map[int]string) {
+	var ok []int
+	var fails []string
+	for _, q := range qs {
+		if why, ko := bad[q.Slot]; ko {
+			fails = append(fails, fmt.Sprintf("слот %d — %s", q.Slot, why))
+		} else {
+			ok = append(ok, q.Slot)
+		}
+	}
+	none := "нет"
+	if len(fails) > 0 {
+		none = strings.Join(fails, "; ")
+	}
+	logx.Debugf("uni", "quiz %s: раунд %d: проверка: годны слоты %v; не годны: %s", tag, round, ok, none)
 }
 
 // followUp выполняет просьбы модели: новые запросы и чтение страниц.
 // true — появилось что-то новое.
-func (s *Syncer) followUp(ctx context.Context, ws *websearch.Searcher, pc *pageCtx, ask pageAsk, pl *quizlog.Page) bool {
+func (s *Syncer) followUp(ctx context.Context, tag quizTag, ws *websearch.Searcher, pc *pageCtx, ask pageAsk, pl *quizlog.Page) bool {
 	got := false
 	queries := map[int]string{}
 	for slot, q := range ask.search {
 		if !pc.queried[q] {
 			queries[slot] = q
 			pc.queried[q] = true
+		} else {
+			logx.Debugf("uni", "quiz %s: поиск slot=%d запрос=%q уже был, пропуск", tag, slot, q)
 		}
 	}
 	if len(queries) > 0 {
-		found, logs := s.research(ctx, ws, queries)
+		found, logs := s.research(ctx, tag, ws, queries)
 		for i := range logs {
 			logs[i].Refine = true
 		}
@@ -195,12 +257,15 @@ func (s *Syncer) followUp(ctx context.Context, ws *websearch.Searcher, pc *pageC
 	n := 0
 	for _, u := range ask.open {
 		if n >= quizMaxOpens {
+			logx.Debugf("uni", "quiz %s: открыть %s — лимит %d страниц за раунд, пропуск", tag, u, quizMaxOpens)
 			break
 		}
 		if !pc.allowed[u] {
+			logx.Debugf("uni", "quiz %s: открыть %s — адреса нет в выдаче, пропуск", tag, u)
 			continue // модель выдумала адрес или он не из выдачи
 		}
 		if _, done := pc.opened[u]; done {
+			logx.Debugf("uni", "quiz %s: открыть %s — уже открывали, пропуск", tag, u)
 			continue
 		}
 		n++
@@ -211,13 +276,16 @@ func (s *Syncer) followUp(ctx context.Context, ws *websearch.Searcher, pc *pageC
 		if err != nil {
 			l.Error = err.Error()
 			pc.opened[u] = "" // не пробуем снова
+			logx.Debugf("uni", "quiz %s: открыть %s: ошибка: %v", tag, u, err)
 		} else {
 			l.Hits = 1
 			pc.opened[u] = text
 			got = true
+			logx.Debugf("uni", "quiz %s: открыта страница %s: %d симв.", tag, u, len([]rune(text)))
 		}
 		pl.Search = append(pl.Search, l)
 	}
+	logx.Debugf("uni", "quiz %s: дополнительный поиск/чтение, есть новое=%v", tag, got)
 	return got
 }
 
@@ -240,19 +308,27 @@ const quizSysPrompt = "Ты — отличник университета. Ре�
 
 // askPage — один раунд: промпт со всем, что известно, ответ модели,
 // разбор JSON (с одной попыткой починки) и приведение ключей.
-func (s *Syncer) askPage(ctx context.Context, chain []llm.Target, course, materials string, qs []moodle.QuizQuestion, pc *pageCtx) (map[int]moodle.QuizAnswer, pageAsk, llm.Result, error) {
+func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []llm.Target, course, materials string, qs []moodle.QuizQuestion, pc *pageCtx) (map[int]moodle.QuizAnswer, pageAsk, llm.Result, error) {
 	var ask pageAsk
 	user := buildQuizPrompt(course, materials, qs, pc)
+	logx.Debugf("uni", "quiz %s: раунд %d: промпт %d симв. (вопросов %d, цепочка %d)", tag, round, len([]rune(user)), len(qs), len(chain))
+	dumpPrompt(tag, round, "", user)
 	res, err := llm.Ask(ctx, chain, quizSysPrompt, user)
+	logLLM(tag, round, "", res)
 	if err != nil {
 		return nil, ask, res, fmt.Errorf("ask llm: %w", err)
 	}
+	dumpReply(tag, round, "", res.Text)
 	parsed, perr := extractQuizJSON(res.Text)
 	if perr != nil {
 		// Модель ответила рассуждением — просим ещё раз только JSON.
-		logx.Warnf("uni", "quiz: ответ не JSON (%v), переспрашиваю", perr)
-		res2, err2 := llm.Ask(ctx, chain, quizSysPrompt, user+
-			"\n\nВНИМАНИЕ: твой прошлый ответ был не JSON. Верни ТОЛЬКО JSON-объект {\"answers\": [...]} по схеме, без пояснений и без отказов.")
+		logx.Warnf("uni", "quiz %s: раунд %d: ответ не JSON (%v), переспрашиваю", tag, round, perr)
+		repairUser := user +
+			"\n\nВНИМАНИЕ: твой прошлый ответ был не JSON. Верни ТОЛЬКО JSON-объект {\"answers\": [...]} по схеме, без пояснений и без отказов."
+		dumpPrompt(tag, round, "-repair", repairUser)
+		res2, err2 := llm.Ask(ctx, chain, quizSysPrompt, repairUser)
+		logLLM(tag, round, " (повтор «только JSON»)", res2)
+		dumpReply(tag, round, "-repair", res2.Text)
 		res2.Attempts = append(res.Attempts, res2.Attempts...)
 		res2.Text = res.Text + "\n--- повтор: только JSON ---\n" + res2.Text
 		res = res2
@@ -260,8 +336,12 @@ func (s *Syncer) askPage(ctx context.Context, chain []llm.Target, course, materi
 			return nil, ask, res, fmt.Errorf("ask llm: %w", err2)
 		}
 		if parsed, perr = extractQuizJSON(res2.Text); perr != nil {
+			logx.Warnf("uni", "quiz %s: раунд %d: повтор тоже не JSON: %v", tag, round, perr)
 			return nil, ask, res, fmt.Errorf("ответ ИИ не JSON: %w", perr)
 		}
+		logx.Debugf("uni", "quiz %s: раунд %d: JSON разобран после повтора, ответов %d", tag, round, len(parsed.Answers))
+	} else {
+		logx.Debugf("uni", "quiz %s: раунд %d: JSON разобран сразу, ответов %d", tag, round, len(parsed.Answers))
 	}
 
 	bySlot := map[int]moodle.QuizQuestion{}
@@ -273,11 +353,13 @@ func (s *Syncer) askPage(ctx context.Context, chain []llm.Target, course, materi
 	for _, a := range parsed.Answers {
 		q, ok := bySlot[a.Slot]
 		if !ok {
+			logx.Debugf("uni", "quiz %s: раунд %d: ответ на несуществующий слот %d, пропуск", tag, round, a.Slot)
 			continue
 		}
 		out[a.Slot] = normalizeAnswer(q, a)
-		if q := strings.TrimSpace(a.Search); q != "" {
-			ask.search[a.Slot] = q
+		logAnswer(tag, round, q, a, out[a.Slot])
+		if sq := strings.TrimSpace(a.Search); sq != "" {
+			ask.search[a.Slot] = sq
 		}
 		for _, u := range a.Open {
 			if u = strings.TrimSpace(u); u != "" {
@@ -285,7 +367,59 @@ func (s *Syncer) askPage(ctx context.Context, chain []llm.Target, course, materi
 			}
 		}
 	}
+	for _, q := range qs {
+		if sq, ok := ask.search[q.Slot]; ok {
+			logx.Debugf("uni", "quiz %s: раунд %d: модель просит поиск slot=%d запрос=%q", tag, round, q.Slot, sq)
+		}
+	}
+	for _, u := range ask.open {
+		logx.Debugf("uni", "quiz %s: раунд %d: модель просит открыть %s", tag, round, u)
+	}
 	return out, ask, res, nil
+}
+
+// dumpPrompt — снимок промпта раунда (system + user) в подробный лог.
+// stage — "" или "-repair" для повторного запроса «только JSON».
+func dumpPrompt(tag quizTag, round int, stage, user string) {
+	if !logx.Verbose() {
+		return
+	}
+	logx.Dump("quiz-llm", fmt.Sprintf("%s-r%d%s-prompt", tag, round, stage),
+		[]byte("=== system ===\n"+quizSysPrompt+"\n\n=== user ===\n"+user))
+}
+
+// dumpReply — снимок сырого ответа модели раунда в подробный лог.
+func dumpReply(tag quizTag, round int, stage, reply string) {
+	if !logx.Verbose() {
+		return
+	}
+	logx.Dump("quiz-llm", fmt.Sprintf("%s-r%d%s-reply", tag, round, stage), []byte(reply))
+}
+
+// logLLM — какая модель ответила и что было с каждой попыткой цепочки.
+// Ошибки попыток уже очищены от ключей в пакете llm.
+func logLLM(tag quizTag, round int, stage string, res llm.Result) {
+	used := "никто"
+	if res.Used != nil {
+		used = res.Used.String()
+	}
+	var b strings.Builder
+	for _, a := range res.Attempts {
+		fmt.Fprintf(&b, " [%s за %s", a.Target, a.Took.Round(time.Millisecond))
+		if a.Err != "" {
+			fmt.Fprintf(&b, " ошибка: %s", a.Err)
+		}
+		b.WriteString("]")
+	}
+	logx.Debugf("uni", "quiz %s: раунд %d%s: ответила модель %s, ответ %d симв., попыток %d:%s",
+		tag, round, stage, used, len([]rune(res.Text)), len(res.Attempts), b.String())
+}
+
+// logAnswer — ответ модели по слоту до приведения к ключам Moodle и после.
+func logAnswer(tag quizTag, round int, q moodle.QuizQuestion, raw llmAnswerItem, ans moodle.QuizAnswer) {
+	rawJSON, _ := json.Marshal(raw)
+	logx.Debugf("uni", "quiz %s: раунд %d: слот %d (%s): было %s → стало %q [choice=%q choices=%v matches=%v]",
+		tag, round, q.Slot, q.QType, rawJSON, formatAnswerText(q, ans), ans.Choice, ans.Choices, ans.Matches)
 }
 
 // choiceKey — ключ варианта в промпте. У radio это value; у checkbox value
@@ -517,7 +651,7 @@ const quizImagePrompt = "Это рисунок из вопроса универ�
 
 // describeQuestionImages — копии вопросов, где рисунки условия переписаны
 // текстом. Не вышло — так и пишем: модель хотя бы знает, что рисунок был.
-func (s *Syncer) describeQuestionImages(ctx context.Context, c *moodle.Client, qs []moodle.QuizQuestion, pl *quizlog.Page) []moodle.QuizQuestion {
+func (s *Syncer) describeQuestionImages(ctx context.Context, tag quizTag, c *moodle.Client, qs []moodle.QuizQuestion, pl *quizlog.Page) []moodle.QuizQuestion {
 	out := make([]moodle.QuizQuestion, len(qs))
 	copy(out, qs)
 	for i := range out {
@@ -528,11 +662,14 @@ func (s *Syncer) describeQuestionImages(ctx context.Context, c *moodle.Client, q
 			}
 			desc, err := s.describeImage(ctx, c, src)
 			if err != nil {
-				logx.Warnf("uni", "quiz image slot %d #%d: %v", q.Slot, n+1, err)
+				logx.Warnf("uni", "quiz %s: рисунок слота %d #%d: %v", tag, q.Slot, n+1, err)
+				logx.Debugf("uni", "quiz %s: рисунок слота %d #%d %s: не распознан: %v", tag, q.Slot, n+1, src, err)
 				pl.Notes = append(pl.Notes, fmt.Sprintf("вопрос %d, рисунок %d: %v", q.Slot, n+1, err))
 				q.Text += fmt.Sprintf("\nРисунок %d: (не удалось распознать)", n+1)
 				continue
 			}
+			logx.Debugf("uni", "quiz %s: рисунок слота %d #%d %s: распознан, %d симв., начало: %q",
+				tag, q.Slot, n+1, src, len([]rune(desc)), truncRunes(desc, 300))
 			pl.Notes = append(pl.Notes, fmt.Sprintf("вопрос %d, рисунок %d распознан (%d симв.)", q.Slot, n+1, len([]rune(desc))))
 			q.Text += fmt.Sprintf("\nРисунок %d:\n%s", n+1, desc)
 		}

@@ -51,6 +51,7 @@ func New(base string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.Name = "moodle"
 	return &Client{s: s}, nil
 }
 
@@ -121,18 +122,21 @@ func (c *Client) Login(ctx context.Context, login, password string) error {
 		return fmt.Errorf("moodle: login post: %w", err)
 	}
 	if onLoginPage(resp) {
-		logx.Infof("moodle", "login rejected status=%d", resp.StatusCode)
+		logx.Debugf("moodle", "login: отказ — после POST снова страница входа (status=%d), вероятно неверный логин или пароль", resp.StatusCode)
 		return ErrBadLogin
 	}
 	if key := findSesskey(body); key != "" {
+		logx.Debugf("moodle", "login: sesskey найден на странице после входа")
 		c.setSesskey(key)
 	} else if _, err := c.refreshSesskey(ctx); err != nil {
 		if errors.Is(err, ErrUnauthorized) {
+			logx.Debugf("moodle", "login: отказ — /my/ отдал страницу входа, sesskey не получен")
 			return ErrBadLogin
 		}
+		logx.Debugf("moodle", "login: ошибка после входа: %v", err)
 		return err
 	}
-	logx.Infof("moodle", "login ok")
+	logx.Debugf("moodle", "login: ok")
 	return nil
 }
 
@@ -159,8 +163,13 @@ func (c *Client) refreshSesskey(ctx context.Context) (string, error) {
 	}
 	key := findSesskey(body)
 	if key == "" {
+		logx.Warnf("moodle", "sesskey: на /my/ не найден (status=%d, %d байт)", resp.StatusCode, len(body))
+		if logx.Verbose() {
+			pageSnapshot("my", body)
+		}
 		return "", errors.New("moodle: no sesskey on dashboard")
 	}
+	logx.Debugf("moodle", "sesskey: найден на /my/")
 	c.setSesskey(key)
 	return key, nil
 }
@@ -222,6 +231,7 @@ func (c *Client) Ajax(ctx context.Context, method string, args any, out any) err
 		if json.Unmarshal(body, &one) == nil && one.Error {
 			replies = []ajaxReply{one}
 		} else {
+			logx.Warnf("moodle", "%s: ответ AJAX не разобран (%d байт): %v", method, len(body), err)
 			return fmt.Errorf("moodle: %s: decode: %w", method, err)
 		}
 	}
@@ -234,6 +244,7 @@ func (c *Client) Ajax(ctx context.Context, method string, args any, out any) err
 		if r.Exception != nil {
 			code, msg = r.Exception.ErrorCode, r.Exception.Message
 		}
+		logx.Warnf("moodle", "%s: ошибка AJAX errorcode=%q message=%q", method, code, msg)
 		switch code {
 		case "servicerequireslogin", "invalidsesskey", "requireloginerror", "sitepolicynotagreed":
 			c.setSesskey("")
@@ -279,6 +290,7 @@ func (c *Client) Courses(ctx context.Context) ([]Course, error) {
 			out = append(out, cr)
 		}
 	}
+	logx.Debugf("moodle", "курсы: всего %d, без скрытых %d", len(list), len(out))
 	return out, nil
 }
 
@@ -330,6 +342,7 @@ func (c *Client) Timeline(ctx context.Context, from, to time.Time) ([]Event, err
 		}
 		after = out.Events[len(out.Events)-1].ID
 	}
+	logx.Debugf("moodle", "лента с %s: событий %d", from.Format("2006-01-02"), len(all))
 	return all, nil
 }
 

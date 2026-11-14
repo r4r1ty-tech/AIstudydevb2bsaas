@@ -57,6 +57,7 @@ type Syncer struct {
 
 	mu       sync.Mutex
 	lastFull map[int64]time.Time
+	lkPrev   map[int64][]model.Lesson // прошлый разбор пар по tg — для диффа в журнале
 }
 
 func (s *Syncer) now() time.Time { return nowFn().In(s.loc()) }
@@ -90,6 +91,8 @@ func (s *Syncer) withSession(ctx context.Context, acc model.Account, c authClien
 	}
 	if raw, err := s.Vault.Open(acc.Session); err == nil {
 		c.Restore(raw)
+	} else if acc.Session != "" {
+		logx.Warnf("uni", "%s tg=%d: сохранённая сессия не открылась: %v", acc.Kind, acc.TelegramID, err)
 	}
 	login := func() error {
 		pass, err := s.Vault.Open(acc.Secret)
@@ -101,17 +104,35 @@ func (s *Syncer) withSession(ctx context.Context, acc model.Account, c authClien
 	err := errors.New("no session")
 	if acc.Session != "" {
 		err = fn()
+		if err == nil {
+			logx.Debugf("uni", "%s tg=%d: работа по сохранённой сессии", acc.Kind, acc.TelegramID)
+		}
 	}
 	if acc.Session == "" || errors.Is(err, unauthorized) {
-		logx.Infof("uni", "%s tg=%d: login", acc.Kind, acc.TelegramID)
-		if err = login(); err == nil {
+		why := "сохранённой сессии нет"
+		if acc.Session != "" {
+			why = "сохранённая сессия протухла"
+		}
+		logx.Infof("uni", "%s tg=%d (%s): новый вход по логину, %s", acc.Kind, acc.TelegramID, acc.Login, why)
+		err = login()
+		switch {
+		case err == nil:
+			logx.Infof("uni", "%s tg=%d (%s): вход по логину выполнен", acc.Kind, acc.TelegramID, acc.Login)
 			err = fn()
+		case errors.Is(err, badLogin):
+			logx.Warnf("uni", "%s tg=%d (%s): вход отклонён сайтом (неверный логин или пароль)", acc.Kind, acc.TelegramID, acc.Login)
+		default:
+			logx.Warnf("uni", "%s tg=%d (%s): вход по логину не удался: %v", acc.Kind, acc.TelegramID, acc.Login, err)
 		}
 	}
 	if sess, serr := s.Vault.Seal(c.Session()); serr == nil && sess != "" {
 		if perr := s.Store.SetAccountSession(acc.TelegramID, acc.Kind, sess); perr != nil {
-			logx.Warnf("uni", "save session: %v", perr)
+			logx.Warnf("uni", "%s tg=%d: сохранить сессию: %v", acc.Kind, acc.TelegramID, perr)
+		} else {
+			logx.Debugf("uni", "%s tg=%d: сессия сохранена", acc.Kind, acc.TelegramID)
 		}
+	} else if serr != nil {
+		logx.Warnf("uni", "%s tg=%d: сессия не зашифровалась: %v", acc.Kind, acc.TelegramID, serr)
 	}
 	switch {
 	case err == nil:
@@ -172,7 +193,7 @@ func (s *Syncer) Lessons(ctx context.Context) ([]model.Lesson, error) {
 	for _, acc := range accs {
 		ls, err := s.accountLessons(ctx, acc, !group)
 		if err != nil {
-			logx.Warnf("uni", "lessons tg=%d: %v", acc.TelegramID, err)
+			logx.Warnf("uni", "lk tg=%d (%s): синк расписания не удался: %v", acc.TelegramID, acc.Login, err)
 			if firstErr == nil {
 				firstErr = err
 			}
@@ -198,13 +219,18 @@ func (s *Syncer) Lessons(ctx context.Context) ([]model.Lesson, error) {
 func (s *Syncer) lkClient() (*lk.Client, error) { return lk.New(s.LKBase) }
 
 func (s *Syncer) accountLessons(ctx context.Context, acc model.Account, withGroup bool) ([]model.Lesson, error) {
+	began := time.Now()
 	c, err := s.lkClient()
 	if err != nil {
 		return nil, err
 	}
+	logx.Infof("uni", "lk tg=%d (%s): старт обхода расписания, своя группа=%v, триггер: %s",
+		acc.TelegramID, acc.Login, withGroup, syncTrigger(ctx, "расписание: обход rasp"))
 	var out []model.Lesson
+	var weeks, counts []int
 	err = s.withSession(ctx, acc, c, lk.ErrBadLogin, lk.ErrUnauthorized, func() error {
 		out = nil
+		weeks, counts = nil, nil
 		groups, err := c.Groups(ctx)
 		if err != nil {
 			return err
@@ -236,6 +262,7 @@ func (s *Syncer) accountLessons(ctx context.Context, acc model.Account, withGrou
 		if err != nil {
 			return err
 		}
+		logx.Debugf("uni", "lk tg=%d: группа id=%d, учебный год id=%d, неделя %d (год с %s)", acc.TelegramID, gid, yid, week, start)
 		for _, w := range []int{week, week + 1} {
 			tt, err := c.Timetable(ctx, yid, w, gid)
 			if err != nil {
@@ -245,15 +272,136 @@ func (s *Syncer) accountLessons(ctx context.Context, acc model.Account, withGrou
 			if err != nil {
 				return err
 			}
+			n := 0
 			for _, l := range ls {
 				if withGroup || l.Owner != 0 {
 					out = append(out, l)
+					n++
 				}
 			}
+			weeks = append(weeks, w)
+			counts = append(counts, n)
 		}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return out, err
+	}
+	added, removed, changed := s.diffLessons(acc.TelegramID, s.prevLessons(acc.TelegramID), out)
+	s.mu.Lock()
+	if s.lkPrev == nil {
+		s.lkPrev = map[int64][]model.Lesson{}
+	}
+	s.lkPrev[acc.TelegramID] = out
+	s.mu.Unlock()
+	perWeek := make([]string, 0, len(weeks))
+	for i, w := range weeks {
+		perWeek = append(perWeek, fmt.Sprintf("неделя %d: пар %d", w, counts[i]))
+	}
+	logx.Infof("uni", "lk tg=%d (%s): готово за %s, %s, диф: +%d -%d ~%d",
+		acc.TelegramID, acc.Login, time.Since(began).Round(time.Millisecond), strings.Join(perWeek, ", "), added, removed, changed)
+	return out, nil
+}
+
+func (s *Syncer) prevLessons(telegramID int64) []model.Lesson {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lkPrev[telegramID]
+}
+
+// diffLessons пишет в журнал, что изменилось в парах человека с прошлого обхода.
+// Первый обход после старта процесса — всё «новое», поэтому строки пойдут в DEBUG.
+func (s *Syncer) diffLessons(tg int64, prev, cur []model.Lesson) (added, removed, changed int) {
+	logf := logx.Infof
+	if len(prev) == 0 {
+		logf = logx.Debugf
+	}
+	pm, cm := groupLessons(prev), groupLessons(cur)
+	keySet := map[string]bool{}
+	for k := range pm {
+		keySet[k] = true
+	}
+	for k := range cm {
+		keySet[k] = true
+	}
+	keys := make([]string, 0, len(keySet))
+	for k := range keySet {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		p, c := pm[k], cm[k]
+		for i := 0; i < len(p) || i < len(c); i++ {
+			switch {
+			case i >= len(p):
+				added++
+				logf("uni", "lk tg=%d: + новая пара %s", tg, lessonTag(c[i]))
+			case i >= len(c):
+				removed++
+				logf("uni", "lk tg=%d: - пара пропала %s", tg, lessonTag(p[i]))
+			default:
+				if ch := lessonChanges(p[i], c[i]); len(ch) > 0 {
+					changed++
+					logf("uni", "lk tg=%d: ~ %s: %s", tg, lessonTag(c[i]), strings.Join(ch, "; "))
+				}
+			}
+		}
+	}
+	return added, removed, changed
+}
+
+// groupLessons — пары по дню, предмету, виду занятия, подгруппе и владельцу (ИОТ), по времени.
+func groupLessons(ls []model.Lesson) map[string][]model.Lesson {
+	m := map[string][]model.Lesson{}
+	for _, l := range ls {
+		k := fmt.Sprintf("%s|%s|%s|%d|%d", l.Date, l.Discipline, l.Type, l.Subgroup, l.Owner)
+		m[k] = append(m[k], l)
+	}
+	for _, v := range m {
+		sort.SliceStable(v, func(i, j int) bool { return v[i].Begin.Before(v[j].Begin) })
+	}
+	return m
+}
+
+func lessonTag(l model.Lesson) string {
+	who := "группа"
+	if l.Owner != 0 {
+		who = "ИОТ"
+	}
+	tag := fmt.Sprintf("%s %s-%s %q (%s, %s)", l.Date, l.Start, l.End, l.Discipline, l.Type, who)
+	if l.Subgroup != 0 {
+		tag += fmt.Sprintf(", подгруппа %d", l.Subgroup)
+	}
+	return tag
+}
+
+// lessonChanges — что поменялось в той же паре: время, аудитория, ссылка BBB, преподаватель, онлайн.
+// Сами ссылки в журнал не пишем: только факт появления, пропажи или смены.
+func lessonChanges(p, c model.Lesson) []string {
+	var ch []string
+	if p.Start != c.Start || p.End != c.End {
+		ch = append(ch, fmt.Sprintf("время %s-%s → %s-%s", p.Start, p.End, c.Start, c.End))
+	}
+	if p.Place != c.Place {
+		ch = append(ch, fmt.Sprintf("аудитория %q → %q", p.Place, c.Place))
+	}
+	switch {
+	case (p.BBBURL == "") != (c.BBBURL == ""):
+		if c.BBBURL != "" {
+			ch = append(ch, "ссылка BBB появилась")
+		} else {
+			ch = append(ch, "ссылка BBB пропала")
+		}
+	case p.BBBURL != c.BBBURL:
+		ch = append(ch, "ссылка BBB изменилась")
+	}
+	if p.Teacher != c.Teacher {
+		ch = append(ch, fmt.Sprintf("преподаватель %q → %q", p.Teacher, c.Teacher))
+	}
+	if p.Online != c.Online {
+		ch = append(ch, fmt.Sprintf("онлайн %v → %v", p.Online, c.Online))
+	}
+	return ch
 }
 
 // LKNameKey — ФИО человека из ЛК (страница /account), по Telegram id.
@@ -302,6 +450,7 @@ func (s *Syncer) yearStart(ctx context.Context, c *lk.Client, yearID, groupID in
 	if err := s.Store.SetSetting(key, start); err != nil {
 		logx.Warnf("uni", "cache year start: %v", err)
 	}
+	logx.Debugf("uni", "год id=%d: начало %s (из ЛК, закэшировано)", yearID, start)
 	return start, nil
 }
 
@@ -311,7 +460,15 @@ func (s *Syncer) moodleClient() (*moodle.Client, error) { return moodle.New(s.Mo
 
 // SyncMoodle обновляет задания пользователя. full — обойти все курсы целиком;
 // иначе перепроверить только ленту сроков и несданное с близким сроком.
-func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) error {
+func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) (err error) {
+	began := time.Now()
+	trigger := syncTrigger(ctx, "прямой вызов")
+	defer func() {
+		if err != nil && ctx.Err() == nil {
+			logx.Warnf("uni", "moodle tg=%d (%s): синк не удался за %s (full=%v, триггер: %s): %v",
+				acc.TelegramID, acc.Login, time.Since(began).Round(time.Millisecond), full, trigger, err)
+		}
+	}()
 	c, err := s.moodleClient()
 	if err != nil {
 		return err
@@ -323,10 +480,12 @@ func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) e
 	if len(prev) == 0 {
 		full = true
 	}
+	logx.Infof("uni", "moodle tg=%d (%s): старт синка, full=%v, триггер: %s, в базе элементов %d",
+		acc.TelegramID, acc.Login, full, trigger, len(prev))
 	var items []model.MoodleItem
 	err = s.withSession(ctx, acc, c, moodle.ErrBadLogin, moodle.ErrUnauthorized, func() error {
 		var err error
-		items, err = s.collectMoodle(ctx, c, prev, full)
+		items, err = s.collectMoodle(ctx, c, acc.TelegramID, prev, full)
 		if err != nil {
 			return err
 		}
@@ -347,19 +506,34 @@ func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) e
 		s.lastFull[acc.TelegramID] = s.now()
 		s.mu.Unlock()
 	}
+	added, removed, changed := s.logMoodleDiff(acc.TelegramID, prev, items)
 	if len(prev) > 0 {
 		s.announceNew(ctx, acc.TelegramID, prev, items)
 	}
-	logx.Infof("uni", "moodle tg=%d full=%v items=%d", acc.TelegramID, full, len(items))
+	tasks, tests, done := 0, 0, 0
+	for _, it := range items {
+		switch it.Kind {
+		case model.MoodleAssign:
+			tasks++
+		case model.MoodleQuiz:
+			tests++
+		}
+		if it.Finished() {
+			done++
+		}
+	}
+	logx.Infof("uni", "moodle tg=%d (%s): готово за %s, full=%v, триггер: %s; элементов %d (заданий %d, тестов %d, сдано %d), диф: +%d -%d ~%d",
+		acc.TelegramID, acc.Login, time.Since(began).Round(time.Millisecond), full, trigger, len(items), tasks, tests, done, added, removed, changed)
 	return nil
 }
 
-func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, prev []model.MoodleItem, full bool) ([]model.MoodleItem, error) {
+func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, tg int64, prev []model.MoodleItem, full bool) ([]model.MoodleItem, error) {
 	now := s.now()
 	courses, err := c.Courses(ctx)
 	if err != nil {
 		return nil, err
 	}
+	logx.Debugf("uni", "moodle tg=%d: курсов %d, полный обход=%v", tg, len(courses), full)
 	courseName := map[int64]string{}
 	for _, cr := range courses {
 		courseName[cr.ID] = cr.FullName
@@ -382,13 +556,15 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, prev []mod
 				if errors.Is(err, moodle.ErrUnauthorized) {
 					return nil, err
 				}
-				logx.Warnf("uni", "course %d: %v", cr.ID, err)
+				logx.Warnf("uni", "moodle tg=%d: курс id=%d %q: %v", tg, cr.ID, cr.FullName, err)
 				continue
 			}
+			logx.Debugf("uni", "moodle tg=%d: курс id=%d %q: элементов %d", tg, cr.ID, cr.FullName, len(list))
 			acts = append(acts, list...)
 			sleep(ctx, pageDelay)
 		}
 	} else {
+		logx.Debugf("uni", "moodle tg=%d: быстрый режим: курсы не обходятся, перепроверяются лента и несданное со сроком", tg)
 		for _, p := range prev {
 			byCM[p.CMID] = p
 		}
@@ -404,22 +580,27 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, prev []mod
 			known[p.CMID] = true
 		}
 	}
+	withCM, fromTL := 0, 0
 	for _, e := range events {
 		cm := e.CMID()
 		if cm == 0 {
 			continue
 		}
+		withCM++
 		inTimeline[cm] = e
 		if !known[cm] {
 			known[cm] = true
+			fromTL++
 			course := e.Course.FullName
 			if course == "" {
 				course = courseName[e.Course.ID]
 			}
+			logx.Debugf("uni", "moodle tg=%d: из ленты добавлен cmid=%d тип=%s %q", tg, cm, e.ModuleName, e.Name)
 			acts = append(acts, moodle.Activity{CMID: cm, CourseID: e.Course.ID, Course: course, Kind: e.ModuleName,
 				Name: strings.TrimSpace(strings.TrimSuffix(e.Name, " закрывается")), URL: e.URL})
 		}
 	}
+	logx.Debugf("uni", "moodle tg=%d: лента: событий с модулем %d, добавлено из ленты %d", tg, withCM, fromTL)
 	if !full {
 		// Перепроверяем: всё из ленты и несданное со сроком в окне −3…+14 дней.
 		for _, p := range prev {
@@ -443,7 +624,7 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, prev []mod
 			if errors.Is(err, moodle.ErrUnauthorized) || ctx.Err() != nil {
 				return nil, err
 			}
-			logx.Warnf("uni", "activity %d: %v", a.CMID, err)
+			logx.Warnf("uni", "moodle tg=%d: элемент cmid=%d тип=%s не разобран: %v", tg, a.CMID, a.Kind, err)
 			if old, ok := prevBy[a.CMID]; ok {
 				byCM[a.CMID] = old // оставляем прежнее
 			}
@@ -473,6 +654,82 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, prev []mod
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CMID < out[j].CMID })
 	return out, nil
+}
+
+// logMoodleDiff пишет в журнал, что изменилось в заданиях человека с прошлого синка:
+// появились, пропали, сменили название, статус, открытие, срок или условия.
+// Первый синк (в базе пусто) — всё «новое», поэтому строки уходят в DEBUG.
+func (s *Syncer) logMoodleDiff(tg int64, prev, cur []model.MoodleItem) (added, removed, changed int) {
+	logf := logx.Infof
+	if len(prev) == 0 {
+		logf = logx.Debugf
+	}
+	prevBy := make(map[int64]model.MoodleItem, len(prev))
+	for _, p := range prev {
+		prevBy[p.CMID] = p
+	}
+	curBy := make(map[int64]bool, len(cur))
+	for _, it := range cur {
+		curBy[it.CMID] = true
+		old, ok := prevBy[it.CMID]
+		if !ok {
+			added++
+			logf("uni", "moodle tg=%d: + новый элемент %s, статус %s, срок %s", tg, itemTag(it), it.Status, fmtAt(it.Due, s.loc()))
+			continue
+		}
+		if ch := s.moodleChanges(old, it); len(ch) > 0 {
+			changed++
+			logf("uni", "moodle tg=%d: ~ %s: %s", tg, itemTag(it), strings.Join(ch, "; "))
+		}
+	}
+	for _, p := range prev {
+		if !curBy[p.CMID] {
+			removed++
+			logx.Infof("uni", "moodle tg=%d: - элемент пропал %s (был статус %s, срок %s)", tg, itemTag(p), p.Status, fmtAt(p.Due, s.loc()))
+		}
+	}
+	return added, removed, changed
+}
+
+// moodleChanges — что поменялось в элементе: название, статус, открытие, срок, условия (было → стало).
+func (s *Syncer) moodleChanges(old, cur model.MoodleItem) []string {
+	var ch []string
+	if old.Title != cur.Title {
+		ch = append(ch, fmt.Sprintf("название %q → %q", old.Title, cur.Title))
+	}
+	if old.Status != cur.Status {
+		ch = append(ch, fmt.Sprintf("статус %s → %s", old.Status, cur.Status))
+	}
+	if a, b := fmtAt(old.Opens, s.loc()), fmtAt(cur.Opens, s.loc()); a != b {
+		ch = append(ch, fmt.Sprintf("открытие %s → %s", a, b))
+	}
+	if a, b := fmtAt(old.Due, s.loc()), fmtAt(cur.Due, s.loc()); a != b {
+		ch = append(ch, fmt.Sprintf("срок %s → %s", a, b))
+	}
+	if old.Todo != cur.Todo {
+		ch = append(ch, fmt.Sprintf("условия %q → %q", oneLine(old.Todo), oneLine(cur.Todo)))
+	}
+	return ch
+}
+
+func itemTag(it model.MoodleItem) string {
+	return fmt.Sprintf("cmid=%d %s %q (%s)", it.CMID, it.Kind, it.Title, it.Course)
+}
+
+func fmtAt(t *time.Time, loc *time.Location) string {
+	if t == nil {
+		return "-"
+	}
+	return t.In(loc).Format("02.01.2006 15:04")
+}
+
+// oneLine — многострочный текст в одну строку, не длиннее 160 символов (для журнала).
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", " | ")
+	if r := []rune(s); len(r) > 160 {
+		s = string(r[:160]) + "…"
+	}
+	return s
 }
 
 // announceNew — новое задание со сроком в будущем: короткое сообщение.
