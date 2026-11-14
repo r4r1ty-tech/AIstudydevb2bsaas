@@ -2,11 +2,16 @@ package lk
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
+
+// urlFieldRe — значения url в снимке ответа: там могут быть ссылки BBB с токенами.
+var urlFieldRe = regexp.MustCompile(`"url"\s*:\s*"[^"]*"`)
 
 // WeekOf — номер учебной недели для дня (неделя 1 начинается с startDate).
 func WeekOf(startDate string, day time.Time, loc *time.Location) (int, error) {
@@ -33,6 +38,7 @@ func (t *Timetable) ToLessons(week int, groupID, owner int64, loc *time.Location
 	if err != nil {
 		return nil, fmt.Errorf("lk: start date %q: %w", t.CurrentYear.StartDate, err)
 	}
+	logx.Debugf("lk", "разбор недели %d: lessons=%d ietLessons=%d, группа=%d, tg=%d", week, len(t.Lessons), len(t.IET), groupID, owner)
 	var out []model.Lesson
 	add := func(src TTLesson, iet bool) error {
 		w, ok := src.week(week)
@@ -72,9 +78,16 @@ func (t *Timetable) ToLessons(week int, groupID, owner int64, loc *time.Location
 			l.Subgroup = src.subgroup(groupID)
 		}
 		if l.Discipline == "" {
+			logx.Debugf("lk", "пара id=%d без дисциплины пропущена (неделя %d)", src.ID, week)
 			return nil
 		}
 		out = append(out, l)
+		who := "группа"
+		if iet {
+			who = "ИОТ"
+		}
+		logx.Debugf("lk", "пара id=%d %s: %s %s-%s %q тип=%q преподаватель=%q аудитория=%q подгруппа=%d онлайн=%v ссылка_bbb=%v",
+			src.ID, who, l.Date, l.Start, l.End, l.Discipline, l.Type, l.Teacher, l.Place, l.Subgroup, l.Online, l.BBBURL != "")
 		return nil
 	}
 	for _, l := range t.Lessons {
@@ -87,6 +100,14 @@ func (t *Timetable) ToLessons(week int, groupID, owner int64, loc *time.Location
 			if err := add(l, true); err != nil {
 				return nil, err
 			}
+		}
+	}
+	if len(out) == 0 {
+		logx.Warnf("lk", "неделя %d (группа=%d, tg=%d): разбор нашёл 0 пар (ответ: lessons=%d, ietLessons=%d)",
+			week, groupID, owner, len(t.Lessons), len(t.IET))
+		if logx.Verbose() && len(t.raw) > 0 {
+			logx.Dump("lk-timetable", fmt.Sprintf("week-%d-group-%d-tg-%d", week, groupID, owner),
+				urlFieldRe.ReplaceAll(t.raw, []byte(`"url":"<скрыто>"`)))
 		}
 	}
 	return out, nil

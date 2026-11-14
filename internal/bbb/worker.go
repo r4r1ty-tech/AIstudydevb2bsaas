@@ -44,6 +44,7 @@ type Worker struct {
 	noBBBAdmin   map[int64]struct{}   // пара → админу про «нет ссылки» уже писали
 	audioMiss    map[string]int       // пишущая вкладка не в аудио, тиков подряд
 	joining      map[string]struct{}
+	seatedAt     map[string]time.Time // когда вкладка села (лобби или комната) — для лога выхода
 	testPaused   bool
 	lectureNow   bool      // этот тик решил сидеть на паре — тяжёлые задачи ждут
 	testFailN    int       // неудачные тест-заходы подряд
@@ -92,9 +93,23 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		noBBBAdmin:   make(map[int64]struct{}),
 		audioMiss:    make(map[string]int),
 		joining:      make(map[string]struct{}),
+		seatedAt:     make(map[string]time.Time),
 	}
 	logx.Debugf("bbb", "NewWorker: joiner=%T hogs=%T", j, hogs)
 	return w
+}
+
+// lessonTag — «lesson=<id> <предмет>»: по нему грепается одна пара от захода до конспекта.
+func lessonTag(l model.Lesson) string {
+	return fmt.Sprintf("lesson=%d %s", l.ID, l.Discipline)
+}
+
+// packTag — «pack=<Dir> lesson=<id> <предмет>»: метка лекции для строк про пак.
+func packTag(p *model.LecturePack) string {
+	if p == nil {
+		return "pack=?"
+	}
+	return fmt.Sprintf("pack=%s lesson=%d %s", p.Dir, p.LessonID, p.Discipline)
 }
 
 // loadProxies reads the SOCKS5 list; every browser tab then gets its own exit.
@@ -108,11 +123,12 @@ func loadProxies(path string) *proxyrelay.Pool {
 		logx.Infof("bbb", "loadProxies: пусто (%s) — работаю напрямую", path)
 		return nil
 	}
+	logx.Infof("bbb", "loadProxies: прокси=%d из %s", len(list), path)
 	return proxyrelay.NewPool(list)
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	logx.Infof("bbb", "Run: start")
+	logx.Infof("bbb", "Run: старт, dry_run=%t joiner=%T", w.Cfg != nil && w.Cfg.BBBDryRun, w.Joiner)
 	// Сессий ещё нет: «в комнате» от прошлого процесса (рестарт, краш) — враньё.
 	if err := w.Store.ClearAllPresence(); err != nil {
 		logx.Warnf("bbb", "Run: clear presence: %v", err)
@@ -170,6 +186,7 @@ func (w *Worker) tick(ctx context.Context) {
 			for i := range users {
 				u := users[i]
 				if !u.Active(now) || !lesson.For(u) {
+					logx.Debugf("bbb", "tick: %s tg=%d пропуск: не активен или не его пара (active=%v)", lessonTag(lesson), u.TelegramID, u.Active(now))
 					continue
 				}
 				intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)
@@ -179,6 +196,7 @@ func (w *Worker) tick(ctx context.Context) {
 					continue
 				}
 				if !WantsJoin(intent) {
+					logx.Debugf("bbb", "tick: %s tg=%d пропуск: не хочет заходить (intent)", lessonTag(lesson), u.TelegramID)
 					continue
 				}
 				key := sessionKey(u.TelegramID, lesson.ID)
@@ -187,6 +205,7 @@ func (w *Worker) tick(ctx context.Context) {
 					continue
 				}
 				if w.isDone(key) {
+					logx.Debugf("bbb", "tick: %s tg=%d пропуск: уже вышел по времени, до конца пары не захожу", lessonTag(lesson), u.TelegramID)
 					continue
 				}
 				leave := w.ensureLeave(key, lesson.Finish)
@@ -195,6 +214,8 @@ func (w *Worker) tick(ctx context.Context) {
 					leave = lesson.Finish
 				}
 				if !ShouldBeInRoom(now, EnterAt(lesson.Begin, intent), leave) {
+					logx.Debugf("bbb", "tick: %s tg=%d вне окна захода: now=%s вход=%s выход=%s",
+						lessonTag(lesson), u.TelegramID, now.Format("15:04:05"), EnterAt(lesson.Begin, intent).Format("15:04:05"), leave.Format("15:04:05"))
 					if !now.Before(leave) {
 						w.leave(ctx, u.TelegramID, lesson.ID, key, "time")
 						w.markDone(key)
@@ -448,15 +469,16 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	if record {
 		role = RoleRecord
 	}
-	logx.Infof("bbb", "join key=%s tg=%d fio=%q record=%v url=%s", key, u.TelegramID, u.FIO, record, redactURL(url))
+	logx.Infof("bbb", "join: %s key=%s tg=%d роль=%s гость=%q url=%s", lessonTag(lesson), key, u.TelegramID, role, u.FIO, redactURL(url))
+	joinStart := time.Now()
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: u.FIO, Role: role})
 	if err != nil {
 		if ctx.Err() != nil {
 			// Остановка процесса посреди захода — не неудача захода.
-			logx.Infof("bbb", "ensureIn: join key=%s canceled", key)
+			logx.Infof("bbb", "ensureIn: join %s key=%s отменён после %s", lessonTag(lesson), key, time.Since(joinStart).Round(time.Millisecond))
 			return
 		}
-		logx.Errorf("bbb", "ensureIn: join key=%s: %v", key, err)
+		logx.Errorf("bbb", "ensureIn: join %s key=%s не вошёл за %s: %v", lessonTag(lesson), key, time.Since(joinStart).Round(time.Millisecond), err)
 		w.joinFail(ctx, u, lesson, key, now, err.Error())
 		return
 	}
@@ -521,8 +543,13 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	if state == model.PresenceLobby {
 		w.lobbyAt[key] = now
 	}
+	if w.seatedAt == nil {
+		w.seatedAt = make(map[string]time.Time)
+	}
+	w.seatedAt[key] = time.Now()
 	w.mu.Unlock()
-	logx.Infof("bbb", "seated key=%s state=%s tg=%d record=%v", key, state, u.TelegramID, recording)
+	logx.Infof("bbb", "seated: %s key=%s tg=%d состояние=%s (%s) роль=%s запись=%v вход=%s",
+		lessonTag(lesson), key, u.TelegramID, state, seatName(lobby, room, false), role, recording, time.Since(joinStart).Round(time.Millisecond))
 	if recGaveUp {
 		logx.Warnf("bbb", "lesson=%d: запись не стартовала %d раз — больше не пробую, пара без записи", lesson.ID, maxRecFails)
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("«%s» %s: запись не стартовала %d раз подряд — больше не перезахожу, пара останется без записи и конспекта.", lesson.Discipline, lesson.SlotLabel(), maxRecFails))
@@ -608,7 +635,11 @@ func (w *Worker) joinFail(ctx context.Context, u model.User, lesson model.Lesson
 	}); err != nil {
 		logx.Errorf("bbb", "joinFail: add event key=%s: %v", key, err)
 	}
-	logx.Warnf("bbb", "join fail %s tg=%d attempt=%d/%d: %s", key, u.TelegramID, n, maxJoinFails, reason)
+	next := "следующая попытка через " + (joinRetryBase * time.Duration(1<<(n-1))).String()
+	if stop {
+		next = "стоп до «Заходить» в панели"
+	}
+	logx.Warnf("bbb", "join fail: %s key=%s tg=%d попытка %d/%d: %s (%s)", lessonTag(lesson), key, u.TelegramID, n, maxJoinFails, reason, next)
 	switch {
 	case n == 1:
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не получилось зайти на «%s» — пробую ещё раз.", lesson.Discipline))
@@ -662,7 +693,7 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		if !wasLobby {
 			return // уже в комнате, ничего не изменилось
 		}
-		logx.Infof("bbb", "watchLobby: key=%s promoted to room", key)
+		logx.Infof("bbb", "lobby → комната: %s key=%s tg=%d, в лобби был %s", lessonTag(lesson), key, u.TelegramID, time.Since(since).Round(time.Second))
 		if err := w.Store.SetPresence(model.Presence{
 			TelegramID: u.TelegramID, LessonID: lesson.ID,
 			State: model.PresenceRoom, Message: "join", UpdatedAt: now,
@@ -704,7 +735,8 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 	}
 	w.lobbyAlertAt[key] = now
 	w.mu.Unlock()
-	logx.Warnf("bbb", "lobby wait key=%s tg=%d fio=%q", key, u.TelegramID, u.FIO)
+	logx.Warnf("bbb", "lobby wait: %s key=%s tg=%d гость=%q, в лобби %s (с начала пары %s)", lessonTag(lesson), key, u.TelegramID, u.FIO,
+		now.Sub(since).Round(time.Second), now.Sub(lesson.Begin).Round(time.Second))
 	notify.Admin(ctx, w.Cfg, fmt.Sprintf("не пустили из лобби: %s / %s / %d", lesson.Discipline, u.FIO, u.TelegramID))
 	if !alerted {
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
@@ -799,6 +831,8 @@ func (w *Worker) closeSession(ctx context.Context, telegramID, lessonID int64, k
 	logx.Debugf("bbb", "closeSession: key=%s tg=%d lesson=%d reason=%q", key, telegramID, lessonID, reason)
 	w.mu.Lock()
 	sess, ok := w.sessions[key]
+	seatedAt := w.seatedAt[key]
+	delete(w.seatedAt, key)
 	delete(w.sessions, key)
 	delete(w.lobbyAt, key)
 	delete(w.lobbyAlertAt, key)
@@ -827,7 +861,11 @@ func (w *Worker) closeSession(ctx context.Context, telegramID, lessonID int64, k
 		}
 	}
 	w.hogs().Release()
-	logx.Infof("bbb", "left key=%s tg=%d reason=%s", key, telegramID, reason)
+	var inRoom time.Duration
+	if !seatedAt.IsZero() {
+		inRoom = time.Since(seatedAt).Round(time.Second)
+	}
+	logx.Infof("bbb", "left: lesson=%d key=%s tg=%d причина=%q, сидели %s, событие=%v", lessonID, key, telegramID, reason, inRoom, event)
 }
 
 // forget чистит состояние ключей пар, ушедших из окна входа, и снимает их

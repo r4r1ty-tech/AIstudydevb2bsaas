@@ -11,8 +11,42 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
+
+// secretRes — sesskey в HTML страниц Moodle (JS-конфиг, ссылки, скрытые поля):
+// в снимки страниц не пишем.
+var secretRes = []*regexp.Regexp{
+	regexp.MustCompile(`"sesskey"\s*:\s*"[^"]*"`),
+	regexp.MustCompile(`sesskey=[^&"'\s<>]+`),
+	regexp.MustCompile(`name="sesskey"[^>]*value="[^"]*"`),
+	regexp.MustCompile(`value="[^"]*"[^>]*name="sesskey"`),
+}
+
+// dumpPage — снимок страницы Moodle (только при подробном логе), sesskey вычищен.
+func pageSnapshot(name string, page []byte) {
+	for _, re := range secretRes {
+		page = re.ReplaceAll(page, []byte("<скрыто>"))
+	}
+	logx.Dump("moodle-page", name, page)
+}
+
+// dumpDoc — то же для уже разобранного документа.
+func docSnapshot(name string, doc *goquery.Document) {
+	h, err := doc.Html()
+	if err != nil {
+		return
+	}
+	pageSnapshot(name, []byte(h))
+}
+
+func fmtDue(t *time.Time) string {
+	if t == nil {
+		return "-"
+	}
+	return t.Format("02.01.2006 15:04")
+}
 
 // Kinds — элементы курса, у которых бывают сроки и которые надо «сдавать».
 var Kinds = map[string]bool{
@@ -38,7 +72,23 @@ func (c *Client) CourseActivities(ctx context.Context, course Course) ([]Activit
 	if err != nil {
 		return nil, err
 	}
-	return parseCourse(doc, course), nil
+	out := parseCourse(doc, course)
+	logCoursePage(doc, course, len(out))
+	return out, nil
+}
+
+// logCoursePage — сколько секций и модулей на странице курса и сколько из них нужных.
+func logCoursePage(doc *goquery.Document, course Course, found int) {
+	sections := doc.Find("li.section").Length()
+	modules := doc.Find("li.activity").Length()
+	logx.Debugf("moodle", "страница курса id=%d %q: секций %d, модулей %d, задания/тесты/уроки/семинары %d",
+		course.ID, course.FullName, sections, modules, found)
+	if modules == 0 {
+		logx.Warnf("moodle", "страница курса id=%d %q: ни одного модуля (li.activity) — пусто или вёрстка сменилась", course.ID, course.FullName)
+		if logx.Verbose() {
+			docSnapshot(fmt.Sprintf("course-%d", course.ID), doc)
+		}
+	}
 }
 
 func parseCourse(doc *goquery.Document, course Course) []Activity {
@@ -51,6 +101,7 @@ func parseCourse(doc *goquery.Document, course Course) []Activity {
 			}
 		}
 		if !Kinds[kind] {
+			logx.Debugf("moodle", "курс id=%d: модуль тип=%s не нужен, пропущен", course.ID, kind)
 			return
 		}
 		a := li.Find(".activityname a, .activityinstance a").First()
@@ -60,6 +111,7 @@ func parseCourse(doc *goquery.Document, course Course) []Activity {
 			cmid, _ = strconv.ParseInt(li.AttrOr("data-id", strings.TrimPrefix(li.AttrOr("id", ""), "module-")), 10, 64)
 		}
 		if cmid == 0 {
+			logx.Warnf("moodle", "курс id=%d: модуль тип=%s без cmid, пропущен", course.ID, kind)
 			return
 		}
 		name := a.Find(".instancename").First().Clone()
@@ -68,11 +120,13 @@ func parseCourse(doc *goquery.Document, course Course) []Activity {
 		if title == "" {
 			title = clean(li.Find("[data-activityname]").First().AttrOr("data-activityname", ""))
 		}
+		sec := sectionName(li)
+		logx.Debugf("moodle", "курс id=%d: модуль cmid=%d тип=%s секция=%q название=%q", course.ID, cmid, kind, sec, title)
 		out = append(out, Activity{
 			CMID:     cmid,
 			CourseID: course.ID,
 			Course:   course.FullName,
-			Section:  sectionName(li),
+			Section:  sec,
 			Kind:     kind,
 			Name:     title,
 			URL:      href,
@@ -110,7 +164,27 @@ func (c *Client) ActivityDetail(ctx context.Context, a Activity, loc *time.Locat
 	if err != nil {
 		return Detail{}, err
 	}
-	return parseDetail(doc, a.Kind, loc), nil
+	d := parseDetail(doc, a.Kind, loc)
+	logDetail(doc, a, d)
+	return d, nil
+}
+
+// logDetail — что разобрано на странице элемента; пустой разбор задания/теста — Warnf и снимок.
+func logDetail(doc *goquery.Document, a Activity, d Detail) {
+	logx.Debugf("moodle", "элемент cmid=%d тип=%s %q: открыт=%s срок=%s статус=%s todo=%q",
+		a.CMID, a.Kind, a.Name, fmtDue(d.Opens), fmtDue(d.Due), d.Status, strings.Join(d.Todo, " | "))
+	if a.Kind != model.MoodleAssign && a.Kind != model.MoodleQuiz {
+		return
+	}
+	const blocks = "[data-region=activity-dates], .activity-dates, .automatic-completion-conditions, " +
+		"[data-region=completionrequirements], .completion-info, [data-action=toggle-manual-completion], " +
+		".submissionstatustable, .quizinfo, .quizattempt, .quizstartbuttondiv, .activity-description, #intro"
+	if doc.Find(blocks).Length() == 0 {
+		logx.Warnf("moodle", "элемент cmid=%d тип=%s: на странице нет ни дат, ни условий, ни блоков попыток — разбор пуст", a.CMID, a.Kind)
+		if logx.Verbose() {
+			docSnapshot(fmt.Sprintf("%s-%d", a.Kind, a.CMID), doc)
+		}
+	}
 }
 
 func parseDetail(doc *goquery.Document, kind string, loc *time.Location) Detail {

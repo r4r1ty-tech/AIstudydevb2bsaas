@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
@@ -20,11 +21,23 @@ type chatResp struct {
 }
 
 func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int, transcript, slides string) (string, error) {
-	logx.Debugf("notes", "Summarize: start discipline=%q lecture=%d transcript_chars=%d slides_chars=%d cfg_nil=%t", discipline, n, len(transcript), len(slides), cfg == nil)
-	if len(llm.DefaultChain(cfg)) == 0 {
-		logx.Errorf("notes", "Summarize: нет ключей ИИ (GEMINI_API_KEYS / OPENCODE_API_KEY / LLM_*)")
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	li := lectureOf(ctx)
+	tag := li.tag()
+	started := time.Now()
+	logx.Infof("notes", "Summarize: старт %s discipline=%q lecture=%d transcript_chars=%d slides_chars=%d", tag, discipline, n, len([]rune(transcript)), len([]rune(slides)))
+	chain := llm.DefaultChain(cfg)
+	if len(chain) == 0 {
+		logx.Errorf("notes", "Summarize: %s нет ключей ИИ (GEMINI_API_KEYS / OPENCODE_API_KEY / LLM_*)", tag)
 		return "", fmt.Errorf("нет ключей ИИ")
 	}
+	chainNames := make([]string, 0, len(chain))
+	for _, t := range chain {
+		chainNames = append(chainNames, t.Provider+"/"+t.Model)
+	}
+	logx.Debugf("notes", "Summarize: %s цепочка ИИ: %s", tag, strings.Join(chainNames, " -> "))
 	sys := "Ты составляешь подробный конспект университетской лекции на русском, Markdown. " +
 		"В САМОМ НАЧАЛЕ — отдельный блок «## Организационное»: что и к какому сроку сдавать, дедлайны, " +
 		"требования по лабам/курсовым/контрольным, тесты, Moodle, форма отчётности, переносы пар — " +
@@ -38,12 +51,30 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	user := fmt.Sprintf("Предмет: %s\nЛекция №%d\n\n--- Слайды ---\n%s\n\n--- Расшифровка ---\n%s\n",
 		discipline, n, emptyDash(slides), emptyDash(transcript))
 
-	content, err := Ask(ctx, cfg, sys, user)
+	if logx.Verbose() {
+		logx.Dump("notes-llm", li.dumpName()+"-prompt", []byte("=== system ===\n"+sys+"\n\n=== user ===\n"+user))
+	}
+	res, err := llm.Ask(ctx, chain, sys, user)
+	for i, a := range res.Attempts {
+		if a.Err != "" {
+			logx.Warnf("notes", "Summarize: %s попытка %d/%d %s/%s за %s: %s", tag, i+1, len(res.Attempts), a.Target.Provider, a.Target.Model, a.Took.Round(time.Millisecond), a.Err)
+		} else {
+			logx.Debugf("notes", "Summarize: %s попытка %d/%d %s/%s за %s ok", tag, i+1, len(res.Attempts), a.Target.Provider, a.Target.Model, a.Took.Round(time.Millisecond))
+		}
+	}
 	if err != nil {
-		logx.Errorf("notes", "Summarize: %v", err)
+		logx.Errorf("notes", "Summarize: %s за %s: %v", tag, time.Since(started).Round(time.Second), err)
 		return "", err
 	}
-	logx.Infof("notes", "Summarize: notes generated discipline=%q lecture=%d chars=%d", discipline, n, len(content))
+	content := res.Text
+	used := "?"
+	if res.Used != nil {
+		used = res.Used.Provider + "/" + res.Used.Model
+	}
+	if logx.Verbose() {
+		logx.Dump("notes-llm", li.dumpName()+"-reply", []byte(content))
+	}
+	logx.Infof("notes", "Summarize: %s конспект готов модель=%s символов=%d за %s", tag, used, len([]rune(content)), time.Since(started).Round(time.Second))
 	return content, nil
 }
 

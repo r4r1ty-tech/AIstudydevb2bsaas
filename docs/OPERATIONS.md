@@ -40,6 +40,9 @@
 | `LK_BASE_URL` / `MOODLE_BASE_URL` | `https://lk.ssau.ru` / `https://do.ssau.ru/moodle` | Адреса ЛК и Moodle (для стендов) |
 | `LOG_LEVEL` | `info` | `debug/info/warn/error` |
 | `LOG_FILE` | — | Если задан — писать лог ещё и в файл |
+| `LOG_DEBUG` / `LOG_DIR` | `1` / `logs` | Подробный лог: каждый процесс пишет всё, включая debug, в `LOG_DIR/<процесс>.log` независимо от `LOG_LEVEL` |
+| `LOG_DEBUG_MAX_MB` / `LOG_DEBUG_KEEP` | `50` / `20` | Ротация подробного лога: размер куска и сколько сжатых кусков хранить (`<процесс>.log.N.gz`) |
+| `LOG_DUMP_MAX_MB` | `500` | Потолок снимков `LOG_DIR/dumps` (HTML страниц тестов, промпты и ответы ИИ, ответы с ошибкой), старые удаляются |
 
 Шаблон — [../env.example](../env.example). `deploy/remote.sh` при первом деплое дописывает недостающие `LECTURE_PAUSE`, `VOSK_*`, `LOG_LEVEL`, `LOG_FILE` и — только при включённом туннеле — `WEBAPP_URL_FILE`.
 
@@ -155,6 +158,16 @@ journalctl -u ssau-bbb -f
 
 # все сервисы цели за окно времени
 journalctl -u ssau-tg -u ssau-rasp -u ssau-panel -u ssau-bbb --since "2 hours ago"
+
+# подробный лог процесса (всё, включая debug): rasp — синк ЛК/Moodle и решатель тестов,
+# bbb — лекции, запись, слайды, конспекты; panel, tg
+tail -f /opt/ssau-bot/logs/rasp.log
+# один человек / один тест (во всех строках решателя есть tg=… cmid=…)
+grep 'tg=600000001' /opt/ssau-bot/logs/rasp.log
+zgrep 'cmid=58084' /opt/ssau-bot/logs/rasp.log*
+# снимки: страницы теста (quiz-view, quiz-attempt, quiz-finish), промпты и ответы ИИ (quiz-llm), лекции (notes, notes-llm)
+ls -t /opt/ssau-bot/logs/dumps/quiz-attempt | head
+zcat /opt/ssau-bot/logs/dumps/quiz-llm/<файл>.gz | less
 
 # файл (после того как LOG_FILE прописан в .env)
 tail -f /opt/ssau-bot/ssau.log

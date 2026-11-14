@@ -134,25 +134,32 @@ func (d *DirectJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	logx.Debugf("bbb", "DirectJoiner.Join: role=%s fio=%q url=%s", req.Role, req.FIO, redactURL(req.URL))
+	started := time.Now()
+	nProxies := 0
+	if d != nil {
+		nProxies = d.Proxies.Len()
+	}
+	logx.Infof("bbb", "join: старт роль=%s гость=%q url=%s прокси=%d", req.Role, req.FIO, redactURL(req.URL), nProxies)
 
 	attempts := 1
-	if d != nil && d.Proxies.Len() > 0 {
+	if nProxies > 0 {
 		attempts = maxJoinAttempts
-		if d.Proxies.Len() < attempts {
-			attempts = d.Proxies.Len()
+		if nProxies < attempts {
+			attempts = nProxies
 		}
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
+			logx.Infof("bbb", "join: отменён на попытке %d/%d после %s: %v", attempt, attempts, time.Since(started).Round(time.Millisecond), err)
 			return nil, err
 		}
 		var slot *proxyrelay.Slot
-		if d != nil && d.Proxies.Len() > 0 {
+		if nProxies > 0 {
 			s, perr := d.Proxies.Next()
 			if perr != nil {
+				logx.Errorf("bbb", "join: нет живого прокси (попытка %d/%d): %v", attempt, attempts, perr)
 				if lastErr != nil {
 					return nil, fmt.Errorf("%w (последняя ошибка: %v)", perr, lastErr)
 				}
@@ -160,17 +167,24 @@ func (d *DirectJoiner) Join(ctx context.Context, req JoinReq) (Session, error) {
 			}
 			slot = s
 		}
+		proxy := slotRedacted(slot)
+		attemptStart := time.Now()
+		logx.Debugf("bbb", "join: попытка %d/%d через %s", attempt, attempts, proxy)
 
 		sess, err := d.joinOnce(ctx, req, slot)
 		if err == nil {
 			slot.OK()
+			logx.Infof("bbb", "join: вошёл за %s через %s (попытка %d/%d) гость=%q url=%s",
+				time.Since(started).Round(time.Millisecond), proxy, attempt, attempts, req.FIO, redactURL(req.URL))
 			return sess, nil
 		}
 		lastErr = err
 		slot.Fail()
-		logx.Warnf("bbb", "DirectJoiner.Join: attempt=%d/%d proxy=%q failed: %v",
-			attempt, attempts, slotRedacted(slot), err)
+		logx.Warnf("bbb", "join: попытка %d/%d через %s не удалась за %s: %v",
+			attempt, attempts, proxy, time.Since(attemptStart).Round(time.Millisecond), err)
 	}
+	logx.Errorf("bbb", "join: не вошёл за %s, попыток %d, гость=%q url=%s: %v",
+		time.Since(started).Round(time.Millisecond), attempts, req.FIO, redactURL(req.URL), lastErr)
 	return nil, lastErr
 }
 
@@ -230,12 +244,19 @@ func (d *DirectJoiner) joinOnce(ctx context.Context, req JoinReq, slot *proxyrel
 		authedCh:    make(chan struct{}),
 		ddpDone:     make(chan struct{}),
 		voiceReady:  make(chan struct{}),
+		startedAt:   time.Now(),
 	}
 
+	stepStart := time.Now()
 	if err := s.stepEnter(ctx); err != nil {
+		logx.Warnf("bbb", "join: шаг enter не прошёл за %s гость=%q: %v", time.Since(stepStart).Round(time.Millisecond), req.FIO, err)
 		_ = s.Close()
 		return nil, err
 	}
+	s.mu.Lock()
+	seat := seatName(s.inLobby, s.inRoom, s.waitGreen)
+	s.mu.Unlock()
+	logx.Infof("bbb", "join: шаг enter за %s → %s (роль=%s)", time.Since(stepStart).Round(time.Millisecond), seat, req.Role)
 	return s, nil
 }
 
@@ -259,6 +280,8 @@ type directSession struct {
 	enter        enterInfo
 	greeted      bool
 	lastErr      error
+	startedAt    time.Time // когда начался заход (для лога «сколько были в комнате»)
+	ddpDialAt    time.Time // когда открыли DDP WebSocket (для лога validateAuthToken)
 
 	// DDP WebSocket state
 	ddpWS      *websocket.Conn
@@ -282,6 +305,7 @@ type directSession struct {
 	allSlides   map[string]slideMeta
 	presOrder   []string
 	savedSlides map[string]string
+	presLogged  string // последний состав презентаций, записанный в лог (под presMu)
 	slidesSub   chan struct{}
 	slidesOnce  sync.Once
 
@@ -306,7 +330,8 @@ func (s *directSession) httpDo(ctx context.Context, req *http.Request) (*http.Re
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, nil, err
+		// Ошибка клиента содержит URL целиком, а там sessionToken — режем query.
+		return nil, nil, scrubErr(err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -321,13 +346,17 @@ func (s *directSession) stepEnter(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("invalid url: %w", err)
 	}
+	getStart := time.Now()
 	resp, body, err := s.httpDo(ctx, req)
 	if err != nil {
+		logx.Warnf("bbb", "stepEnter: GET комнаты за %s не удался: %v", time.Since(getStart).Round(time.Millisecond), err)
 		return fmt.Errorf("get room: %w", err)
 	}
 
 	curURL := resp.Request.URL
+	logx.Debugf("bbb", "stepEnter: GET комнаты HTTP %d за %s url=%s", resp.StatusCode, time.Since(getStart).Round(time.Millisecond), redactURL(curURL.String()))
 	if tok := curURL.Query().Get("sessionToken"); tok != "" {
+		logx.Infof("bbb", "stepEnter: комната отдала сессию сразу (без формы Greenlight) за %s", time.Since(getStart).Round(time.Millisecond))
 		return s.enterWithToken(ctx, curURL, tok)
 	}
 
@@ -342,15 +371,21 @@ func (s *directSession) stepEnter(ctx context.Context) error {
 			postReq.Header.Set("Origin", curURL.Scheme+"://"+curURL.Host)
 			postReq.Header.Set("Referer", curURL.String())
 
+			logx.Infof("bbb", "stepEnter: форма Greenlight найдена, отправляю имя гостя=%q → %s", s.req.FIO, redactURL(formAction))
+			postStart := time.Now()
 			resp2, body2, err := s.httpDo(ctx, postReq)
 			if err != nil {
+				logx.Warnf("bbb", "stepEnter: POST формы за %s не удался: %v", time.Since(postStart).Round(time.Millisecond), err)
 				return fmt.Errorf("post join form: %w", err)
 			}
 			curURL = resp2.Request.URL
 			body = body2
+			logx.Infof("bbb", "stepEnter: форма отправлена за %s HTTP %d url=%s", time.Since(postStart).Round(time.Millisecond), resp2.StatusCode, redactURL(curURL.String()))
 			if tok := curURL.Query().Get("sessionToken"); tok != "" {
 				return s.enterWithToken(ctx, curURL, tok)
 			}
+		} else {
+			logx.Debugf("bbb", "stepEnter: формы входа на странице нет")
 		}
 	}
 
@@ -363,13 +398,19 @@ func (s *directSession) stepEnter(ctx context.Context) error {
 		s.waitGreen = true
 		s.finalURL = curURL
 		s.mu.Unlock()
-		logx.Infof("bbb", "directSession: Greenlight waiting room url=%s", redactURL(curURL.String()))
+		reason := "текст лобби на странице"
+		if strings.Contains(curURL.Path, "guestWait") {
+			reason = "путь guestWait"
+		}
+		logx.Infof("bbb", "stepEnter: Greenlight — лобби, жду модератора (%s) url=%s", reason, redactURL(curURL.String()))
 		return nil
 	}
 
 	if resp.StatusCode >= 400 {
+		logx.Warnf("bbb", "stepEnter: комната ответила HTTP %d url=%s — ни токена, ни лобби", resp.StatusCode, redactURL(curURL.String()))
 		return fmt.Errorf("комната вернула HTTP %d", resp.StatusCode)
 	}
+	logx.Warnf("bbb", "stepEnter: нет sessionToken и не похоже на лобби url=%s (HTTP %d, %d байт)", redactURL(curURL.String()), resp.StatusCode, len(body))
 	return fmt.Errorf("не удалось получить sessionToken со страницы %s", redactURL(curURL.String()))
 }
 
@@ -436,10 +477,14 @@ func containsAny(haystack string, needles []string) bool {
 
 func (s *directSession) enterWithToken(ctx context.Context, finalURL *url.URL, token string) error {
 	base := fmt.Sprintf("%s://%s", finalURL.Scheme, finalURL.Host)
+	enterStart := time.Now()
 	er, err := s.fetchEnter(ctx, base, token)
 	if err != nil {
+		logx.Warnf("bbb", "enter: запрос за %s не удался: %v", time.Since(enterStart).Round(time.Millisecond), err)
 		return err
 	}
+	logx.Infof("bbb", "enter: ответ за %s returncode=%s guestStatus=%s messageKey=%s userId=%s",
+		time.Since(enterStart).Round(time.Millisecond), er.ReturnCode, er.GuestStatus, er.MessageKey, er.InternalUserID)
 	if er.ReturnCode != "SUCCESS" {
 		msg := er.Message
 		if msg == "" {
@@ -448,10 +493,12 @@ func (s *directSession) enterWithToken(ctx context.Context, finalURL *url.URL, t
 		if msg == "" {
 			msg = "returncode=" + er.ReturnCode
 		}
+		logx.Warnf("bbb", "enter: BBB не пустил: %s", msg)
 		return fmt.Errorf("bbb enter: %s", msg)
 	}
 	switch strings.ToUpper(er.GuestStatus) {
 	case "DENY":
+		logx.Warnf("bbb", "enter: модератор отклонил вход гостя=%q", s.req.FIO)
 		return fmt.Errorf("модератор отклонил вход")
 	case "WAIT":
 		s.mu.Lock()
@@ -464,7 +511,7 @@ func (s *directSession) enterWithToken(ctx context.Context, finalURL *url.URL, t
 		s.finalURL = finalURL
 		s.enter = er
 		s.mu.Unlock()
-		logx.Infof("bbb", "directSession: BBB guestWait lobby user=%s", er.InternalUserID)
+		logx.Infof("bbb", "enter: guestWait — лобби, модератор ещё не пустил гостя=%q userId=%s", s.req.FIO, er.InternalUserID)
 		return nil
 	}
 
@@ -482,11 +529,30 @@ func (s *directSession) enterWithToken(ctx context.Context, finalURL *url.URL, t
 	}
 	if s.req.Role == RoleRecord {
 		// Kick off listen-only audio right away; failures are retried by EnsureAudio.
+		audioStart := time.Now()
 		if !s.EnsureAudio(ctx) {
-			logx.Warnf("bbb", "directSession: initial listen-only audio setup deferred")
+			logx.Warnf("bbb", "webrtc: listen-only за %s не поднялся — отложен, повторю на тиках", time.Since(audioStart).Round(time.Millisecond))
+		} else {
+			logx.Infof("bbb", "webrtc: listen-only поднят за %s (роль=record)", time.Since(audioStart).Round(time.Millisecond))
 		}
 	}
 	return nil
+}
+
+// RTPPackets — сколько RTP-пакетов пришло по listen-only треку текущей WebRTC-сессии
+// (для лога записи). Если звук сейчас переподнимается — 0: не ждём up to 15 с.
+func (s *directSession) RTPPackets() uint64 {
+	if s == nil {
+		return 0
+	}
+	if !s.audioMu.TryLock() {
+		return 0
+	}
+	defer s.audioMu.Unlock()
+	if s.audioSess == nil {
+		return 0
+	}
+	return s.audioSess.rtpPackets.Load()
 }
 
 func (s *directSession) fetchEnter(ctx context.Context, base, token string) (enterInfo, error) {
@@ -621,10 +687,16 @@ func (s *directSession) connectDDP(ctx context.Context) error {
 	s.mu.Unlock()
 
 	wsURL := fmt.Sprintf("%s://%s/html5client/sockjs/123/abcdefgh/websocket", scheme, host)
+	dialStart := time.Now()
 	ws, err := s.dialWebSocket(ctx, wsURL, base, s.cookieHeaderFor(finalURL))
 	if err != nil {
+		logx.Warnf("bbb", "ddp: WebSocket %s не открылся за %s: %v", scheme+"://"+host, time.Since(dialStart).Round(time.Millisecond), err)
 		return fmt.Errorf("ddp dial: %w", err)
 	}
+	s.mu.Lock()
+	s.ddpDialAt = time.Now()
+	s.mu.Unlock()
+	logx.Debugf("bbb", "ddp: WebSocket открыт за %s host=%s", time.Since(dialStart).Round(time.Millisecond), host)
 
 	s.mu.Lock()
 	s.ddpWS = ws
@@ -638,6 +710,7 @@ func (s *directSession) connectDDP(ctx context.Context) error {
 	defer cancel()
 	select {
 	case <-s.authedCh:
+		logx.Infof("bbb", "ddp: авторизован, в комнате (с момента WebSocket %s)", time.Since(dialStart).Round(time.Millisecond))
 		return nil
 	case <-s.ddpDone:
 		s.mu.Lock()
@@ -721,8 +794,14 @@ func (s *directSession) ddpReadLoop(enter enterInfo) {
 			if !s.closed && s.lastErr == nil {
 				s.lastErr = err
 			}
+			wasClosed := s.closed
 			s.inRoom = false
 			s.mu.Unlock()
+			if !wasClosed {
+				logx.Warnf("bbb", "ddp: WebSocket оборвался гость=%q: %v", s.req.FIO, err)
+			} else {
+				logx.Debugf("bbb", "ddp: читалка остановлена после закрытия: %v", err)
+			}
 			return
 		}
 		switch {
@@ -739,8 +818,12 @@ func (s *directSession) ddpReadLoop(enter enterInfo) {
 			if !s.closed {
 				s.lastErr = fmt.Errorf("sockjs closed: %s", frame)
 			}
+			wasClosed := s.closed
 			s.inRoom = false
 			s.mu.Unlock()
+			if !wasClosed {
+				logx.Warnf("bbb", "ddp: сервер закрыл сессию гость=%q кадр=%s", s.req.FIO, truncateFrame(frame))
+			}
 			return
 		case strings.HasPrefix(frame, "a["):
 			var msgs []string
@@ -758,18 +841,26 @@ func (s *directSession) ddpReadLoop(enter enterInfo) {
 					go func() {
 						cctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 						defer cancel()
+						validateStart := time.Now()
 						_, err := s.callDDP(cctx, "validateAuthToken", []any{
 							enter.MeetingID, enter.InternalUserID, enter.AuthToken, enter.ExternUserID,
 						})
 						if err != nil {
+							logx.Warnf("bbb", "ddp: validateAuthToken за %s не прошёл: %v", time.Since(validateStart).Round(time.Millisecond), err)
 							s.mu.Lock()
 							s.lastErr = err
 							s.mu.Unlock()
 							return
 						}
+						s.mu.Lock()
+						dialAt := s.ddpDialAt
+						s.mu.Unlock()
+						logx.Infof("bbb", "ddp: validateAuthToken ok за %s (от открытия сокета %s)",
+							time.Since(validateStart).Round(time.Millisecond), time.Since(dialAt).Round(time.Millisecond))
 						s.authedOnce.Do(func() { close(s.authedCh) })
 						if !subStarted {
 							subStarted = true
+							logx.Debugf("bbb", "ddp: подписки на коллекции: %s", strings.Join(subs, ","))
 							for idx, name := range subs {
 								_ = s.sendDDP(map[string]any{
 									"msg":    "sub",
@@ -849,7 +940,10 @@ func (s *directSession) handleDDPCollection(msgType string, m map[string]any, se
 				if joined, ok := fields["joined"].(bool); ok {
 					s.voiceJoined.Store(joined)
 					if joined {
-						s.voiceOnce.Do(func() { close(s.voiceReady) })
+						s.voiceOnce.Do(func() {
+							close(s.voiceReady)
+							logx.Infof("bbb", "ddp: голос в комнате подключён (voiceUsers joined) гость=%q", s.req.FIO)
+						})
 					}
 				}
 			}
@@ -866,6 +960,7 @@ func (s *directSession) handleDDPCollection(msgType string, m map[string]any, se
 						s.lastErr = fmt.Errorf("исключён из комнаты")
 					}
 					s.mu.Unlock()
+					logx.Warnf("bbb", "ddp: гость=%q выбит из комнаты: ejected=%v loggedOut=%v", s.req.FIO, ejected, loggedOut)
 				}
 			}
 		}
@@ -876,6 +971,7 @@ func (s *directSession) handleDDPCollection(msgType string, m map[string]any, se
 				s.inRoom = false
 				s.lastErr = fmt.Errorf("встреча завершена")
 				s.mu.Unlock()
+				logx.Infof("bbb", "ddp: встреча завершена (meetingEnded) гость=%q", s.req.FIO)
 			}
 		}
 	case "presentations":
@@ -957,6 +1053,7 @@ func (s *directSession) advanceLobby(ctx context.Context) error {
 	}
 	if waitGreen {
 		// Re-check Greenlight; once the moderator starts the room, POST yields sessionToken.
+		logx.Debugf("bbb", "lobby: Greenlight — перепроверяю страницу гость=%q", s.req.FIO)
 		return s.stepEnter(ctx)
 	}
 	if tok == "" || base == "" {
@@ -964,17 +1061,22 @@ func (s *directSession) advanceLobby(ctx context.Context) error {
 	}
 	er, err := s.fetchEnter(ctx, base, tok)
 	if err != nil {
+		logx.Warnf("bbb", "lobby: enter-опрос гость=%q не удался: %v", s.req.FIO, err)
 		return err
 	}
 	switch strings.ToUpper(er.GuestStatus) {
 	case "WAIT":
+		logx.Debugf("bbb", "lobby: guestWait, модератор не пустил (returncode=%s)", er.ReturnCode)
 		return nil
 	case "DENY":
+		logx.Warnf("bbb", "lobby: модератор отклонил вход гостя=%q", s.req.FIO)
 		return fmt.Errorf("модератор отклонил вход")
 	default:
 		if er.ReturnCode != "SUCCESS" {
+			logx.Warnf("bbb", "lobby: enter вернул returncode=%s guestStatus=%s гость=%q", er.ReturnCode, er.GuestStatus, s.req.FIO)
 			return fmt.Errorf("enter: %s", er.ReturnCode)
 		}
+		logx.Infof("bbb", "lobby: модератор пустил гостя=%q (guestStatus=%s) — захожу в комнату", s.req.FIO, er.GuestStatus)
 		s.mu.Lock()
 		s.enter = er
 		s.mu.Unlock()
@@ -1127,10 +1229,17 @@ func (s *directSession) Close() error {
 	s.inRoom = false
 	s.inLobby = false
 	ws := s.ddpWS
+	startedAt := s.startedAt
+	greeted := s.greeted
 	s.mu.Unlock()
 
+	rtp := s.RTPPackets()
 	s.stopAudio()
 	s.cancel()
+	if !startedAt.IsZero() {
+		logx.Infof("bbb", "direct: сессия закрыта гость=%q роль=%s, жила %s, RTP=%d, здоровалась=%v",
+			s.req.FIO, s.req.Role, time.Since(startedAt).Round(time.Second), rtp, greeted)
+	}
 
 	if ws != nil {
 		lctx, lcancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1142,6 +1251,14 @@ func (s *directSession) Close() error {
 		s.client.CloseIdleConnections()
 	}
 	return nil
+}
+
+// truncateFrame — кадр DDP/SockJS для лога, без простыни.
+func truncateFrame(s string) string {
+	if len(s) > 200 {
+		return s[:200] + "…"
+	}
+	return s
 }
 
 func (s *directSession) urlWithHost(pathStr string) string {

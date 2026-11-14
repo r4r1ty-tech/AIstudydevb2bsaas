@@ -1,17 +1,22 @@
 package uni
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/moodle"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/websearch"
 )
@@ -93,7 +98,7 @@ func TestSolvePageAgentLoop(t *testing.T) {
 
 	fw := &fakeWeb{}
 	sy := &Syncer{Web: &websearch.Searcher{Providers: []websearch.Provider{fw}}}
-	ans, _, pl, err := sy.solvePage(context.Background(), nil, sy.webSearcher(), chainFor(srv), "Сети", "", tcpQuestions())
+	ans, _, pl, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, sy.webSearcher(), chainFor(srv), "Сети", "", tcpQuestions())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +126,7 @@ func TestSolvePageAgentLoop(t *testing.T) {
 func TestSolvePageRefusalBlocksSubmit(t *testing.T) {
 	srv, prompts := fakeLLM(t, `{"answers":[{"slot":1,"choice":"0"},{"slot":2,"text":"Невозможно решить: отсутствует таблица"}]}`)
 	sy := &Syncer{}
-	_, _, _, err := sy.solvePage(context.Background(), nil, nil, chainFor(srv), "", "", tcpQuestions())
+	_, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, nil, chainFor(srv), "", "", tcpQuestions())
 	if err == nil || !strings.Contains(err.Error(), "вопрос 2") {
 		t.Fatalf("err=%v", err)
 	}
@@ -134,7 +139,7 @@ func TestSolvePageRefusalBlocksSubmit(t *testing.T) {
 func TestSolvePageRepairsNotJSON(t *testing.T) {
 	srv, prompts := fakeLLM(t, "Решение: сначала строим дерево...", `{"answers":[{"slot":1,"choice":"0"},{"slot":2,"text":"SYN"}]}`)
 	sy := &Syncer{}
-	ans, _, _, err := sy.solvePage(context.Background(), nil, nil, chainFor(srv), "", "", tcpQuestions())
+	ans, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, nil, chainFor(srv), "", "", tcpQuestions())
 	if err != nil || ans[2].Text != "SYN" || len(*prompts) != 2 {
 		t.Fatalf("ans=%v err=%v calls=%d", ans, err, len(*prompts))
 	}
@@ -147,7 +152,7 @@ func TestSolvePageRepairsNotJSON(t *testing.T) {
 func TestSolvePageUnsupported(t *testing.T) {
 	srv, prompts := fakeLLM(t, `{}`)
 	sy := &Syncer{}
-	_, _, _, err := sy.solvePage(context.Background(), nil, nil, chainFor(srv), "", "", []moodle.QuizQuestion{{Slot: 1, QType: "ddwtos", Text: "Перетащите"}})
+	_, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, nil, chainFor(srv), "", "", []moodle.QuizQuestion{{Slot: 1, QType: "ddwtos", Text: "Перетащите"}})
 	if err == nil || !strings.Contains(err.Error(), "ddwtos") || len(*prompts) != 0 {
 		t.Fatalf("err=%v calls=%d", err, len(*prompts))
 	}
@@ -162,7 +167,7 @@ func TestSolvePageMultiKeys(t *testing.T) {
 	}}
 	srv, prompts := fakeLLM(t, `{"answers":[{"slot":1,"choices":["q9:1_choice0","00, 01, 1","1"]}]}`)
 	sy := &Syncer{}
-	ans, _, _, err := sy.solvePage(context.Background(), nil, nil, chainFor(srv), "", "", []moodle.QuizQuestion{q})
+	ans, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, nil, chainFor(srv), "", "", []moodle.QuizQuestion{q})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +186,7 @@ func TestSolvePageImage(t *testing.T) {
 		return "а | 0\nб | 10\nв | 11", nil
 	}}
 	q := moodle.QuizQuestion{Slot: 1, QType: "shortanswer", InputName: "a", Text: "Декодируйте 01011 по коду [рисунок 1]", Images: []string{"https://do/pluginfile.php/x.png"}}
-	_, _, pl, err := sy.solvePage(context.Background(), nil, nil, chainFor(srv), "", "", []moodle.QuizQuestion{q})
+	_, _, pl, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, nil, chainFor(srv), "", "", []moodle.QuizQuestion{q})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,11 +198,95 @@ func TestSolvePageImage(t *testing.T) {
 	}
 }
 
+// syncBuf — приёмник подробного лога: поиск пишет из горутин параллельно.
+type syncBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// dumpBodies — распакованные снимки в quiz-llm, в имени которых есть part.
+func dumpBodies(t *testing.T, dir, part string) []string {
+	t.Helper()
+	var out []string
+	_ = filepath.WalkDir(filepath.Join(dir, "quiz-llm"), func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.Contains(d.Name(), part) || !strings.HasSuffix(d.Name(), ".gz") {
+			return nil
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		zr, err := gzip.NewReader(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(zr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, string(data))
+		return nil
+	})
+	return out
+}
+
+// Подробный лог: каждая строка про тест несёт tg и cmid, снимки промпта и ответа легли в Dumper.
+func TestSolvePageDebugLog(t *testing.T) {
+	srv, _ := fakeLLM(t, `{"answers":[{"slot":1,"choice":"0","confidence":0.9},{"slot":2,"text":"SYN","confidence":0.9}]}`)
+	var sink syncBuf
+	dir := t.TempDir()
+	logx.SetDebugSink(&sink, &logx.Dumper{Dir: dir, MaxBytes: 1 << 20})
+	defer logx.SetDebugSink(nil, nil)
+
+	fw := &fakeWeb{}
+	sy := &Syncer{Web: &websearch.Searcher{Providers: []websearch.Provider{fw}}}
+	if _, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, sy.webSearcher(), chainFor(srv), "Сети", "", tcpQuestions()); err != nil {
+		t.Fatal(err)
+	}
+
+	out := sink.String()
+	for _, want := range []string{"поиск slot=1", "раунд 1", "было"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("в подробном логе нет %q", want)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.Contains(line, "uni: ") && (!strings.Contains(line, "tg=1 ") || !strings.Contains(line, "cmid=2 ")) {
+			t.Errorf("строка про тест без tg/cmid: %s", line)
+		}
+	}
+
+	prompts := dumpBodies(t, dir, "prompt")
+	replies := dumpBodies(t, dir, "reply")
+	if len(prompts) != 1 || len(replies) != 1 {
+		t.Fatalf("снимков промпта %d, ответа %d; хотел по одному", len(prompts), len(replies))
+	}
+	if !strings.Contains(prompts[0], "=== system ===") || !strings.Contains(prompts[0], "Сколько пакетов в рукопожатии TCP?") {
+		t.Errorf("снимок промпта неполный: %.200s", prompts[0])
+	}
+	if !strings.Contains(replies[0], `"slot":1`) {
+		t.Errorf("снимок ответа: %q", replies[0])
+	}
+}
+
 // Без поиска и с годным ответом — один запрос к модели.
 func TestSolvePageWithoutWeb(t *testing.T) {
 	srv, prompts := fakeLLM(t, `{"answers":[{"slot":1,"choice":"0","confidence":0.2,"search":"q"},{"slot":2,"text":"SYN"}]}`)
 	sy := &Syncer{Cfg: &config.Config{}}
-	ans, _, _, err := sy.solvePage(context.Background(), nil, sy.webSearcher(), chainFor(srv), "", "", tcpQuestions())
+	ans, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, sy.webSearcher(), chainFor(srv), "", "", tcpQuestions())
 	if err != nil || len(*prompts) != 1 || ans[1].Choice != "0" {
 		t.Fatalf("ans=%v calls=%d err=%v", ans, len(*prompts), err)
 	}

@@ -2,21 +2,54 @@ package moodle
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 	"golang.org/x/net/html"
 )
+
+const logComponent = "moodle"
 
 var (
 	attemptIDRe    = regexp.MustCompile(`attempt=(\d+)`)
 	qubaSlotIDRe   = regexp.MustCompile(`(?:question-|q)(\d+)[:-](\d+)`)
 	seqCheckNameRe = regexp.MustCompile(`q(\d+):(\d+)_:sequencecheck`)
+	// sesskeyJSRe — sesskey в инлайн-скрипте M.cfg; в снимки не пишем.
+	sesskeyJSRe = regexp.MustCompile(`"sesskey":"[^"]*"`)
 )
+
+// dumpDoc сохраняет HTML страницы в снимки logx (только при подробном логе).
+// sesskey и logintoken из снимка вырезаются; сам документ не меняется.
+func dumpDoc(kind, name string, doc *goquery.Document) {
+	if doc == nil || !logx.Verbose() {
+		return
+	}
+	cp := doc.Clone()
+	cp.Find("input[name=sesskey], input[name=logintoken]").SetAttr("value", "***")
+	h, err := goquery.OuterHtml(cp)
+	if err != nil {
+		logx.Debugf(logComponent, "снимок %s/%s не собран: %v", kind, name, err)
+		return
+	}
+	h = sesskeyJSRe.ReplaceAllString(h, `"sesskey":"***"`)
+	logx.Dump("quiz-"+kind, name, []byte(h))
+}
+
+// clip обрезает строку до n рун для одной строки лога.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
 
 // QuizInfo — данные о тесте со страницы /mod/quiz/view.php?id=<cmid>.
 type QuizInfo struct {
@@ -115,6 +148,10 @@ type QuestionResult struct {
 	Slot   int    `json:"slot"`
 	Status string `json:"status"`
 	Grade  string `json:"grade,omitempty"`
+	// RightAnswer — текст «Правильный ответ: …» со страницы review.
+	RightAnswer string `json:"right_answer,omitempty"`
+	// Feedback — отзыв к вопросу (.feedback / .specificfeedback без правильного ответа).
+	Feedback string `json:"feedback,omitempty"`
 }
 
 // InspectQuiz парсит /mod/quiz/view.php?id=<cmid> и извлекает информацию о тесте.
@@ -123,6 +160,7 @@ func (c *Client) InspectQuiz(ctx context.Context, cmid int64) (*QuizInfo, error)
 	if err != nil {
 		return nil, fmt.Errorf("moodle: inspect quiz %d: %w", cmid, err)
 	}
+	dumpDoc("view", fmt.Sprintf("cmid%d", cmid), doc)
 
 	info := &QuizInfo{CMID: cmid}
 
@@ -196,6 +234,23 @@ func (c *Client) InspectQuiz(ctx context.Context, cmid int64) (*QuizInfo, error)
 		}
 	})
 
+	logx.Debugf(logComponent, "тест cmid=%d: can_start=%t, незавершённая попытка=%d, правил=%d, попыток=%d, feedback=%q",
+		cmid, info.CanStart, info.InProgressAttemptID, len(info.Rules), len(info.Attempts), clip(info.Feedback, 300))
+	for _, r := range info.Rules {
+		logx.Debugf(logComponent, "тест cmid=%d правило: %q", cmid, r)
+	}
+	for _, a := range info.Attempts {
+		logx.Debugf(logComponent, "тест cmid=%d попытка №%d: состояние=%q оценка=%q review=%t",
+			cmid, a.Number, a.State, a.Grade, a.ReviewURL != "")
+	}
+	if !info.CanStart {
+		page := doc.Find("#region-main")
+		if page.Length() == 0 {
+			page = doc.Find("body")
+		}
+		logx.Infof(logComponent, "тест cmid=%d сейчас нельзя начать, текст страницы: %q", cmid, clip(clean(page.Text()), 300))
+	}
+
 	return info, nil
 }
 
@@ -207,12 +262,16 @@ func (c *Client) StartOrResumeAttempt(ctx context.Context, cmid int64) (*Attempt
 	}
 
 	if info.InProgressAttemptID > 0 {
+		logx.Infof(logComponent, "тест cmid=%d: продолжаю незавершённую попытку attempt=%d (прошлых в таблице: %d)",
+			cmid, info.InProgressAttemptID, len(info.Attempts))
 		return c.GetAttemptPage(ctx, cmid, info.InProgressAttemptID, 0)
 	}
 
 	if !info.CanStart {
 		return nil, fmt.Errorf("moodle: quiz %d is not available to start", cmid)
 	}
+
+	logx.Infof(logComponent, "тест cmid=%d: начинаю новую попытку (прошлых в таблице: %d)", cmid, len(info.Attempts))
 
 	sesskey, err := c.Sesskey(ctx)
 	if err != nil {
@@ -243,6 +302,7 @@ func (c *Client) StartOrResumeAttempt(ctx context.Context, cmid int64) (*Attempt
 	if attemptID == 0 {
 		return nil, fmt.Errorf("moodle: start attempt cmid=%d: attempt ID not found in %s", cmid, finalURL)
 	}
+	logx.Infof(logComponent, "тест cmid=%d: попытка начата, attempt=%d, url=%s", cmid, attemptID, finalURL)
 
 	return parseAttemptPage(doc, cmid, attemptID)
 }
@@ -283,14 +343,64 @@ func parseAttemptPage(doc *goquery.Document, cmid, attemptID int64) (*AttemptPag
 	}
 	page.TimeLeft = clean(doc.Find("#quiz-time-left, #quiz-timer").First().Text())
 
-	doc.Find(".que").Each(func(_ int, que *goquery.Selection) {
+	dumpDoc("attempt", fmt.Sprintf("cmid%d-a%d-p%d", cmid, attemptID, page.Page), doc)
+
+	ques := doc.Find(".que")
+	if ques.Length() == 0 {
+		logx.Warnf(logComponent, "попытка attempt=%d страница %d: на странице нет ни одного .que (снимок quiz-attempt)", attemptID, page.Page)
+	}
+	ques.Each(func(_ int, que *goquery.Selection) {
 		q := parseQuestion(que)
-		if q.Slot > 0 {
-			page.Questions = append(page.Questions, q)
+		if q.Slot == 0 {
+			logx.Warnf(logComponent, "попытка attempt=%d: .que без slot в id=%q пропущен, классы=%q",
+				attemptID, que.AttrOr("id", ""), que.AttrOr("class", ""))
+			return
 		}
+		page.Questions = append(page.Questions, q)
+		logQuestion(que, q)
 	})
 
+	logx.Debugf(logComponent, "страница попытки attempt=%d: page=%d nextpage=%d slots=%v time_left=%q вопросов=%d",
+		attemptID, page.Page, page.NextPage, page.Slots, page.TimeLeft, len(page.Questions))
+
 	return page, nil
+}
+
+// logQuestion пишет подробности вопроса (Debugf) и предупреждает о типе,
+// который решатель не умеет заполнять (Warnf с классами и полями .que).
+func logQuestion(que *goquery.Selection, q QuizQuestion) {
+	if len(q.Choices) == 0 && q.InputName == "" && len(q.MatchOptions) == 0 {
+		var fields []string
+		que.Find("input, select, textarea").Each(func(_ int, in *goquery.Selection) {
+			tag := ""
+			if len(in.Nodes) > 0 {
+				tag = in.Nodes[0].Data
+			}
+			fields = append(fields, fmt.Sprintf("%s(name=%q,type=%q)", tag, in.AttrOr("name", ""), in.AttrOr("type", "")))
+		})
+		logx.Warnf(logComponent, "вопрос %d типа %q: решатель не умеет его заполнять, классы=%q, поля=[%s]",
+			q.Slot, q.QType, que.AttrOr("class", ""), strings.Join(fields, " "))
+	}
+	if !logx.Verbose() {
+		return
+	}
+
+	logx.Debugf(logComponent, "вопрос slot=%d quba=%d qtype=%s behaviour=%s state=%s sequencecheck=%d submit=%t(%s=%q) input=%s value=%q prompt=%q text=%q images=%q",
+		q.Slot, q.QubaID, q.QType, q.Behaviour, q.State, q.SequenceCheck,
+		q.HasSubmitButton, q.SubmitButtonName, q.SubmitButtonValue,
+		q.InputName, q.InputValue, q.Prompt, clip(q.Text, 500), q.Images)
+	for _, ch := range q.Choices {
+		logx.Debugf(logComponent, "вопрос slot=%d вариант: name=%q value=%q text=%q checked=%t multi=%t",
+			q.Slot, ch.Name, ch.Value, ch.Text, ch.Checked, ch.IsMulti)
+	}
+	for _, m := range q.MatchOptions {
+		var opts []string
+		for _, o := range m.Choices {
+			opts = append(opts, fmt.Sprintf("%s=%s", o.Value, o.Text))
+		}
+		logx.Debugf(logComponent, "вопрос slot=%d match: name=%q вопрос=%q selected=%q варианты=[%s]",
+			q.Slot, m.Name, m.Question, m.SelectedValue, strings.Join(opts, "; "))
+	}
 }
 
 func parseQuestion(que *goquery.Selection) QuizQuestion {
@@ -594,9 +704,12 @@ func (c *Client) FetchFile(ctx context.Context, src string) ([]byte, string, err
 		return nil, "", ErrUnauthorized
 	}
 	if resp.StatusCode/100 != 2 {
+		logx.Debugf(logComponent, "файл %s: статус %d", src, resp.StatusCode)
 		return nil, "", fmt.Errorf("moodle: file status %d", resp.StatusCode)
 	}
-	return body, resp.Header.Get("Content-Type"), nil
+	ct := resp.Header.Get("Content-Type")
+	logx.Debugf(logComponent, "файл %s: тип %q, %d байт", src, ct, len(body))
+	return body, ct, nil
 }
 
 // SubmitAnswers отправляет ответы формы #responseform на /mod/quiz/processattempt.php?cmid=<cmid>.
@@ -727,13 +840,27 @@ func (c *Client) SubmitAnswers(ctx context.Context, page *AttemptPage, answers m
 		fields = append(fields, FormField{Name: "next", Value: "Следующая страница"})
 	}
 
+	slots := make([]int, 0, len(answers))
+	for s := range answers {
+		slots = append(slots, s)
+	}
+	sort.Ints(slots)
+	for _, s := range slots {
+		b, _ := json.Marshal(answers[s])
+		logx.Debugf(logComponent, "отправляю ответ attempt=%d page=%d slot=%d: %s", page.AttemptID, page.Page, s, b)
+	}
+	logx.Debugf(logComponent, "отправка attempt=%d page=%d: checkSlot=%d nextpage=%d полей=%d",
+		page.AttemptID, page.Page, checkSlot, nextPage, len(fields))
+
 	path := fmt.Sprintf("/mod/quiz/processattempt.php?cmid=%d", page.CMID)
 	doc, finalURL, err := c.PostMultipart(ctx, path, fields)
 	if err != nil {
+		logx.Warnf(logComponent, "отправка ответов attempt=%d page=%d не удалась: %v", page.AttemptID, page.Page, err)
 		return nil, fmt.Errorf("moodle: submit answers cmid=%d attempt=%d: %w", page.CMID, page.AttemptID, err)
 	}
 
 	if strings.Contains(finalURL, "summary.php") {
+		logx.Debugf(logComponent, "после отправки attempt=%d page=%d: редирект на summary, url=%s", page.AttemptID, page.Page, finalURL)
 		return &AttemptPage{
 			CMID:      page.CMID,
 			AttemptID: page.AttemptID,
@@ -742,16 +869,22 @@ func (c *Client) SubmitAnswers(ctx context.Context, page *AttemptPage, answers m
 		}, nil
 	}
 
-	return parseAttemptPage(doc, page.CMID, page.AttemptID)
+	res, err := parseAttemptPage(doc, page.CMID, page.AttemptID)
+	if err == nil {
+		logx.Debugf(logComponent, "после отправки attempt=%d: вернулась страница %d (nextpage=%d), вопросов=%d, url=%s",
+			page.AttemptID, res.Page, res.NextPage, len(res.Questions), finalURL)
+	}
+	return res, err
 }
 
 // FinishAttempt завершает попытку теста и извлекает итоговый балл и статус.
 func (c *Client) FinishAttempt(ctx context.Context, cmid, attemptID int64) (*QuizResult, error) {
 	// 1. Запрашиваем summary.php для обновления sesskey
-	_, _, err := c.PageWithURL(ctx, fmt.Sprintf("/mod/quiz/summary.php?attempt=%d&cmid=%d", attemptID, cmid))
+	sumDoc, _, err := c.PageWithURL(ctx, fmt.Sprintf("/mod/quiz/summary.php?attempt=%d&cmid=%d", attemptID, cmid))
 	if err != nil {
 		return nil, fmt.Errorf("moodle: finish attempt summary cmid=%d attempt=%d: %w", cmid, attemptID, err)
 	}
+	dumpDoc("summary", fmt.Sprintf("cmid%d-a%d", cmid, attemptID), sumDoc)
 
 	sesskey, err := c.Sesskey(ctx)
 	if err != nil {
@@ -780,6 +913,7 @@ func (c *Client) FinishAttempt(ctx context.Context, cmid, attemptID int64) (*Qui
 
 	if strings.Contains(finalURL, "review.php") {
 		res.ReviewAllowed = true
+		dumpDoc("review", fmt.Sprintf("cmid%d-a%d", cmid, attemptID), doc)
 		doc.Find("table.quizreviewsummary tr").Each(func(_ int, tr *goquery.Selection) {
 			th := strings.ToLower(clean(tr.Find("th").Text()))
 			td := clean(tr.Find("td").Text())
@@ -795,25 +929,11 @@ func (c *Client) FinishAttempt(ctx context.Context, cmid, attemptID int64) (*Qui
 			}
 		})
 		res.Feedback = clean(doc.Find("#feedback").Text())
-
-		doc.Find(".que").Each(func(_ int, que *goquery.Selection) {
-			slot := 0
-			if m := qubaSlotIDRe.FindStringSubmatch(que.AttrOr("id", "")); len(m) == 3 {
-				slot, _ = strconv.Atoi(m[2])
-			}
-			state := clean(que.Find(".info .state").Text())
-			grade := clean(que.Find(".info .grade").Text())
-			if slot > 0 {
-				res.Questions = append(res.Questions, QuestionResult{
-					Slot:   slot,
-					Status: state,
-					Grade:  grade,
-				})
-			}
-		})
+		res.Questions = parseReview(doc)
 	} else {
 		// Редирект на view.php (просмотр запрещён)
 		res.ReviewAllowed = false
+		dumpDoc("view", fmt.Sprintf("cmid%d-a%d", cmid, attemptID), doc)
 		res.Feedback = clean(doc.Find("#feedback").Text())
 
 		doc.Find("table.quizreviewsummary tbody tr, table.quizattemptsummary tbody tr").Each(func(_ int, tr *goquery.Selection) {
@@ -829,5 +949,56 @@ func (c *Client) FinishAttempt(ctx context.Context, cmid, attemptID int64) (*Qui
 		}
 	}
 
+	logx.Infof(logComponent, "тест cmid=%d попытка attempt=%d завершена: review_allowed=%t status=%q grade=%q feedback=%q",
+		cmid, attemptID, res.ReviewAllowed, res.Status, res.Grade, clip(res.Feedback, 300))
+	for _, q := range res.Questions {
+		logx.Debugf(logComponent, "итог attempt=%d slot=%d: состояние=%q балл=%q правильный=%q отзыв=%q",
+			attemptID, q.Slot, q.Status, q.Grade, clip(q.RightAnswer, 300), clip(q.Feedback, 300))
+	}
+
 	return res, nil
+}
+
+// parseReview разбирает вопросы со страницы review.php: состояние и балл из
+// .info, правильный ответ из .rightanswer, отзыв из .feedback/.specificfeedback
+// (без повтора текста правильного ответа и вложенных блоков).
+func parseReview(doc *goquery.Document) []QuestionResult {
+	var out []QuestionResult
+	doc.Find(".que").Each(func(_ int, que *goquery.Selection) {
+		slot := 0
+		if m := qubaSlotIDRe.FindStringSubmatch(que.AttrOr("id", "")); len(m) == 3 {
+			slot, _ = strconv.Atoi(m[2])
+		}
+		if slot == 0 {
+			return
+		}
+
+		var right []string
+		que.Find(".rightanswer").Each(func(_ int, r *goquery.Selection) {
+			if t := clean(r.Text()); t != "" {
+				right = append(right, t)
+			}
+		})
+
+		var fb []string
+		que.Find(".feedback, .specificfeedback").Each(func(_ int, f *goquery.Selection) {
+			if f.ParentsFiltered(".feedback, .specificfeedback").Length() > 0 {
+				return // уже учтён во внешнем блоке
+			}
+			cl := f.Clone()
+			cl.Find(".rightanswer").Remove()
+			if t := clean(cl.Text()); t != "" {
+				fb = append(fb, t)
+			}
+		})
+
+		out = append(out, QuestionResult{
+			Slot:        slot,
+			Status:      clean(que.Find(".info .state").Text()),
+			Grade:       clean(que.Find(".info .grade").Text()),
+			RightAnswer: strings.Join(right, " | "),
+			Feedback:    strings.Join(fb, " | "),
+		})
+	})
+	return out
 }

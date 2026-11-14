@@ -51,24 +51,63 @@ func (w *Worker) recRoot() string {
 	return config.DefaultRecordings
 }
 
+// setStatus меняет статус пака и пишет переход с причиной. Сохраняет вызывающий.
+func (w *Worker) setStatus(p *model.LecturePack, to, reason string) {
+	if p == nil {
+		return
+	}
+	from := p.Status
+	if from == to {
+		logx.Debugf("bbb", "pack: %s статус уже %s (%s)", packTag(p), to, reason)
+		return
+	}
+	p.Status = to
+	logx.Infof("bbb", "pack: %s статус %s → %s, причина: %s", packTag(p), from, to, reason)
+}
+
+func statSize(path string) int64 {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return st.Size()
+}
+
+// rtpOf — сколько RTP-пакетов принял WebRTC-сессия; false, если сессия не считает.
+func rtpOf(sess Session) (uint64, bool) {
+	if r, ok := sess.(interface{ RTPPackets() uint64 }); ok {
+		return r.RTPPackets(), true
+	}
+	return 0, false
+}
+
+func rtpText(n uint64, ok bool) string {
+	if !ok {
+		return "н/д"
+	}
+	return strconv.FormatUint(n, 10)
+}
+
 // attachRecorder вешает запись на вкладку; recording=false — запись не стартовала,
 // вкладка остаётся просто присутствием.
 func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.Lesson, url string) (Session, bool) {
 	if w == nil || w.Store == nil || sess == nil {
 		return sess, false
 	}
-	logx.Debugf("bbb", "attachRecorder: lesson=%d discipline=%q url=%s", lesson.ID, lesson.Discipline, redactURL(url))
+	logx.Infof("bbb", "recording: старт записи lesson=%d %s url=%s", lesson.ID, lesson.Discipline, redactURL(url))
+	recStarted := time.Now()
 	pack, err := w.Store.EnsurePack(lesson, url, w.recRoot())
 	if err != nil || pack == nil {
-		logx.Errorf("bbb", "pack: %v", err)
+		logx.Errorf("bbb", "recording: lesson=%d %s пак не получен: %v", lesson.ID, lesson.Discipline, err)
 		return sess, false
 	}
+	logx.Debugf("bbb", "recording: %s пак получен статус=%s dir=%s", packTag(pack), pack.Status, pack.Dir)
 	abs := filepath.Join(w.recRoot(), pack.Dir)
 	slidesDir := archive.SlidesDir(w.recRoot(), lesson.Discipline, pack.Number)
 	seg := capture.SegmentPath(abs, time.Now().UnixNano())
 	first, err := startSessionRecorder(ctx, sess, seg)
 	if err != nil {
-		logx.Errorf("bbb", "rec start: %v", err)
+		logx.Errorf("bbb", "recording: %s не стартовала: %v", packTag(pack), err)
 		notify.Admin(ctx, w.Cfg, "запись «"+lesson.Discipline+"» не стартовала: "+err.Error())
 		return sess, false
 	}
@@ -76,22 +115,21 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 		cur: first,
 		start: func() (recorder, error) {
 			next := capture.SegmentPath(abs, time.Now().UnixNano())
-			logx.Infof("bbb", "rec segment %s (restart)", filepath.Base(next))
+			logx.Infof("bbb", "recording: %s новый сегмент %s (перезапуск после падения)", packTag(pack), filepath.Base(next))
 			return startSessionRecorder(ctx, sess, next)
 		},
 		onDied: func(err error, restarted bool) {
 			if restarted {
-				logx.Warnf("bbb", "ffmpeg %s умер: %v — перезапустил запись", pack.Dir, err)
+				logx.Warnf("bbb", "recording: %s ffmpeg умер: %v — перезапустил запись", packTag(pack), err)
 				go notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s»: ffmpeg упал (%v), перезапустил — в записи может быть короткая дырка", lesson.Discipline, err))
 				return
 			}
-			logx.Errorf("bbb", "ffmpeg %s умер: %v — запись остановлена", pack.Dir, err)
+			logx.Errorf("bbb", "recording: %s ffmpeg умер: %v — запись остановлена (перезапуск невозможен или лимит исчерпан)", packTag(pack), err)
 			go notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s» остановилась: %v", lesson.Discipline, err))
 		},
 	}
-	logx.Infof("bbb", "rec segment %s", filepath.Base(seg))
-	logx.Infof("bbb", "recording started pack=%d dir=%s", pack.Number, pack.Dir)
-	pack.Status = model.PackRecording
+	logx.Infof("bbb", "recording: старт %s сегмент=%s за %s", packTag(pack), filepath.Base(seg), time.Since(recStarted).Round(time.Millisecond))
+	w.setStatus(pack, model.PackRecording, "вкладка с записью подключилась")
 	if err := w.Store.SavePack(pack); err != nil {
 		logx.Errorf("bbb", "attachRecorder: save recording pack=%s: %v", pack.Dir, err)
 	}
@@ -140,35 +178,39 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 		n, err := sess.GrabSlides(fctx, slidesDir)
 		fcancel()
 		if err != nil {
-			logx.Debugf("bbb", "final GrabSlides lesson=%d: %v", lesson.ID, err)
+			logx.Debugf("bbb", "final GrabSlides %s: %v", packTag(pack), err)
 		}
 		if n > 0 {
 			slidesCaptured.Store(true)
 			w.MarkSlides(lesson.ID, slidesDir)
 		}
 
-		logx.Infof("bbb", "recording stopped pack=%d dir=%s", pack.Number, pack.Dir)
+		// RTP и размер снимаем до Stop: после него сессия может уже отпустить трек.
+		rtp, hasRTP := rtpOf(sess)
+		logx.Infof("bbb", "recording: стоп %s после %s, RTP=%s, слайдов в папке=%d",
+			packTag(pack), time.Since(recStarted).Round(time.Second), rtpText(rtp, hasRTP), n)
 		if err := rec.Stop(); err != nil {
-			logx.Warnf("bbb", "stop rec %s: %v", pack.Dir, err)
+			logx.Warnf("bbb", "recording: остановка %s: %v", packTag(pack), err)
 		}
 		nSegs, merr := capture.MergeSegments(context.Background(), abs, archive.AudioFile(abs))
 		if merr != nil {
-			logx.Warnf("bbb", "merge %s: %v", pack.Dir, merr)
+			logx.Warnf("bbb", "recording: склейка %s не удалась: %v — статус остаётся recording, разберёт promoteStuckRecording", packTag(pack), merr)
 		} else {
-			logx.Infof("bbb", "audio merged %s segs=%d", pack.Dir, nSegs)
+			audio := archive.AudioFile(abs)
+			logx.Infof("bbb", "recording: %s файл=%s размер=%d байт сегментов=%d", packTag(pack), audio, statSize(audio), nSegs)
 		}
 		if merr != nil {
 			return
 		}
 		p, err := st.PackByID(pack.ID)
 		if err != nil || p == nil {
-			logx.Debugf("bbb", "attachRecorder: pack %d reload: %v", pack.ID, err)
+			logx.Warnf("bbb", "recording: %s не перечитался после записи: %v", packTag(pack), err)
 			return
 		}
 		if archive.HasSlides(slidesDir) || slidesCaptured.Load() {
-			p.Status = model.PackSlides
+			w.setStatus(p, model.PackSlides, "запись остановлена, слайды есть")
 		} else {
-			p.Status = model.PackRecorded
+			w.setStatus(p, model.PackRecorded, "запись остановлена, слайдов нет")
 		}
 		if err := st.SavePack(p); err != nil {
 			logx.Errorf("bbb", "attachRecorder: save recorded pack=%s: %v", p.Dir, err)
@@ -187,10 +229,12 @@ func (w *Worker) MarkSlides(lessonID int64, slidesDir string) {
 		return
 	}
 	if p.Status != model.PackDone && p.Status != model.PackNotes && p.Status != model.PackRecording {
-		p.Status = model.PackSlides
+		w.setStatus(p, model.PackSlides, "слайды сняты с презентации")
 		if err := w.Store.SavePack(p); err != nil {
-			logx.Errorf("bbb", "MarkSlides: save pack: %v", err)
+			logx.Errorf("bbb", "MarkSlides: save %s: %v", packTag(p), err)
 		}
+	} else {
+		logx.Debugf("bbb", "MarkSlides: %s статус %s — слайды не меняют его", packTag(p), p.Status)
 	}
 	if err := w.Store.AddEvent(model.Event{
 		At:       time.Now(),
@@ -279,6 +323,7 @@ func (w *Worker) maybeNotes(ctx context.Context, now time.Time) {
 					logx.Debugf("bbb", "maybeNotes: day=%s done for now, but more lectures today", day)
 					continue
 				}
+				logx.Infof("bbb", "notes: день %s закрыт — все конспекты дня собраны или сдались", day)
 				w.setSetting(notesDoneKey+day, "1")
 			}
 		}
@@ -333,7 +378,11 @@ func (w *Worker) harvestDay(ctx context.Context, day string) {
 			slidesDir := archive.SlidesDir(filepath.Join(w.recRoot(), p.Dir))
 			if !archive.HasSlides(slidesDir) {
 				w.harvestSlides(ctx, &p)
+			} else {
+				logx.Debugf("bbb", "harvestDay: %s слайды уже есть в %s — не снимаю", packTag(&p), slidesDir)
 			}
+		} else {
+			logx.Debugf("bbb", "harvestDay: %s статус %s — слайды не снимаю", packTag(&p), p.Status)
 		}
 	}
 }
@@ -363,6 +412,7 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 		// Если лекция ещё идёт (Finish > now), не собираем конспект раньше времени
 		if lesson, err := w.Store.LessonByID(p.LessonID); err == nil && lesson != nil {
 			if !lesson.Finish.IsZero() && now.Before(lesson.Finish) {
+				logx.Debugf("bbb", "buildNotesDay: %s пропуск: пара идёт до %s, конспект не раньше конца", packTag(&p), lesson.Finish.Format("15:04:05"))
 				done = false
 				continue
 			}
@@ -371,7 +421,10 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 			// Битый конспект пересобираем с паузами, но не бесконечно.
 			if !w.noteRetryReady(&p, now) {
 				if w.noteAttemptsFor(p.ID) < maxNoteAttempts {
+					logx.Debugf("bbb", "buildNotesDay: %s повтор позже: попыток %d/%d, день открыт", packTag(&p), w.noteAttemptsFor(p.ID), maxNoteAttempts)
 					done = false
+				} else {
+					logx.Debugf("bbb", "buildNotesDay: %s попытки исчерпаны (%d), не пересобираю", packTag(&p), maxNoteAttempts)
 				}
 				continue
 			}
@@ -381,6 +434,7 @@ func (w *Worker) buildNotesDay(ctx context.Context, day string) bool {
 			continue
 		}
 		if !archive.ShouldNotePack(p.Status) {
+			logx.Debugf("bbb", "buildNotesDay: %s статус %s — конспект не нужен", packTag(&p), p.Status)
 			continue
 		}
 		// Упавший пак держит день открытым, пока есть попытки: иначе
@@ -461,6 +515,7 @@ func (w *Worker) promoteStuckRecording(ctx context.Context, p *model.LecturePack
 	_, live := w.sessions[recKey]
 	w.mu.Unlock()
 	if recKey != "" && live {
+		logx.Debugf("bbb", "promoteStuckRecording: %s ещё пишется в живой сессии %s — жду", packTag(p), recKey)
 		return stuckWait
 	}
 	dir := filepath.Join(w.recRoot(), p.Dir)
@@ -479,8 +534,8 @@ func (w *Worker) promoteStuckRecording(ctx context.Context, p *model.LecturePack
 		if st != nil {
 			size = st.Size()
 		}
-		logx.Warnf("bbb", "pack %s: записи нет (%d b) — закрываю как empty", p.Dir, size)
-		p.Status = model.PackEmpty
+		logx.Warnf("bbb", "recording: %s записи нет (%d байт, порог %d) — закрываю как empty", packTag(p), size, minRecordedBytes)
+		w.setStatus(p, model.PackEmpty, fmt.Sprintf("склейка дала %d байт, порог %d", size, minRecordedBytes))
 		p.Err = fmt.Sprintf("записи нет (%d байт)", size)
 		if err := w.Store.SavePack(p); err != nil {
 			logx.Errorf("bbb", "promoteStuckRecording: save empty pack=%s: %v", p.Dir, err)
@@ -489,23 +544,23 @@ func (w *Worker) promoteStuckRecording(ctx context.Context, p *model.LecturePack
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("лекция «%s» %s: записи нет — конспекта не будет", p.Discipline, p.Date))
 		return stuckEmpty
 	}
-	p.Status = model.PackRecorded
+	w.setStatus(p, model.PackRecorded, fmt.Sprintf("процесс записи не дошёл до конца, склейка дала %d байт", st.Size()))
 	if err := w.Store.SavePack(p); err != nil {
-		logx.Errorf("bbb", "promoteStuckRecording: save pack=%s: %v", p.Dir, err)
+		logx.Errorf("bbb", "promoteStuckRecording: save %s: %v", packTag(p), err)
 	}
-	logx.Infof("bbb", "promoted stuck recording pack=%s", p.Dir)
 	return stuckRecorded
 }
 
 func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	if p == nil || p.BBBURL == "" {
+		logx.Debugf("bbb", "harvestSlides: %s пропуск: у пака нет ссылки на комнату", packTag(p))
 		return
 	}
 	if w.Cfg != nil && w.Cfg.BBBDryRun {
-		logx.Debugf("bbb", "harvestSlides: dry run, skip pack=%s", p.Dir)
+		logx.Debugf("bbb", "harvestSlides: dry run, skip %s", packTag(p))
 		return
 	}
-	logx.Infof("bbb", "harvestSlides: join %s/%d url=%s", p.Discipline, p.Number, redactURL(p.BBBURL))
+	logx.Infof("bbb", "harvestSlides: join %s url=%s — снимаю слайды после лекции", packTag(p), redactURL(p.BBBURL))
 	fio := "архив"
 	if users, err := w.Store.ListUsers(); err == nil {
 		for _, u := range users {
@@ -517,9 +572,10 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	} else {
 		logx.Debugf("bbb", "harvestSlides: list users: %v", err)
 	}
+	harvestStart := time.Now()
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: p.BBBURL, FIO: fio, Role: RoleSlides})
 	if err != nil {
-		logx.Warnf("bbb", "slides join %s/%d: %v", p.Discipline, p.Number, err)
+		logx.Warnf("bbb", "harvestSlides: %s вход за слайдами не удался за %s: %v", packTag(p), time.Since(harvestStart).Round(time.Millisecond), err)
 		return
 	}
 	w.hogs().Hold()
@@ -531,20 +587,21 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	}()
 	// Join считает успехом и лобби / «встреча не началась» — слайдов там нет.
 	if room, err := sess.InRoom(ctx); err != nil || !room {
-		logx.Warnf("bbb", "slides %s/%d: не в комнате (err=%v) — пропускаю", p.Discipline, p.Number, err)
+		logx.Warnf("bbb", "harvestSlides: %s не в комнате (err=%v, лобби или встреча не идёт) — пропускаю", packTag(p), err)
 		return
 	}
+	grabStart := time.Now()
 	n, err := sess.GrabSlides(ctx, archive.SlidesDir(filepath.Join(w.recRoot(), p.Dir)))
 	if err != nil {
-		logx.Warnf("bbb", "slides grab %s/%d: %v", p.Discipline, p.Number, err)
+		logx.Warnf("bbb", "harvestSlides: %s снятие слайдов за %s: %v", packTag(p), time.Since(grabStart).Round(time.Millisecond), err)
 	}
 	if n == 0 {
-		logx.Warnf("bbb", "slides %s/%d: презентации нет — статус не меняю", p.Discipline, p.Number)
+		logx.Warnf("bbb", "harvestSlides: %s презентации нет — статус не меняю", packTag(p))
 		return
 	}
-	p.Status = model.PackSlides
+	w.setStatus(p, model.PackSlides, fmt.Sprintf("слайды дособраны после лекции: %d", n))
 	if err := w.Store.SavePack(p); err != nil {
-		logx.Errorf("bbb", "harvestSlides: save pack=%s: %v", p.Dir, err)
+		logx.Errorf("bbb", "harvestSlides: save %s: %v", packTag(p), err)
 	}
 	if err := w.Store.AddEvent(model.Event{
 		At: time.Now(), Type: model.EventSlides, LessonID: p.LessonID,
@@ -552,7 +609,7 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 	}); err != nil {
 		logx.Debugf("bbb", "harvestSlides: add event: %v", err)
 	}
-	logx.Infof("bbb", "slides %s/%d n=%d", p.Discipline, p.Number, n)
+	logx.Infof("bbb", "harvestSlides: %s готово, слайдов=%d за %s", packTag(p), n, time.Since(harvestStart).Round(time.Second))
 	notify.Admin(ctx, w.Cfg, fmt.Sprintf("слайды сняты: %s (%d)", archive.Rel(p.Discipline, p.Number), n))
 }
 
@@ -564,31 +621,34 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 		logx.Errorf("bbb", "buildNotes: pack %d: %v", id, err)
 		return false
 	}
-	p.Status = model.PackNotes
+	attempt := w.noteAttemptsFor(p.ID) + 1
+	w.setStatus(p, model.PackNotes, fmt.Sprintf("сборка конспекта, попытка %d/%d", attempt, maxNoteAttempts))
 	if err := w.Store.SavePack(p); err != nil {
-		logx.Errorf("bbb", "buildNotes: save notes pack=%s: %v", p.Dir, err)
+		logx.Errorf("bbb", "buildNotes: save notes %s: %v", packTag(p), err)
 	}
 	w.hogs().Hold()
+	buildStart := time.Now()
 	err = notes.Build(ctx, w.Cfg, w.recRoot(), *p)
 	w.hogs().Release()
+	buildDur := time.Since(buildStart).Round(time.Second)
 	if errors.Is(err, notes.ErrEmptyAudio) {
 		// Не ошибка сборки: повторять нечего, выдуманный конспект не рассылаем.
 		w.noteOK(p.ID)
-		p.Status = model.PackEmpty
+		w.setStatus(p, model.PackEmpty, "записи нет или в ней нет речи: "+err.Error())
 		p.Err = err.Error()
 		if serr := w.Store.SavePack(p); serr != nil {
-			logx.Errorf("bbb", "buildNotes: save empty pack=%s: %v", p.Dir, serr)
+			logx.Errorf("bbb", "buildNotes: save empty %s: %v", packTag(p), serr)
 		}
-		logx.Warnf("bbb", "buildNotes: pack=%s закрыт как empty: %v", p.Dir, err)
+		logx.Warnf("bbb", "buildNotes: %s закрыт как empty за %s: %v", packTag(p), buildDur, err)
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("лекция «%s» %s: %v — конспекта не будет", p.Discipline, p.Date, err))
 		return true
 	}
 	if err != nil {
 		n := w.noteFail(p.ID)
-		p.Status = model.PackError
+		w.setStatus(p, model.PackError, fmt.Sprintf("сборка за %s упала (попытка %d): %v", buildDur, n, err))
 		p.Err = err.Error()
 		if serr := w.Store.SavePack(p); serr != nil {
-			logx.Errorf("bbb", "buildNotes: save error pack=%s: %v", p.Dir, serr)
+			logx.Errorf("bbb", "buildNotes: save error %s: %v", packTag(p), serr)
 		}
 		attempt := ""
 		if n < maxNoteAttempts {
@@ -596,7 +656,7 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 		} else {
 			attempt = fmt.Sprintf(" (попыток больше не будет: %d)", n)
 		}
-		logx.Warnf("bbb", "buildNotes: pack=%d failed attempt=%d: %v", p.ID, n, err)
+		logx.Warnf("bbb", "buildNotes: %s не собрался за %s, попытка %d/%d: %v", packTag(p), buildDur, n, maxNoteAttempts, err)
 		// Редкие повторы не шлём каждый раз: админ уже знает, что пак в работе.
 		if n <= noteQuickRetries || n >= maxNoteAttempts {
 			notify.Admin(ctx, w.Cfg, "конспект не собрался: "+archive.Rel(p.Discipline, p.Number)+" — "+err.Error()+attempt)
@@ -604,12 +664,12 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 		return false
 	}
 	w.noteOK(p.ID)
-	p.Status = model.PackDone
+	w.setStatus(p, model.PackDone, fmt.Sprintf("конспект собран за %s", buildDur))
 	p.Transcript = filepath.ToSlash(filepath.Join(p.Dir, "transcript.txt"))
 	p.NotesPDF = filepath.ToSlash(filepath.Join(p.Dir, "notes.pdf"))
 	p.Err = ""
 	if err := w.Store.SavePack(p); err != nil {
-		logx.Errorf("bbb", "buildNotes: save done pack=%s: %v", p.Dir, err)
+		logx.Errorf("bbb", "buildNotes: save done %s: %v", packTag(p), err)
 	}
 	if err := w.Store.AddEvent(model.Event{
 		At: time.Now(), Type: model.EventNotes, LessonID: p.LessonID,
@@ -617,7 +677,7 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 	}); err != nil {
 		logx.Debugf("bbb", "buildNotes: add event: %v", err)
 	}
-	logx.Infof("bbb", "notes done pack=%s", p.Dir)
+	logx.Infof("bbb", "notes: готово %s, PDF=%s, дальше announce и publish", packTag(p), p.NotesPDF)
 	w.announceNotes(ctx, p)
 	w.publishPack(ctx, p)
 	return true
@@ -651,27 +711,31 @@ func (w *Worker) publishPack(ctx context.Context, p *model.LecturePack) {
 	if pub == nil || p == nil || p.Status != model.PackDone {
 		return
 	}
-	logx.Debugf("bbb", "publishPack: pack=%s", p.Dir)
-	tr, err := os.ReadFile(w.packFile(p, p.Transcript, "transcript.txt"))
+	pubStart := time.Now()
+	trPath := w.packFile(p, p.Transcript, "transcript.txt")
+	tr, err := os.ReadFile(trPath)
 	if err != nil {
-		logx.Errorf("bbb", "publishPack: transcript %s: %v", p.Dir, err)
+		logx.Errorf("bbb", "publish: %s transcript %s: %v", packTag(p), trPath, err)
 		w.publishFail(p, "transcript: "+err.Error())
 		return
 	}
-	pdf, err := os.ReadFile(w.packFile(p, p.NotesPDF, "notes.pdf"))
+	pdfPath := w.packFile(p, p.NotesPDF, "notes.pdf")
+	pdf, err := os.ReadFile(pdfPath)
 	if err != nil {
-		logx.Errorf("bbb", "publishPack: pdf %s: %v", p.Dir, err)
+		logx.Errorf("bbb", "publish: %s pdf %s: %v", packTag(p), pdfPath, err)
 		w.publishFail(p, "pdf: "+err.Error())
 		return
 	}
+	logx.Infof("bbb", "publish: старт %s transcript=%d байт pdf=%d байт → %s/%s@%s",
+		packTag(p), len(tr), len(pdf), pub.Owner, pub.Repo, pub.Branch)
 	dir := filepath.ToSlash(p.Dir)
 	if _, err := pub.Upsert(ctx, dir+"/transcript.txt", tr, "add "+dir); err != nil {
-		logx.Errorf("bbb", "publishPack: upsert transcript %s: %v", dir, err)
+		logx.Errorf("bbb", "publish: %s upsert transcript: %v", packTag(p), err)
 		w.publishFail(p, err.Error())
 		return
 	}
 	if _, err := pub.Upsert(ctx, dir+"/notes.pdf", pdf, "add "+dir); err != nil {
-		logx.Errorf("bbb", "publishPack: upsert pdf %s: %v", dir, err)
+		logx.Errorf("bbb", "publish: %s upsert pdf: %v", packTag(p), err)
 		w.publishFail(p, err.Error())
 		return
 	}
@@ -680,12 +744,15 @@ func (w *Worker) publishPack(ctx context.Context, p *model.LecturePack) {
 	p.PublishedAt = &now
 	p.Err = ""
 	if err := w.Store.SavePack(p); err != nil {
-		logx.Errorf("bbb", "publishPack: save pack=%s: %v", p.Dir, err)
+		logx.Errorf("bbb", "publish: save %s: %v", packTag(p), err)
 	}
-	if err := os.Remove(filepath.Join(w.recRoot(), p.Audio)); err != nil {
-		logx.Debugf("bbb", "publishPack: remove audio %s: %v", p.Audio, err)
+	audio := filepath.Join(w.recRoot(), p.Audio)
+	if err := os.Remove(audio); err != nil {
+		logx.Debugf("bbb", "publish: %s аудио не удалил %s: %v", packTag(p), audio, err)
+	} else {
+		logx.Debugf("bbb", "publish: %s аудио удалено %s", packTag(p), audio)
 	}
-	logx.Infof("bbb", "published %s", dir)
+	logx.Infof("bbb", "publish: %s опубликован за %s (статус publish: published)", packTag(p), time.Since(pubStart).Round(time.Millisecond))
 	notify.Admin(ctx, w.Cfg, "конспект выгружен: "+archive.Rel(p.Discipline, p.Number))
 }
 
@@ -695,7 +762,7 @@ func (w *Worker) publishFail(p *model.LecturePack, reason string) {
 	if err := w.Store.SavePack(p); err != nil {
 		logx.Errorf("bbb", "publishFail: save pack=%s: %v", p.Dir, err)
 	}
-	logx.Warnf("bbb", "publish %s: %s", p.Dir, reason)
+	logx.Warnf("bbb", "publish: %s не выгрузился: %s — повторю через %s", packTag(p), reason, publishRetry)
 }
 
 func (w *Worker) maybePublish(ctx context.Context, now time.Time) {
@@ -727,6 +794,7 @@ func (w *Worker) publishSweep(ctx context.Context, now time.Time) {
 			continue
 		}
 		if !p.UpdatedAt.IsZero() && now.Sub(p.UpdatedAt) < publishRetry {
+			logx.Debugf("bbb", "publishSweep: %s пропуск: повтор выгрузки через %s", packTag(&p), publishRetry-now.Sub(p.UpdatedAt))
 			continue
 		}
 		w.publishPack(ctx, &p)

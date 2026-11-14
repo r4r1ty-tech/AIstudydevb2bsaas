@@ -42,6 +42,7 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 		return 0, ctx.Err()
 	}
 
+	started := time.Now()
 	slides := s.collectAllSlides()
 	if len(slides) == 0 {
 		ents, _ := os.ReadDir(dir)
@@ -52,17 +53,27 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 			}
 		}
 		if count > 0 {
+			logx.Debugf("bbb", "GrabSlides: в комнате слайдов нет, в папке уже png=%d dir=%s", count, dir)
 			return count, nil
 		}
 		logx.Debugf("bbb", "GrabSlides: no slides in meeting")
 		return 0, nil
 	}
+	presSummary := s.describePresentations(slides)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		logx.Errorf("bbb", "GrabSlides: mkdir %s: %v", dir, err)
 		return 0, fmt.Errorf("GrabSlides: mkdir: %w", err)
 	}
 
 	s.presMu.Lock()
 	defer s.presMu.Unlock()
+	if presSummary != s.presLogged {
+		// Состав презентаций поменялся (новая или переключили) — пишем в основной лог.
+		s.presLogged = presSummary
+		logx.Infof("bbb", "GrabSlides: презентации в комнате: %s; слайдов с картинкой=%d", presSummary, len(slides))
+	} else {
+		logx.Debugf("bbb", "GrabSlides: презентации без изменений: %s; слайдов=%d", presSummary, len(slides))
+	}
 	if s.savedSlides == nil {
 		s.savedSlides = make(map[string]string)
 	}
@@ -74,6 +85,8 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 			for k, v := range mf {
 				s.savedSlides[k] = v
 			}
+		} else {
+			logx.Warnf("bbb", "GrabSlides: манифест %s не читается: %v", manifestPath, err)
 		}
 	}
 
@@ -97,13 +110,16 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 		}
 		if file, ok := s.savedSlides[slideKey]; ok {
 			if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
+				logx.Debugf("bbb", "GrabSlides: слайд №%d id=%s уже в %s", sl.Num, sl.ID, file)
 				continue
 			}
 		}
 
+		fetchStart := time.Now()
 		pngData, err := s.fetchSlidePNG(ctx, sl)
 		if err != nil {
-			logx.Warnf("bbb", "GrabSlides: slide=%d uri=%s: %v", sl.Num, sl.ImageURI, err)
+			logx.Warnf("bbb", "GrabSlides: слайд №%d id=%s pres=%s url=%s не скачался за %s: %v",
+				sl.Num, sl.ID, s.presNameLocked(sl.PresentationID), redactURL(sl.ImageURI), time.Since(fetchStart).Round(time.Millisecond), err)
 			continue
 		}
 		saved++
@@ -111,18 +127,58 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 		filename := fmt.Sprintf("%02d.png", saved)
 		out := filepath.Join(dir, filename)
 		if err := os.WriteFile(out, pngData, 0o644); err != nil {
+			logx.Errorf("bbb", "GrabSlides: записать %s: %v", out, err)
 			return saved - 1, fmt.Errorf("GrabSlides: write %s: %w", out, err)
 		}
 		s.savedSlides[slideKey] = filename
+		logx.Infof("bbb", "GrabSlides: слайд №%d → %s pres=%s id=%s размер=%d байт за %s url=%s",
+			sl.Num, filename, s.presNameLocked(sl.PresentationID), sl.ID, len(pngData),
+			time.Since(fetchStart).Round(time.Millisecond), redactURL(sl.ImageURI))
 	}
 
 	if newCount > 0 {
 		if mfBytes, err := json.Marshal(s.savedSlides); err == nil {
-			_ = os.WriteFile(manifestPath, mfBytes, 0o644)
+			if err := os.WriteFile(manifestPath, mfBytes, 0o644); err != nil {
+				logx.Warnf("bbb", "GrabSlides: манифест %s не записан: %v", manifestPath, err)
+			}
 		}
-		logx.Infof("bbb", "GrabSlides: captured %d new slides (total %d) dir=%s", newCount, saved, dir)
+		logx.Infof("bbb", "GrabSlides: итог новых слайдов=%d всего=%d за %s dir=%s",
+			newCount, saved, time.Since(started).Round(time.Millisecond), dir)
+	} else {
+		logx.Debugf("bbb", "GrabSlides: новых нет, всего=%d за %s", saved, time.Since(started).Round(time.Millisecond))
 	}
 	return saved, nil
+}
+
+// presNameLocked — имя презентации по id для лога; presMu должен быть захвачен вызывающим.
+func (s *directSession) presNameLocked(pid string) string {
+	pm := s.allPres[pid]
+	if pm.ID == "" {
+		pm = s.pres[pid]
+	}
+	if pm.Name == "" {
+		return pid
+	}
+	return fmt.Sprintf("%q(%s)", pm.Name, pid)
+}
+
+// describePresentations — сводка по презентациям для лога: «имя: N слайдов».
+func (s *directSession) describePresentations(slides []slideMeta) string {
+	counts := map[string]int{}
+	var order []string
+	for _, sl := range slides {
+		if _, ok := counts[sl.PresentationID]; !ok {
+			order = append(order, sl.PresentationID)
+		}
+		counts[sl.PresentationID]++
+	}
+	s.presMu.Lock()
+	defer s.presMu.Unlock()
+	parts := make([]string, 0, len(order))
+	for _, pid := range order {
+		parts = append(parts, fmt.Sprintf("%s: %d", s.presNameLocked(pid), counts[pid]))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (s *directSession) collectCurrentSlides() []slideMeta {
