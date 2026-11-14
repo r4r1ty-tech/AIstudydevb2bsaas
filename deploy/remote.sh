@@ -64,14 +64,15 @@ unit_panel=$(need ssau-panel.service)
 unit_bbb=$(need ssau-bbb.service)
 unit_tunnel=$(need ssau-tunnel.service)
 tunnel_sh=$(need tunnel.sh)
-audio_sh=$(need audio.sh)
 wake_py=$(need wake.py)
 target=$(need ssau.target)
 
-install -d -m 755 "$APP" "$APP/data" "$APP/recordings" "$APP/chrome" "$APP/chrome-rec"
+install -d -m 755 "$APP" "$APP/data" "$APP/recordings"
 
 need_pkgs=()
-for p in chromium ffmpeg fonts-liberation ca-certificates pulseaudio pulseaudio-utils python3 python3-pip unzip; do
+# chromium + fonts-liberation используются для сборки PDF конспектов (notes/pdf.go);
+# BBB-клиент и запись аудио работают напрямую из Go без браузера и PulseAudio.
+for p in chromium ffmpeg fonts-liberation ca-certificates python3 python3-pip unzip; do
   if ! dpkg -s "$p" >/dev/null 2>&1; then
     need_pkgs+=("$p")
   fi
@@ -161,7 +162,7 @@ install -m 644 "$unit_panel" /etc/systemd/system/ssau-panel.service
 install -m 644 "$unit_bbb" /etc/systemd/system/ssau-bbb.service
 install -m 644 "$unit_tunnel" /etc/systemd/system/ssau-tunnel.service
 install -m 755 "$tunnel_sh" "$APP/tunnel.sh"
-install -m 755 "$audio_sh" "$APP/audio.sh"
+rm -f "$APP/audio.sh"
 install -m 755 "$wake_py" "$APP/wake.py"
 install -m 644 "$target" /etc/systemd/system/ssau.target
 
@@ -178,7 +179,6 @@ if [[ ! -f "$APP/.env" ]]; then
 fi
 
 grep -q '^LECTURE_PAUSE=' "$APP/.env" || echo 'LECTURE_PAUSE=1' >> "$APP/.env"
-grep -q '^CHROME_USER_DATA_DIR=' "$APP/.env" || echo 'CHROME_USER_DATA_DIR=/opt/ssau-bot/chrome' >> "$APP/.env"
 grep -q '^VOSK_MODEL=' "$APP/.env" || echo 'VOSK_MODEL=/opt/ssau-bot/vosk-model' >> "$APP/.env"
 grep -q '^VOSK_SCRIPT=' "$APP/.env" || echo 'VOSK_SCRIPT=/opt/ssau-bot/wake.py' >> "$APP/.env"
 grep -q '^LOG_LEVEL=' "$APP/.env" || echo 'LOG_LEVEL=info' >> "$APP/.env"

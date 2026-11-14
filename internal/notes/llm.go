@@ -61,58 +61,68 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	user := fmt.Sprintf("Предмет: %s\nЛекция №%d\n\n--- Слайды ---\n%s\n\n--- Расшифровка ---\n%s\n",
 		discipline, n, emptyDash(slides), emptyDash(transcript))
 
+	content, err := Ask(ctx, cfg, sys, user)
+	if err != nil {
+		logx.Errorf("notes", "Summarize: %v", err)
+		return "", err
+	}
+	logx.Infof("notes", "Summarize: notes generated discipline=%q lecture=%d chars=%d", discipline, n, len(content))
+	return content, nil
+}
+
+// Ask отправляет системный и пользовательский промпт к OpenAI-совместимому API модели.
+func Ask(ctx context.Context, cfg *config.Config, sysPrompt, userPrompt string) (string, error) {
+	if cfg == nil || strings.TrimSpace(cfg.LLMAPIKey) == "" {
+		return "", fmt.Errorf("нет LLM_API_KEY")
+	}
+	if strings.TrimSpace(cfg.LLMAPIURL) == "" {
+		return "", fmt.Errorf("нет LLM_API_URL")
+	}
+	model := strings.TrimSpace(cfg.LLMModel)
+	if model == "" {
+		return "", fmt.Errorf("нет LLM_MODEL")
+	}
+
 	payload, err := json.Marshal(chatReq{
 		Model: model,
 		Messages: []chatMessage{
-			{Role: "system", Content: sys},
-			{Role: "user", Content: user},
+			{Role: "system", Content: sysPrompt},
+			{Role: "user", Content: userPrompt},
 		},
 	})
 	if err != nil {
-		logx.Errorf("notes", "Summarize: marshal payload: %v", err)
-		return "", err
+		return "", fmt.Errorf("marshal payload: %w", err)
 	}
 	endpoint := chatEndpoint(cfg.LLMAPIURL)
-	logx.Debugf("notes", "Summarize: POST %s payload=%d bytes", endpoint, len(payload))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		logx.Errorf("notes", "Summarize: new request %s: %v", endpoint, err)
-		return "", err
+		return "", fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.LLMAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 
-	start := time.Now()
-	// 25 минут пары дают ответ за ~80 с; на полную пару 4 минут впритык.
 	cli := &http.Client{Timeout: 15 * time.Minute}
 	res, err := cli.Do(req)
 	if err != nil {
-		logx.Errorf("notes", "Summarize: request failed after %s: %v", time.Since(start), err)
-		return "", err
+		return "", fmt.Errorf("llm request failed: %w", err)
 	}
 	defer res.Body.Close()
-	logx.Debugf("notes", "Summarize: HTTP %d in %s", res.StatusCode, time.Since(start))
+
 	b, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if err != nil {
-		logx.Errorf("notes", "Summarize: read body after %s: %v", time.Since(start), err)
 		return "", fmt.Errorf("llm: ответ оборвался: %w", err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		logx.Errorf("notes", "Summarize: HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
 		return "", fmt.Errorf("llm HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
 	}
 	var out chatResp
 	if err := json.Unmarshal(b, &out); err != nil {
-		logx.Errorf("notes", "Summarize: json unmarshal (%d bytes): %v", len(b), err)
-		return "", err
+		return "", fmt.Errorf("llm unmarshal (%d bytes): %w", len(b), err)
 	}
 	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
-		logx.Errorf("notes", "Summarize: пустой ответ (choices=%d)", len(out.Choices))
 		return "", fmt.Errorf("llm: пустой ответ")
 	}
-	content := strings.TrimSpace(out.Choices[0].Message.Content)
-	logx.Infof("notes", "Summarize: notes generated discipline=%q lecture=%d chars=%d", discipline, n, len(content))
-	return content, nil
+	return strings.TrimSpace(out.Choices[0].Message.Content), nil
 }
 
 // chatEndpoint принимает любой OpenAI-совместимый base URL: и с /v1, и без.

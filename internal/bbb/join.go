@@ -53,10 +53,16 @@ type Session interface {
 	GrabSlides(ctx context.Context, dir string) (int, error)
 }
 
-// AudioChecker — у пишущей вкладки: в аудио ли она; если нет, одна короткая
-// попытка подключить «Только слушать». Иначе запись идёт, а в ней тишина.
+// AudioChecker — у пишущей сессии: жива ли подписка listen-only; при сбое —
+// переподключение к SFU/WebRTC.
 type AudioChecker interface {
 	EnsureAudio(ctx context.Context) bool
+}
+
+// StreamRecorder — сессия, которая сама пишет принятый WebRTC-поток в .ogg
+// сегмент и отдаёт 16 kHz PCM для споттера через recorder.Read.
+type StreamRecorder interface {
+	StartRecording(ctx context.Context, segPath string) (recorder, error)
 }
 
 type Joiner interface {
@@ -103,6 +109,13 @@ func (c *closeHook) EnsureAudio(ctx context.Context) bool {
 		return ac.EnsureAudio(ctx)
 	}
 	return true
+}
+
+func (c *closeHook) StartRecording(ctx context.Context, segPath string) (recorder, error) {
+	if sr, ok := c.Session.(StreamRecorder); ok {
+		return sr.StartRecording(ctx, segPath)
+	}
+	return startRecorder(ctx, segPath)
 }
 
 func (c *closeHook) Close() error {

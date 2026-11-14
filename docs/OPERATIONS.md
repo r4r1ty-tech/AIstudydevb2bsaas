@@ -21,10 +21,10 @@
 | `GROUP_ID` / `GROUP_CODE` | `531023229` / `6301-090301D` | Группа-якорь |
 | `TZ` | `Europe/Samara` | Часовой пояс расписания |
 | `RECORDINGS_DIR` | `recordings` | Корень записей, слайдов, конспектов |
-| `BBB_DRY_RUN` | `0` | `1` — не трогать Chromium (заглушка) |
+| `BBB_DRY_RUN` | `0` | `1` — не ходить в сеть BBB (заглушка `DryJoiner`) |
 | `LECTURE_PAUSE` | `1` | Замораживать сторонние «тяжёлые» процессы на время пары |
-| `CHROME_BIN` / `CHROME_USER_DATA_DIR` | — | Путь к Chromium и его профилю |
-| `PROXY_FILE` | `/opt/ssau-bot/proxies.txt` | SOCKS5-список `login:password@ip:port`, по строке. Есть файл — каждая вкладка `bbb` идёт через свой прокси |
+| `CHROME_BIN` | — | Путь к Chromium (используется только в `notes/pdf.go` для печати PDF конспектов) |
+| `PROXY_FILE` | `/opt/ssau-bot/proxies.txt` | SOCKS5-список `login:password@ip:port`, по строке. Есть файл — каждая сессия `bbb` идёт через свой прокси |
 | `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | LLM для конспекта. Любой OpenAI-совместимый endpoint `chat/completions` (DeepSeek, Groq, OpenRouter, локальный и т.п.). URL можно и с `/v1`, и без; `LLM_MODEL` обязателен. Старые имена `DEEPSEEK_API_KEY/URL/MODEL` читаются как фолбэк (с WARN) — лучше переименовать |
 | `ASSEMBLYAI_API_KEY` | — | Расшифровка лекций (STT), основной провайдер. Нет ключа или ошибка — дальше Fish, затем Groq |
 | `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Ключи STT/vision/конспектов |
@@ -37,7 +37,7 @@
 | `LOG_LEVEL` | `info` | `debug/info/warn/error` |
 | `LOG_FILE` | — | Если задан — писать лог ещё и в файл |
 
-Шаблон — [../env.example](../env.example). `deploy/remote.sh` при первом деплое дописывает недостающие `LECTURE_PAUSE`, `CHROME_USER_DATA_DIR`, `VOSK_*`, `LOG_LEVEL`, `LOG_FILE`.
+Шаблон — [../env.example](../env.example). `deploy/remote.sh` при первом деплое дописывает недостающие `LECTURE_PAUSE`, `VOSK_*`, `LOG_LEVEL`, `LOG_FILE`, `WEBAPP_URL_FILE`.
 
 ## Панель за Caddy
 
@@ -127,7 +127,7 @@ systemctl restart ssau-bbb.service ssau-tg.service
 | `ssau-tg.service` | Telegram-бот |
 | `ssau-rasp.service` | Парсер + cron |
 | `ssau-panel.service` | Mini App + API |
-| `ssau-bbb.service` | Chromium-воркер. `ExecStartPre=audio.sh` (PulseAudio) |
+| `ssau-bbb.service` | BBB-воркер на Go (`DirectJoiner`: DDP + Pion WebRTC + ffmpeg + Vosk) |
 | `ssau-tunnel.service` | HTTPS-туннель (cloudflared) |
 
 ```bash
@@ -152,8 +152,8 @@ ssh root@203.0.113.30 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 ```
 
 `remote.sh`:
-- доставляет бинарники, юниты, `tunnel.sh`, `audio.sh`, `wake.py`;
-- через apt ставит недостающее: chromium, ffmpeg, pulseaudio, python3, unzip;
+- доставляет бинарники, юниты, `tunnel.sh`, `wake.py`;
+- через apt ставит недостающее: `chromium` (для PDF конспектов), `ffmpeg`, `fonts-liberation`, `python3`, `unzip`;
 - создаёт swap при необходимости;
 - ставит Vosk-модель (если нет);
 - при отсутствии `/opt/ssau-bot/.env` останавливается и просит скопировать его.
@@ -162,7 +162,7 @@ ssh root@203.0.113.30 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 
 ## Сброс данных
 
-`Actions → Reset VDS data → Run workflow` вызывает `deploy/reset-data.sh` на сервере (БД, конспекты, профиль Chrome). Данные профиля Chrome нужно сбрасывать, если Chromium залип на битом профиле.
+`Actions → Reset VDS data → Run workflow` вызывает `deploy/reset-data.sh` на сервере (БД и конспекты).
 
 ## Диагностика
 
@@ -171,28 +171,23 @@ ssh root@203.0.113.30 'bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 1. `journalctl -u ssau-bbb -n 200` — есть ли `join key=...`, чем кончилось.
 2. Нет `join` вообще — проверь, что `ssau-bbb.service` запущен и пара `online` в `/api/now`.
 3. `no bbb link` — нет ссылки на пару; пришли её боту (привяжется к идущей паре).
-4. `join fail ... форма гостя` — не нашлась форма/кнопка входа; смотри `LOG_LEVEL=debug` и `pageHint` в логе.
-5. `не в комнате (unknown)` и в `pageHint` «You have been invited to join … / Join Room» — приглашёнческая страница BBB; бот сам жмёт «Join Room» (`clickWelcomeJoin` в `internal/bbb/seat.go`). Если повторяется — добавить селектор/текст в `welcomeJoinSels`.
-5. `лобби >2 мин` — модератор не пускает; алерт приходит админу.
+4. `join fail ... форма гостя` — Greenlight не отдал `csrf-token` или форму `[join_name]`; смотри `LOG_LEVEL=debug` (логи `direct:`).
+5. `лобби >2 мин` — модератор не пускает (`guestStatus=WAIT`); алерт приходит админу.
 
 **Бот в комнате, а запись пустая / тихая**
 
-Запись идёт так: вкладка «со звуком» жмёт «Только слушать» → Chromium играет в
-null-sink `ssau_rec` → ffmpeg пишет `ssau_rec.monitor` в `audio-*.ogg` и отдаёт PCM вейкворду.
+Запись идёт так: пишущая сессия подключается к `bbb-webrtc-sfu` в режиме `listen-only` через `pion/webrtc/v4` → incoming RTP `audio/opus` пишется напрямую в `audio-*.ogg` (`capture.OpusRec`), а параллельно через pipe в `ffmpeg` декодируется 16 кГц PCM для вейкворда.
 
 ```bash
-grep -aE 'audioOnce|audio joined|audio route|audio level|silent|ffmpeg|vosk|chromium:' /opt/ssau-bot/ssau.log | tail -40
+grep -aE 'audioOnce|audio joined|sfu|audio level|silent|ffmpeg|vosk' /opt/ssau-bot/ssau.log | tail -40
 ```
 
-1. `audioOnce: ... listen-only clicked` или `already in audio`, затем `audio joined :: audio=[...]` —
-   вкладка в аудио. `listen-only не нажалась` + список кнопок — BBB поменял вёрстку, смотри селекторы в `internal/bbb/seat.go`.
-2. `audio route audio-joined` / `first-minute`: в `inputs=[...]` должен быть поток на sink `ssau_rec`.
-   `inputs=[-]` — Chromium ничего не играет (аудио BBB не подключилось); строки `chromium: ...` рядом — ошибки pulse/WebRTC.
-3. `audio level ... peak=... dBFS` раз в минуту. 5 минут тишины подряд — WARN `silent` и сообщение админу.
-4. `ffmpeg: ...` — stderr ffmpeg; `Rec.Stop: ... size=N` — сколько записано в сегмент.
+1. `audioOnce: ... listen-only ready` или `already in audio` — WebRTC-аудио к SFU поднято. Ошибки `EnsureAudio` / `sfu` означают проблему сигналинга, TURN/STUN или ICE.
+2. `audio level ... peak=... dBFS` раз в минуту. 5 минут тишины подряд — WARN `silent` и сообщение админу.
+3. `capture: opus rec ...` / `ffmpeg: ...` — декодер PCM и размер `.ogg`. `OpusRec.Stop: ... packets=... size=N` показывает число принятых RTP-пакетов и байт.
    `vosk lags: dropped N chunks` — вейкворд не успевает, запись от этого не страдает.
    Vosk распознаёт всю речь и занимает около половины ядра (запущен с nice 10); срабатывание приходит после конца фразы, до ~20 с.
-5. Сквозная проверка тракта без BBB — `SSAU_AUDIO_E2E=1` тест из [TESTING.md](TESTING.md#23-локальная-сборкатесты-без-комнаты) на отдельном PulseAudio.
+4. Проверка тракта и WebRTC/Opus без живого BBB — `go test -v -race ./internal/capture/... ./internal/bbb/...`.
 
 **Панель не открывается**
 
@@ -205,8 +200,8 @@ grep -aE 'audioOnce|audio joined|audio route|audio level|silent|ffmpeg|vosk|chro
 
 - `dmesg -T | tail -50` — искать `oom-kill`;
 - `free -m`, `ps aux --sort=-%mem | head`;
-- Chromium + ffmpeg + Vosk на 4 ГБ: смотри, не поднимается ли лишний процесс;
-- логи `bbb: chromium`, `capture: ffmpeg pid=...`.
+- `ffmpeg` + Vosk (и разовый `chromium` после пары для сборки PDF): смотри `free -m`, `ps aux --sort=-%mem | head`;
+- логи `bbb:`, `capture:`.
 
 **Парсер отдаёт 403/пусто**
 
@@ -223,4 +218,4 @@ go test ./... -cover              # покрытие
 go vet ./...
 ```
 
-CI (`deploy.yml`) гоняет `CGO_ENABLED=0 go test ./...` на каждый PR и push в `main`. Тесты изолированы: временный sqlite (`t.TempDir`), `httptest` вместо внешних API, `DryJoiner` вместо Chromium.
+CI (`deploy.yml`) гоняет `CGO_ENABLED=0 go test ./...` на каждый PR и push в `main`. Тесты изолированы: временный sqlite (`t.TempDir`), `httptest` вместо внешних API, `DryJoiner` вместо живого `bbb.ssau.ru` (а протокол `DirectJoiner`/Pion/Opus покрыт локальными mock-серверами).

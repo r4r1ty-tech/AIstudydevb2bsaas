@@ -1,147 +1,361 @@
 package bbb
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
-
-	"github.com/go-rod/rod"
-	"github.com/go-rod/rod/lib/proto"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
-var nextSlideSels = []string{
-	"[data-test='nextSlidePagination']",
-	"[data-test='nextSlideButton']",
-	"[data-test='nextSlide']",
-	`button[aria-label='Next slide']`,
-	`button[aria-label='Следующий слайд']`,
-}
-
-var presSels = []string{
-	"[data-test='presentationInner']",
-	"[data-test='presentationFullscreen']",
-	"[data-test='whiteboard']",
-	"div.presentation",
-	"div[class*='presentation']",
-	"canvas",
-}
-
-func (s *chromeSession) GrabSlides(ctx context.Context, dir string) (int, error) {
-	if s == nil || s.page == nil {
-		logx.Debugf("bbb", "GrabSlides: no page, skip")
+// GrabSlides fetches slides of all shown presentations directly over HTTP
+// from Meteor DDP metadata (imageUri / png fallback / local SVG->PNG render).
+// It saves newly appeared slides without overwriting already downloaded ones.
+func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error) {
+	if s == nil {
 		return 0, nil
 	}
-	logx.Debugf("bbb", "GrabSlides: dir=%s", dir)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		logx.Errorf("bbb", "GrabSlides: mkdir %s: %v", dir, err)
+	s.mu.Lock()
+	room := s.inRoom && !s.inLobby && !s.closed
+	s.mu.Unlock()
+	if !room {
+		logx.Debugf("bbb", "GrabSlides: not in room, skip")
+		return 0, nil
+	}
+
+	// Give the slides subscription a short moment to complete initial sync.
+	select {
+	case <-s.slidesSub:
+	case <-time.After(2 * time.Second):
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+
+	slides := s.collectAllSlides()
+	if len(slides) == 0 {
+		ents, _ := os.ReadDir(dir)
+		count := 0
+		for _, e := range ents {
+			if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
+				count++
+			}
+		}
+		if count > 0 {
+			return count, nil
+		}
+		logx.Debugf("bbb", "GrabSlides: no slides in meeting")
+		return 0, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return 0, fmt.Errorf("GrabSlides: mkdir: %w", err)
 	}
-	page := s.page.Context(ctx)
-	if err := page.Timeout(20 * time.Second).WaitLoad(); err != nil {
-		logx.Debugf("bbb", "GrabSlides: waitload: %v", err)
-	}
-	time.Sleep(1500 * time.Millisecond)
 
-	seen := map[string]struct{}{}
-	n := 0
-	dups := 0
-	for i := 0; i < 80 && n < 60; i++ {
-		raw, err := shotPresentation(page)
-		if err != nil || len(raw) < 80 {
-			// Без области презентации снимок всей страницы — это лобби или заглушка
-			// Greenlight, а не слайд: vision-конспект по нему — мусор.
-			logx.Debugf("bbb", "GrabSlides: iter=%d no presentation: bytes=%d err=%v", i, len(raw), err)
+	s.presMu.Lock()
+	defer s.presMu.Unlock()
+	if s.savedSlides == nil {
+		s.savedSlides = make(map[string]string)
+	}
+
+	manifestPath := filepath.Join(dir, ".slides_meta.json")
+	if data, err := os.ReadFile(manifestPath); err == nil {
+		var mf map[string]string
+		if err := json.Unmarshal(data, &mf); err == nil {
+			for k, v := range mf {
+				s.savedSlides[k] = v
+			}
+		}
+	}
+
+	ents, _ := os.ReadDir(dir)
+	existingCount := 0
+	for _, e := range ents {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".png") {
+			existingCount++
+		}
+	}
+
+	saved := existingCount
+	newCount := 0
+	for _, sl := range slides {
+		if saved >= maxSlideItems || ctx.Err() != nil {
 			break
 		}
-		sum := sha1.Sum(raw)
-		key := hex.EncodeToString(sum[:])
-		if _, ok := seen[key]; ok {
-			dups++
-			// Слайд мог не успеть отрисоваться: даём паузу, а не жмём «дальше» сразу.
-			if dups >= 3 {
-				logx.Debugf("bbb", "GrabSlides: iter=%d %d duplicates in a row, stop", i, dups)
-				break
+		slideKey := sl.PresentationID + "/" + sl.ID
+		if sl.ID == "" {
+			slideKey = sl.PresentationID + "/" + sl.ImageURI
+		}
+		if file, ok := s.savedSlides[slideKey]; ok {
+			if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
+				continue
 			}
-			time.Sleep(time.Duration(dups) * 800 * time.Millisecond)
-			if dups == 2 && !clickNextSlide(page) {
-				logx.Debugf("bbb", "GrabSlides: iter=%d no next button, stop", i)
-				break
-			}
-			continue
 		}
-		dups = 0
-		seen[key] = struct{}{}
-		n++
-		name := filepath.Join(dir, fmt.Sprintf("%02d.png", n))
-		if err := os.WriteFile(name, raw, 0644); err != nil {
-			logx.Errorf("bbb", "GrabSlides: write %s: %v", name, err)
-			return n, fmt.Errorf("GrabSlides: write: %w", err)
-		}
-		logx.Debugf("bbb", "GrabSlides: saved %s bytes=%d", name, len(raw))
-		if !clickNextSlide(page) {
-			logx.Debugf("bbb", "GrabSlides: iter=%d no next button after save, stop", i)
-			break
-		}
-		time.Sleep(800 * time.Millisecond)
-	}
-	logx.Infof("bbb", "GrabSlides: captured n=%d dir=%s", n, dir)
-	return n, nil
-}
 
-// nextSlideJS жмёт видимую активную «следующий слайд»: на последнем слайде BBB
-// оставляет кнопку в DOM с disabled, и rod-клик по ней «успешен» — 60 дублей.
-const nextSlideJS = `function (sels) {
-	const ok = (n) => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0 && !n.disabled && n.getAttribute('aria-disabled') !== 'true' }
-	let any = false
-	for (const sel of sels) {
-		for (const n of document.querySelectorAll(sel)) {
-			any = true
-			if (ok(n)) { n.click(); return 'click' }
-		}
-	}
-	return any ? 'disabled' : 'none'
-}`
-
-func clickNextSlide(page *rod.Page) bool {
-	res, err := page.Context(context.Background()).Timeout(3*time.Second).Eval(nextSlideJS, nextSlideSels)
-	if err != nil || res == nil {
-		logx.Debugf("bbb", "clickNextSlide: %v", err)
-		return false
-	}
-	switch res.Value.Str() {
-	case "click":
-		return true
-	case "disabled":
-		return false
-	}
-	return clickByText(page.Timeout(2*time.Second), `(?i)next slide|следующ`)
-}
-
-func shotPresentation(page *rod.Page) ([]byte, error) {
-	for _, sel := range presSels {
-		ok, el, err := page.Has(sel)
-		if err != nil || !ok || el == nil {
-			continue
-		}
-		bin, err := el.Screenshot(proto.PageCaptureScreenshotFormatPng, 90)
-		if err == nil && len(bin) > 80 {
-			logx.Debugf("bbb", "shotPresentation: %s bytes=%d", sel, len(bin))
-			return bin, nil
-		}
+		pngData, err := s.fetchSlidePNG(ctx, sl)
 		if err != nil {
-			logx.Debugf("bbb", "shotPresentation: %s: %v", sel, err)
+			logx.Warnf("bbb", "GrabSlides: slide=%d uri=%s: %v", sl.Num, sl.ImageURI, err)
+			continue
+		}
+		saved++
+		newCount++
+		filename := fmt.Sprintf("%02d.png", saved)
+		out := filepath.Join(dir, filename)
+		if err := os.WriteFile(out, pngData, 0o644); err != nil {
+			return saved - 1, fmt.Errorf("GrabSlides: write %s: %w", out, err)
+		}
+		s.savedSlides[slideKey] = filename
+	}
+
+	if newCount > 0 {
+		if mfBytes, err := json.Marshal(s.savedSlides); err == nil {
+			_ = os.WriteFile(manifestPath, mfBytes, 0o644)
+		}
+		logx.Infof("bbb", "GrabSlides: captured %d new slides (total %d) dir=%s", newCount, saved, dir)
+	}
+	return saved, nil
+}
+
+func (s *directSession) collectCurrentSlides() []slideMeta {
+	return s.collectAllSlides()
+}
+
+func (s *directSession) collectAllSlides() []slideMeta {
+	s.presMu.Lock()
+	defer s.presMu.Unlock()
+
+	presWithSlides := make(map[string]bool)
+	for _, sl := range s.allSlides {
+		if sl.ImageURI != "" || sl.ThumbURI != "" {
+			presWithSlides[sl.PresentationID] = true
 		}
 	}
-	err := fmt.Errorf("нет области презентации")
-	logx.Errorf("bbb", "shotPresentation: %v", err)
-	return nil, err
+	for _, sl := range s.slides {
+		if sl.ImageURI != "" || sl.ThumbURI != "" {
+			presWithSlides[sl.PresentationID] = true
+		}
+	}
+
+	hasNonDefault := false
+	for pid := range presWithSlides {
+		pm := s.allPres[pid]
+		if pm.ID == "" {
+			pm = s.pres[pid]
+		}
+		if !isDefaultPresentation(pm.Name, pm.ID) {
+			hasNonDefault = true
+			break
+		}
+	}
+
+	seenPres := make(map[string]bool)
+	var orderedPres []string
+	for _, pid := range s.presOrder {
+		if !seenPres[pid] {
+			seenPres[pid] = true
+			orderedPres = append(orderedPres, pid)
+		}
+	}
+	for pid := range s.allPres {
+		if !seenPres[pid] {
+			seenPres[pid] = true
+			orderedPres = append(orderedPres, pid)
+		}
+	}
+	for pid := range s.pres {
+		if !seenPres[pid] {
+			seenPres[pid] = true
+			orderedPres = append(orderedPres, pid)
+		}
+	}
+	for pid := range presWithSlides {
+		if !seenPres[pid] {
+			seenPres[pid] = true
+			orderedPres = append(orderedPres, pid)
+		}
+	}
+
+	var allSlidesList []slideMeta
+	seenSlide := make(map[string]bool)
+
+	for _, pid := range orderedPres {
+		pm := s.allPres[pid]
+		if pm.ID == "" {
+			pm = s.pres[pid]
+		}
+		if hasNonDefault && isDefaultPresentation(pm.Name, pm.ID) {
+			continue
+		}
+		var pSlides []slideMeta
+		for _, sl := range s.allSlides {
+			if sl.PresentationID != pid || (sl.ImageURI == "" && sl.ThumbURI == "") {
+				continue
+			}
+			key := sl.PresentationID + "/" + sl.ID
+			if sl.ID == "" {
+				key = sl.PresentationID + "/" + sl.ImageURI
+			}
+			if !seenSlide[key] {
+				seenSlide[key] = true
+				pSlides = append(pSlides, sl)
+			}
+		}
+		for _, sl := range s.slides {
+			if sl.PresentationID != pid || (sl.ImageURI == "" && sl.ThumbURI == "") {
+				continue
+			}
+			key := sl.PresentationID + "/" + sl.ID
+			if sl.ID == "" {
+				key = sl.PresentationID + "/" + sl.ImageURI
+			}
+			if !seenSlide[key] {
+				seenSlide[key] = true
+				pSlides = append(pSlides, sl)
+			}
+		}
+		sort.Slice(pSlides, func(i, j int) bool {
+			if pSlides[i].Num != pSlides[j].Num {
+				return pSlides[i].Num < pSlides[j].Num
+			}
+			return pSlides[i].ID < pSlides[j].ID
+		})
+		allSlidesList = append(allSlidesList, pSlides...)
+	}
+
+	if len(allSlidesList) > maxSlideItems {
+		allSlidesList = allSlidesList[:maxSlideItems]
+	}
+	return allSlidesList
+}
+
+func isDefaultPresentation(name, id string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	i := strings.ToLower(strings.TrimSpace(id))
+	return n == "default.pdf" || strings.HasPrefix(n, "default") || i == "default"
+}
+
+func (s *directSession) fetchSlidePNG(ctx context.Context, sl slideMeta) ([]byte, error) {
+	uri := sl.ImageURI
+	if uri == "" {
+		uri = sl.ThumbURI
+	}
+	full := s.urlWithHost(uri)
+
+	// Many BBB deployments also serve pre-rendered PNG alongside /svg/N.
+	if strings.Contains(full, "/svg/") {
+		pngCandidate := strings.Replace(full, "/svg/", "/png/", 1)
+		if ct, raw, err := s.downloadSlideBytes(ctx, pngCandidate); err == nil && isPNGData(ct, raw) {
+			return raw, nil
+		}
+	}
+
+	ct, raw, err := s.downloadSlideBytes(ctx, full)
+	if err != nil {
+		return nil, err
+	}
+	if isPNGData(ct, raw) {
+		return raw, nil
+	}
+	if strings.Contains(strings.ToLower(ct), "svg") || bytes.Contains(raw[:minInt(len(raw), 256)], []byte("<svg")) {
+		return convertSVGToPNG(ctx, raw)
+	}
+	return convertAnyToPNG(ctx, raw)
+}
+
+func (s *directSession) downloadSlideBytes(ctx context.Context, target string) (string, []byte, error) {
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	resp, raw, err := s.httpDo(ctx, req)
+	if err != nil {
+		return "", nil, err
+	}
+	if resp.StatusCode != http.StatusOK || len(raw) < 32 {
+		return "", nil, fmt.Errorf("http %d len=%d", resp.StatusCode, len(raw))
+	}
+	return resp.Header.Get("Content-Type"), raw, nil
+}
+
+func isPNGData(ct string, raw []byte) bool {
+	if len(raw) >= 8 && string(raw[:4]) == "\x89PNG" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(ct), "image/png")
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func convertSVGToPNG(ctx context.Context, svgBytes []byte) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "bbb-slide-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+
+	inPath := filepath.Join(dir, "slide.svg")
+	outPath := filepath.Join(dir, "slide.png")
+	if err := os.WriteFile(inPath, svgBytes, 0o600); err != nil {
+		return nil, err
+	}
+	return rasterizeToPNG(ctx, inPath, outPath)
+}
+
+func convertAnyToPNG(ctx context.Context, raw []byte) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "bbb-slide-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+
+	inPath := filepath.Join(dir, "slide.bin")
+	outPath := filepath.Join(dir, "slide.png")
+	if err := os.WriteFile(inPath, raw, 0o600); err != nil {
+		return nil, err
+	}
+	return rasterizeToPNG(ctx, inPath, outPath)
+}
+
+func rasterizeToPNG(ctx context.Context, inPath, outPath string) ([]byte, error) {
+	candidates := [][]string{
+		{"ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", inPath, "-frames:v", "1", outPath},
+		{"rsvg-convert", "-o", outPath, inPath},
+		{"magick", inPath, outPath},
+		{"convert", inPath, outPath},
+	}
+	var lastErr error
+	for _, argv := range candidates {
+		bin, err := exec.LookPath(argv[0])
+		if err != nil {
+			continue
+		}
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		out, rerr := exec.CommandContext(cctx, bin, argv[1:]...).CombinedOutput()
+		cancel()
+		if rerr == nil {
+			if data, derr := os.ReadFile(outPath); derr == nil && len(data) > 32 {
+				return data, nil
+			}
+		} else {
+			lastErr = fmt.Errorf("%s: %v (%s)", argv[0], rerr, strings.TrimSpace(string(out)))
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("нет инструмента для конвертации слайда в PNG (ffmpeg/rsvg-convert/magick)")
 }

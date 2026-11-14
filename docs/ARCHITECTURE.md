@@ -11,7 +11,7 @@
 | `tg` | Telegram Bot API (long polling) | users, intents, presence(чтение), events, bbb_links, settings | нет |
 | `rasp` | `ssau.ru/rasp` | lessons, parse_runs, events, settings | нет |
 | `panel` | HTTP (Mini App + API) | users, bbb_links, settings, intents(косвенно) | да (`:8080`) |
-| `bbb` | `bbb.ssau.ru`, Chromium, ffmpeg, Vosk | presence, events, lecture_packs, settings | нет |
+| `bbb` | `bbb.ssau.ru` (HTTP/DDP/WebRTC), ffmpeg, Vosk | presence, events, lecture_packs, settings | нет |
 
 `ssau.target` поднимает все четыре; `panel` — единственный, кому нужен входящий TLS (даёт туннель `cloudflared`/ngrok).
 
@@ -26,8 +26,8 @@ internal/store            sqlite: пользователи, пары, интен
 internal/model            доменные типы и чистые методы (User, Lesson, JoinIntent, …)
 internal/rasp             Fetch (HTTP+UA+cookie), Parse (goquery), Diff, Refresh, cron
 internal/tg               Bot: роутинг, онбординг, T-15, live-карточки, тестовая карточка
-internal/bbb              воркер захода: Chrome (rod), seat, lobby, запись, spotter
-internal/capture          PulseAudio null-sink + ffmpeg (ogg + PCM для споттера)
+internal/bbb              воркер захода: DirectJoiner (Greenlight HTTP, Meteor DDP, Pion WebRTC), лобби, слайды, запись, spotter
+internal/capture          OpusRec: прямой дамп RTP Opus в .ogg + декод PCM 16 кГц через ffmpeg (без PulseAudio)
 internal/wake             вейкворды: Vosk через wake.py (свободное распознавание) + поиск слов и их форм
 internal/notes            после пары: STT (AssemblyAI/Fish/Groq), vision (Groq/Grok), PDF
 internal/archive          имена файлов и путей записей, слайдов, конспектов
@@ -86,35 +86,35 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 6. Любой сбой БД в тике — живые сессии не трогаем (иначе один `SQLITE_BUSY` выкинет всех и оборвёт запись). Состояние ключей ушедших из окна пар и их залипшие presence чистит `forget`.
 7. Каждый заход запускается **в отдельной горутине**; тик не блокируется. `beginJoin/endJoin` — per-key guard против дублей, `joinWG` ждёт заходы при shutdown.
 
-`ensureIn` (там же): `ChromeJoiner.Join` → `waitSeated` → классификация `seat` (room/lobby/form) → `SetPresence` + событие. Отменённый контекст (рестарт) — не неудача. Если пока шёл заход нажали «Не сегодня», вкладка закрывается. При ошибке — `joinFail`: пауза 30 с / 60 с и новая попытка, после 3 неудач подряд — стоп до нового `JoinYes` (пользователю — без сырых ошибок, причину получает админ). Живая сессия считается мёртвой после 3 ошибок проверки подряд; первый `dropDead` — тихий перезаход, второй — стоп. При старте и остановке `bbb` presence очищается целиком.
+`ensureIn` (там же): `DirectJoiner.Join` → вход через Greenlight HTTP (`csrf-token`, форма `[join_name]`) → `/bigbluebutton/api/enter` (room или `guestWait` лобби) → SockJS Meteor DDP (`validateAuthToken` + подписки) → `SetPresence` + событие. Отменённый контекст (рестарт) — не неудача. Если пока шёл заход нажали «Не сегодня», сессия закрывается (`userLeftMeeting`). При ошибке — `joinFail`: пауза 30 с / 60 с и новая попытка, после 3 неудач подряд — стоп до нового `JoinYes` (пользователю — без сырых ошибок, причину получает админ). Живая сессия считается мёртвой после 3 ошибок проверки подряд; первый `dropDead` — тихий перезаход, второй — стоп. При старте и остановке `bbb` presence очищается целиком.
 
-### Звук пишущей вкладки
+### Звук пишущей сессии
 
-После «Только слушать» успехом считается только появление «Выйти из аудио» в навбаре. В лобби аудио не ждём; после перехода в комнату и затем каждый тик `checkAudio` проверяет, что пишущая вкладка в аудио, и при необходимости переподключает; около минуты без звука — одно сообщение админу.
+Пишущая (или тестовая `listen`) сессия поднимает аудио только через `EnsureAudio` (`internal/bbb/audio.go`): `wss://<host>/bbb-webrtc-sfu?sessionToken=…` + `pion/webrtc/v4` (`listenOnlyOffering: false`, `role: "recv"`, `type: "audio"`). В лобби аудио не ждём; после перехода в комнату и затем каждый тик `checkAudio` проверяет `AudioActive()` (или переподключает SFU), около минуты без звука — одно сообщение админу.
 
-### Классификация страницы и форма гостя
+### Форма гостя и лобби
 
-`internal/bbb/seat.go`: `signals` читает селекторы формы/комнаты/лобби и видимый текст. `classifySeat` по приоритету: **room → lobby-элемент → форма → текстовые метки лобби → unknown**. Форма важнее текстовых меток: если она есть, `waitSeated` вводит ФИО и жмёт join, а не «ждёт модератора».
+`internal/bbb/direct.go`: Greenlight HTML разбирается через `goquery` (`meta[name=csrf-token]`, форма с `[join_name]` или пригласительная страница). Если сервер направляет на `guestWait` или `/enter` возвращает `guestStatus == "WAIT"`, сессия остаётся в состоянии `InLobby` и каждые несколько секунд опрашивает `/bigbluebutton/api/enter`; как только `guestStatus == "ALLOW"`, доподнимает DDP и переходит в `InRoom`.
 
 ### Лобби
 
 `watchLobby` на каждом тике проверяет живую сессию и пишет presence/приветствие только при смене состояния. Лобби до начала пары — норма; лобби дольше 2 минут после начала — алерт пользователю один раз и админу не чаще раза в 20 минут, событие `lobby`.
 
-### Прокси на вкладку
+### Прокси на сессию
 
-`internal/proxyrelay` читает `PROXY_FILE` (`login:password@ip:port`) и на каждый адрес поднимает локальный SOCKS5-релей без авторизации, который сам ходит вверх по SOCKS5 с логином/паролем (Chrome не умеет прокси-авторизацию из командной строки). Каждая вкладка `bbb` создаётся в отдельном CDP browser context с `proxyServer=socks5://127.0.0.1:<порт>` — `ChromeJoiner.Join` берёт следующий прокси из пула по кругу, логирует только `host:port`. Контекст освобождается при закрытии сессии. Файла нет — все идут напрямую. Кривая строка файла пропускается, остальные прокси работают. Прокси штрафуется только за сетевые ошибки (вкладка/навигация/`ERR_PROXY*`…), а не за форму или лобби; три неудачи подряд — пауза 10 минут, потом пробная попытка. Если прокси настроены, но все на паузе, заход — ошибка (громко), а не тихий заход с IP сервера. Мёртвый Chromium (OOM) обнаруживается по CDP и перезапускается, протухший `SingletonLock` профиля снимается. NB: SOCKS5 проксирует только TCP; media WebRTC может идти по UDP мимо прокси.
+`internal/proxyrelay` читает `PROXY_FILE` (`login:password@ip:port`) и на каждый адрес поднимает локальный SOCKS5-релей без авторизации, который сам ходит вверх по SOCKS5 с логином/паролем. Каждая сессия `DirectJoiner.Join` берёт следующий прокси из пула по кругу (`proxyrelay.Pool.Next`), ходит через его `LocalAddr()` по HTTP и WebSocket (`golang.org/x/net/proxy`), логирует только `host:port`. Прокси освобождается при закрытии сессии. Файла нет — все идут напрямую. Кривая строка файла пропускается, остальные прокси работают. Прокси штрафуется только за сетевые ошибки (HTTP/WS-соединение), а не за форму или лобби; три неудачи подряд — пауза 10 минут, потом пробная попытка. Если прокси настроены, но все на паузе, заход — ошибка (громко), а не тихий заход с IP сервера. NB: SOCKS5 проксирует TCP (HTTP/DDP/SFU-сигналинг); media WebRTC идёт по ICE/UDP напрямую или через TURN.
 
 ### Тестовый заход
 
-Отдельная сущность `settings.test_join` (ссылка, имя гостя, режим `dummy/listen`, статус). Управляется из Telegram (`/test`, кнопки `tx:*`) и из панели (`/api/test`). Пока идёт пара, воркер занят лекционным Chromium: `pauseTest` останавливает тест, ставит явную ошибку «идёт пара: Chrome занят лекцией» и один раз уведомляет админа. Тест-заход тоже выполняется в горутине с guard'ом. Неудачи считаются в памяти: админу — первая причина, повторы с бэкоффом, после 3 подряд `Want=off` и одно сообщение «останавливаюсь».
+Отдельная сущность `settings.test_join` (ссылка, имя гостя, режим `dummy/listen`, статус). Управляется из Telegram (`/test`, кнопки `tx:*`) и из панели (`/api/test`). Пока идёт пара, тест останавливается (`pauseTest`: ставит явную ошибку «идёт пара: воркер занят лекцией» и один раз уведомляет админа). Тест-заход тоже выполняется в горутине с guard'ом. Неудачи считаются в памяти: админу — первая причина, повторы с бэкоффом, после 3 подряд `Want=off` и одно сообщение «останавливаюсь».
 
 ### Запись и вейкворды
 
-Для лекционных пар выбирается один рекордер (`chooseRecorder`: держит живого, иначе минимальный Telegram id). `attachRecorder` создаёт пак (`EnsurePack`), запускает `capture.Start` (PulseAudio null-sink + ffmpeg: ogg на диск и PCM 16 кГц в пайп) и `startSpotter`. Споттер (`internal/bbb/spot.go`) гоняет PCM через `internal/wake` и на совпадении шлёт вейкворд пользователям. Один поток на комнату.
+Для лекционных пар выбирается один рекордер (`chooseRecorder`: держит живого, иначе минимальный Telegram id). `attachRecorder` создаёт пак (`EnsurePack`), запускает `startSessionRecorder` (`StreamRecorder.StartRecording` → `capture.StartOpus`: прямой дамп incoming RTP `audio/opus` в `.ogg` и decode-поток через `ffmpeg` в PCM 16 кГц для пайпа) и `startSpotter`. Споттер (`internal/bbb/spot.go`) гоняет PCM через `internal/wake` и на совпадении шлёт вейкворд пользователям. Один поток на комнату, без PulseAudio.
 
 ### После пары
 
-`maybeHarvest` (слайды скриншотами) и `maybeNotes` (STT + vision + PDF) запускаются фоновыми джобами `beginJob/endJob`. Notes ждут, пока нет живых вкладок. Готовый PDF уходит кнопкой в Telegram.
+`maybeHarvest` (прямая загрузка слайдов по DDP-коллекциям `presentations`/`slides` и HTTP, с растеризацией SVG через `ffmpeg`/`rsvg-convert`/`magick`) и `maybeNotes` (STT + vision + PDF через `internal/notes/pdf.go`, где единственно остался разовый headless `chromium --print-to-pdf`) запускаются фоновыми джобами `beginJob/endJob`. Notes ждут, пока нет живых сессий. Готовый PDF уходит кнопкой в Telegram.
 
 Перед расшифровкой `notes.Build` проверяет запись (`capture.Probe`): короче минуты, тишина (пик ниже −50 dBFS) или расшифровка в пару фраз на всю пару — пак закрывается как `empty`, во внешние сервисы и в рассылку ничего не уходит. Ошибка STT/LLM оставляет пак в `error`: три повтора через 10 минут, дальше раз в 2 часа, всего 10 попыток; счётчик лежит в `settings` (`notes_attempts:<pack>`) и переживает рестарт. `maybeNotes` догоняет не только вчерашний день, но и дни за последнюю неделю, у которых `notes_done` ещё не стоит.
 
@@ -167,7 +167,7 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 - Все карты воркера (`sessions`, `joining`, `blockedAt`, `dropRetry`, `lobbyAt`, `leaveAt`) под `Worker.mu`.
 - `joining` — single-flight по ключу сессии (в т.ч. `"test"`).
 - `joinWG.Wait()` в `closeAll` перед закрытием Store, чтобы горутины не писали в закрытую БД.
-- Ресурсы звука/Chrome считаются через `hogs` (freeze сторонних «тяжёлых» процессов на время пары).
+- Ресурсы процесса (CPU/RAM для `ffmpeg`/Vosk и постобработки) защищаются через `hogs` (freeze сторонних «тяжёлых» процессов на время пары).
 
 ## Логирование
 

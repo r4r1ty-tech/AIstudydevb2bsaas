@@ -1,5 +1,5 @@
 #!/bin/bash
-# Полный сброс данных бота на VDS: БД, конспекты, chrome-профили.
+# Полный сброс данных бота на VDS: БД и конспекты.
 # .env, бинарники и vosk не трогаем.
 set -euo pipefail
 
@@ -16,10 +16,7 @@ if [[ -d "$APP/recordings" ]]; then
   find "$APP/recordings" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 fi
 
-echo "wipe chrome profiles"
-rm -rf "$APP/chrome" "$APP/chrome-rec"
-mkdir -p "$APP/data" "$APP/recordings" "$APP/chrome" "$APP/chrome-rec"
-rm -rf /tmp/ssau-bbb-chrome* /tmp/rod* 2>/dev/null || true
+mkdir -p "$APP/data" "$APP/recordings"
 
 echo "start services"
 systemctl start ssau-rasp.service ssau-tg.service ssau-panel.service ssau-bbb.service

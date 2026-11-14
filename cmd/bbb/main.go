@@ -15,11 +15,11 @@ func main() {
 	logx.Infof("bbb", "starting bbb")
 	logx.Debugf("bbb", "main: binary=bbb need_token=false")
 	app.Run("bbb", false, func(ctx context.Context, cfg *config.Config, st *store.Store, loc *time.Location) error {
-		logx.Debugf("bbb", "main: worker enter dry_run=%v chrome_bin=%q", cfg.BBBDryRun, cfg.ChromeBin)
+		logx.Debugf("bbb", "main: worker enter dry_run=%v mode=direct", cfg.BBBDryRun)
 		if cfg.BBBDryRun {
-			logx.Warnf("bbb", "DRY RUN — chromium не трогаем")
+			logx.Warnf("bbb", "DRY RUN — в BBB не подключаемся")
 		} else {
-			logx.Infof("bbb", "chrome=%s", bbb.FindChrome(cfg.ChromeBin))
+			logx.Infof("bbb", "mode=direct (go+ddp+pion, без Chromium)")
 		}
 		if err := bbb.NewWorker(cfg, st, loc).Run(ctx); err != nil {
 			logx.Errorf("bbb", "main: worker.Run: %v", err)

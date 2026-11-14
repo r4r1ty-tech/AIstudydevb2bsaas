@@ -25,13 +25,17 @@ func TestShouldHarvest(t *testing.T) {
 	}
 	lessons := []model.Lesson{a, b, prac}
 
+	beforeFirst := a.Finish.Add(time.Minute)
+	if ShouldHarvest(lessons, beforeFirst, 3*time.Minute) {
+		t.Fatal("grace not elapsed for first lecture")
+	}
 	mid := time.Date(2026, 9, 15, 12, 0, 0, 0, loc)
-	if ShouldHarvest(lessons, mid, 3*time.Minute) {
-		t.Fatal("second lecture still ahead")
+	if !ShouldHarvest(lessons, mid, 3*time.Minute) {
+		t.Fatal("first lecture finished + grace, should harvest")
 	}
 	justEnd := b.Finish.Add(time.Minute)
-	if ShouldHarvest(lessons, justEnd, 3*time.Minute) {
-		t.Fatal("grace not elapsed")
+	if !ShouldHarvest(lessons, justEnd, 3*time.Minute) {
+		t.Fatal("first lecture still finished + grace, should harvest")
 	}
 	after := b.Finish.Add(4 * time.Minute)
 	if !ShouldHarvest(lessons, after, 3*time.Minute) {
@@ -39,6 +43,37 @@ func TestShouldHarvest(t *testing.T) {
 	}
 	if ShouldHarvest(nil, after, 3*time.Minute) {
 		t.Fatal("no lectures")
+	}
+}
+
+func TestAllLecturesFinished(t *testing.T) {
+	t.Parallel()
+	loc := time.FixedZone("Samara", 4*3600)
+	d := "2026-09-15"
+	a := model.Lesson{
+		Date: d, Type: "Лекция", Online: true,
+		Finish: time.Date(2026, 9, 15, 11, 20, 0, 0, loc),
+	}
+	b := model.Lesson{
+		Date: d, Type: "Лекция", Online: true,
+		Finish: time.Date(2026, 9, 15, 16, 40, 0, 0, loc),
+	}
+	lessons := []model.Lesson{a, b}
+
+	beforeA := time.Date(2026, 9, 15, 10, 0, 0, 0, loc)
+	if AllLecturesFinished(lessons, beforeA) {
+		t.Fatal("before lectures start")
+	}
+	between := time.Date(2026, 9, 15, 12, 0, 0, 0, loc)
+	if AllLecturesFinished(lessons, between) {
+		t.Fatal("lecture b still ahead")
+	}
+	afterAll := time.Date(2026, 9, 15, 17, 0, 0, 0, loc)
+	if !AllLecturesFinished(lessons, afterAll) {
+		t.Fatal("all finished")
+	}
+	if !AllLecturesFinished(nil, afterAll) {
+		t.Fatal("no lectures means finished")
 	}
 }
 

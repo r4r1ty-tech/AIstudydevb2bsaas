@@ -13,9 +13,17 @@ import (
 // KickKey — флаг «синхронизировать Moodle сейчас» (панель и бот ставят, rasp снимает).
 func KickKey(telegramID int64) string { return fmt.Sprintf("moodle_kick:%d", telegramID) }
 
+// WakeKickKey — флаг «синхронизировать Moodle немедленно из-за вейкворда на паре».
+const WakeKickKey = "moodle_wake_kick"
+
 // Kick просит rasp пересобрать задания пользователя на ближайшем тике.
 func Kick(st *store.Store, telegramID int64) error {
 	return st.SetSetting(KickKey(telegramID), "1")
+}
+
+// WakeKick просит rasp немедленно проверить и синхронизировать Moodle при обнаружении вейкворда.
+func WakeKick(st *store.Store) error {
+	return st.SetSetting(WakeKickKey, "1")
 }
 
 func consumeKick(st *store.Store, telegramID int64) bool {
@@ -29,10 +37,25 @@ func consumeKick(st *store.Store, telegramID int64) bool {
 	return true
 }
 
-// Run — фоновый цикл Moodle: раз в 30 минут (полный обход курсов раз в 6 часов)
-// или сразу по kick. Уведомления ЛК не берём — там рассылки без пользы.
+func hasWakeKick(st *store.Store) bool {
+	v, ok, err := st.GetSetting(WakeKickKey)
+	return err == nil && ok && v != ""
+}
+
+func consumeWakeKick(st *store.Store) bool {
+	if !hasWakeKick(st) {
+		return false
+	}
+	if err := st.SetSetting(WakeKickKey, ""); err != nil {
+		logx.Warnf("uni", "consume wake kick: %v", err)
+	}
+	return true
+}
+
+// Run — фоновый цикл Moodle: проверка киков каждые 5 секунд, плановый обход
+// раз в 30 минут (полный обход курсов раз в 6 часов) или сразу по kick / wake_kick.
 func (s *Syncer) Run(ctx context.Context) {
-	t := time.NewTicker(tick)
+	t := time.NewTicker(kickTick)
 	defer t.Stop()
 	for {
 		s.moodleTick(ctx)
@@ -51,11 +74,15 @@ func (s *Syncer) moodleTick(ctx context.Context) {
 		return
 	}
 	now := s.now()
+	wakeKicked := hasWakeKick(s.Store)
+	if wakeKicked {
+		defer consumeWakeKick(s.Store)
+	}
 	for _, acc := range accs {
 		if ctx.Err() != nil {
 			return
 		}
-		kicked := consumeKick(s.Store, acc.TelegramID)
+		kicked := consumeKick(s.Store, acc.TelegramID) || wakeKicked
 		if !kicked && !s.moodleDue(acc, now) {
 			continue
 		}

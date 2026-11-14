@@ -150,6 +150,9 @@ func (r *Refresher) apply(run model.ParseRun, now time.Time, lessons []model.Les
 		lessons = keepFutureLessons(lessons, old)
 		logx.Debugf("rasp", "Refresher.Refresh: keepFuture total=%d", len(lessons))
 	}
+	if source == "сайт" && len(old) > 0 {
+		lessons = preserveLKDataOnPublicFallback(lessons, old)
+	}
 
 	// Сайт отдал страницу без пар (шаблон ошибки, сбой вёрстки): замена стёрла бы
 	// все пары вместе с решениями и присутствием. Пустую неделю от сбоя не
@@ -339,6 +342,28 @@ func keepFutureLessons(parsed, old []model.Lesson) []model.Lesson {
 		return parsed
 	}
 	return mergeLessons(parsed, extra)
+}
+
+// preserveLKDataOnPublicFallback сохраняет ссылки BBB из ЛК и личные пары ИОТ,
+// если при обновлении пришлось откатиться на публичный сайт ssau.ru/rasp.
+func preserveLKDataOnPublicFallback(parsed, old []model.Lesson) []model.Lesson {
+	oldByKey := make(map[string]model.Lesson, len(old))
+	var iet []model.Lesson
+	for _, l := range old {
+		oldByKey[l.Identity()] = l
+		if l.Owner != 0 {
+			iet = append(iet, l)
+		}
+	}
+	for i := range parsed {
+		if prev, ok := oldByKey[parsed[i].Identity()]; ok && parsed[i].BBBURL == "" && prev.BBBURL != "" {
+			parsed[i].BBBURL = prev.BBBURL
+		}
+	}
+	if len(iet) > 0 {
+		parsed = mergeLessons(parsed, iet)
+	}
+	return parsed
 }
 
 func weekFromCurrentLabel(html []byte) (int, bool) {

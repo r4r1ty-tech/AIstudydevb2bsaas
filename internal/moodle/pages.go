@@ -189,7 +189,10 @@ func parseDetail(doc *goquery.Document, kind string, loc *time.Location) Detail 
 		if g := clean(doc.Find("#feedback h3, #feedback").First().Text()); g != "" && d.Status == model.MoodleSubmitted {
 			d.Todo = append(d.Todo, g)
 		}
-		if doc.Find(".quizstartbuttondiv").Length() == 0 && d.Status == model.MoodleTodo {
+		canStart := doc.Find(".quizstartbuttondiv").Length() > 0 ||
+			doc.Find("form[action*='startattempt.php']").Length() > 0 ||
+			doc.Find("form[action*='attempt.php'], a[href*='attempt.php']").Length() > 0
+		if !canStart && (d.Status == model.MoodleTodo || d.Status == model.MoodleDraft) {
 			d.Todo = append(d.Todo, "Тест сейчас не открыт для попыток")
 		}
 	}

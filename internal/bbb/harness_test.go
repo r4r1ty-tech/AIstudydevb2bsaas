@@ -3,6 +3,7 @@ package bbb
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -74,6 +75,9 @@ func (s *fakeSess) GrabSlides(_ context.Context, dir string) (int, error) {
 	s.mu.Unlock()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return 0, err
+	}
+	for i := 1; i <= n; i++ {
+		_ = os.WriteFile(filepath.Join(dir, fmt.Sprintf("%02d.png", i)), []byte("fake png"), 0o644)
 	}
 	return n, err
 }

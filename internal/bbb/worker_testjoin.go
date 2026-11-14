@@ -87,12 +87,12 @@ func (w *Worker) pauseTest(ctx context.Context) {
 	latest.Want = model.TestWantOff
 	latest.Status = model.TestError
 	latest.Mode = ""
-	latest.Message = "идёт пара: Chrome занят лекцией"
+	latest.Message = "идёт пара: воркер занят лекцией"
 	if err := w.Store.PutTestJoin(latest); err != nil {
 		logx.Errorf("bbb", "pauseTest: put test join: %v", err)
 	}
 	logx.Warnf("bbb", "test paused: lecture in progress")
-	notify.Admin(ctx, w.Cfg, "тест отложен: идёт пара, один Chrome занят лекцией. Запусти заново после пары.")
+	notify.Admin(ctx, w.Cfg, "тест отложен: идёт пара, воркер занят лекцией. Запусти заново после пары.")
 }
 
 func (w *Worker) resumeTest() {
@@ -397,9 +397,9 @@ func (w *Worker) attachTestRecorder(ctx context.Context, sess Session) Session {
 	// сегмент и файл растёт месяцами.
 	_ = os.Remove(filepath.Join(dir, "audio.ogg"))
 	seg := capture.SegmentPath(dir, time.Now().UnixNano())
-	rec, err := startRecorder(ctx, seg)
+	rec, err := startSessionRecorder(ctx, sess, seg)
 	if err != nil {
-		logx.Warnf("bbb", "test ffmpeg: %v", err)
+		logx.Warnf("bbb", "test rec start: %v", err)
 		notify.Admin(ctx, w.Cfg, "тест: звук не стартанул — "+err.Error())
 		return sess
 	}

@@ -58,20 +58,11 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 	logx.Debugf("bbb", "NewWorker: cfg_nil=%v", cfg == nil)
 	var j Joiner = DryJoiner{}
 	if cfg == nil || !cfg.BBBDryRun {
-		bin := ""
+		dj := NewDirectJoiner()
 		if cfg != nil {
-			bin = FindChrome(cfg.ChromeBin)
-		} else {
-			bin = FindChrome("")
+			dj.Proxies = loadProxies(cfg.ProxyFile)
 		}
-		cj := NewChromeJoiner(bin)
-		if cfg != nil && cfg.ChromeUserDir != "" {
-			cj.UserDataDir = cfg.ChromeUserDir
-		}
-		if cfg != nil {
-			cj.Proxies = loadProxies(cfg.ProxyFile)
-		}
-		j = cj
+		j = dj
 	}
 	hogs := Hogs(nopHogs{})
 	if cfg != nil && !cfg.BBBDryRun && cfg.LecturePause {
@@ -327,6 +318,9 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 	w.mu.Unlock()
 	if seen {
 		return
+	}
+	if w.Store != nil {
+		_ = w.Store.RequestRaspRefresh()
 	}
 	if err := w.Store.SetPresence(model.Presence{
 		TelegramID: u.TelegramID,
@@ -649,7 +643,7 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		if err != nil {
 			reason = err.Error()
 		}
-		// Одна медленная проверка CDP на загруженной VDS — ещё не вылет.
+		// Кратковременный сбой WS/сети — ещё не вылет.
 		w.mu.Lock()
 		w.probeErr[key]++
 		n := w.probeErr[key]
@@ -755,7 +749,7 @@ func (w *Worker) checkAudio(ctx context.Context, lesson model.Lesson, key string
 	w.mu.Unlock()
 	logx.Warnf("bbb", "checkAudio: key=%s not in audio (%d)", key, n)
 	if n == audioAlertAfter {
-		notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s»: вкладка в комнате, но не подключилась к звуку — запись может быть пустой", lesson.Discipline))
+		notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s»: сессия в комнате, но не подключилась к звуку — запись может быть пустой", lesson.Discipline))
 	}
 }
 
