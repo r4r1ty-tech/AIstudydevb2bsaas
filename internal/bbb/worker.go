@@ -614,7 +614,7 @@ func (w *Worker) joinFail(ctx context.Context, u model.User, lesson model.Lesson
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf("Не получилось зайти на «%s» — пробую ещё раз.", lesson.Discipline))
 	case stop:
 		notify.User(ctx, w.Cfg, u.TelegramID, fmt.Sprintf(
-			"Не зашёл на «%s» после %d попыток. Нажми «Зайти» у пары в панели — попробую снова.",
+			"Не зашёл на «%s» после %d попыток. Переключи у пары в панели «Не заходить» и обратно «Заходить» — попробую снова.",
 			lesson.Discipline, maxJoinFails))
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("не зашёл: %s / %s / %d: %s", lesson.Discipline, u.FIO, u.TelegramID, reason))
 	}

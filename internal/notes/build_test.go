@@ -98,7 +98,7 @@ func TestBuildLLMFailureSurfaces(t *testing.T) {
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(archive.AudioFile(dir), []byte(strings.Repeat("x", 8192)), 0o600)
 	cfg := &config.Config{FishStudioAPIKey: "k", FishStudioAPIURL: api.URL}
-	if err := Build(context.Background(), cfg, root, p); err == nil || !strings.Contains(err.Error(), "LLM_API_KEY") {
+	if err := Build(context.Background(), cfg, root, p); err == nil || !strings.Contains(err.Error(), "нет ключей ИИ") {
 		t.Fatalf("missing LLM key must surface: %v", err)
 	}
 }

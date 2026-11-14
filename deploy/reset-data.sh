@@ -22,4 +22,4 @@ echo "start services"
 systemctl start ssau-rasp.service ssau-tg.service ssau-panel.service ssau-bbb.service
 systemctl is-active ssau-tg ssau-bbb ssau-panel ssau-rasp || true
 
-echo "reset done: users/fio/links/lessons/intents/packs/events cleared; re-onboard after /start"
+echo "reset done: users/fio/links/lessons/intents/packs/events cleared; заново: «Первый вход» в панели (имя для BBB и подгруппа), пароль — кнопкой в боте"

@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -283,4 +284,38 @@ func (c *Client) Timetable(ctx context.Context, yearID int64, week int, groupID 
 		return nil, err
 	}
 	return &out, nil
+}
+
+// fullNameRe — ФИО в RSC-разметке /account: {"name":…,"fullName":"Фамилия Имя Отчество",…}
+// (в HTML кавычки экранированы \").
+var fullNameRe = regexp.MustCompile(`\\?"fullName\\?"\s*:\s*\\?"([^"\\]{2,120})`)
+
+// FullName — ФИО владельца сессии со страницы /account.
+func (c *Client) FullName(ctx context.Context) (string, error) {
+	resp, body, err := c.s.Get(ctx, "/account", "text/html")
+	if err != nil {
+		return "", fmt.Errorf("lk: GET /account: %w", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", ErrUnauthorized
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("lk: GET /account: status %d", resp.StatusCode)
+	}
+	return parseFullName(body)
+}
+
+func parseFullName(page []byte) (string, error) {
+	m := fullNameRe.FindSubmatch(page)
+	if m == nil {
+		if bytes.Contains(page, []byte(`name="password"`)) {
+			return "", ErrUnauthorized
+		}
+		return "", errors.New("lk: на /account нет fullName")
+	}
+	name := strings.Join(strings.Fields(string(m[1])), " ")
+	if name == "" {
+		return "", errors.New("lk: пустое fullName")
+	}
+	return name, nil
 }

@@ -1,42 +1,49 @@
-# Тестирование: все функции бота в тестовой комнате BBB
+# Тестирование: прогон всех функций
 
 Runbook для агента (и человека). Цель — прогнать **каждую** пользовательскую функцию
-через реальную тестовую комнату BBB и убедиться, что она работает и **логируется**.
+вживую и убедиться, что она работает и **логируется**.
 Устройство — [ARCHITECTURE.md](ARCHITECTURE.md), эксплуатация — [OPERATIONS.md](OPERATIONS.md).
 
-Тестовая комната создаётся руками (ссылка `https://bbb.ssau.ru/b/...`). Ссылка
-привязывается командой `/test` в Telegram и **не** трогает пары (`settings.test_join`,
-ключ `lesson:*` не используется).
+Модель: бот выдаёт только личный пароль в панель и шлёт уведомления; всё остальное —
+в панели (`https://ssau.r4r1ty.fun`, открывается через VPN пула). Тестовая комната BBB
+создаётся руками (ссылка `https://bbb.ssau.ru/b/...`) и задаётся в панели
+«Ещё → Служебное → Тест» — **не** трогает пары (`settings.test_join`, ключ `lesson:*` не используется).
 
 ## 0. Границы
 
-- Тестируем 4 процесса: `tg`, `rasp`, `panel`, `bbb`. `bbb` дергает `DirectJoiner` (HTTP + DDP + Pion WebRTC),
-  `ffmpeg` (декодер PCM) и Vosk — это и есть предмет большинства кейсов.
-- `panel` не обязан быть снаружи: можно ходить `curl` по `localhost:8080` с VDS, либо по
-  туннелю (`ssh ssau webapp-url`).
-- Секреты не читаем и не логируем. `cat .env` недоступен — только `ssh ssau env-keys`.
+- 4 процесса: `tg`, `rasp`, `panel`, `bbb`. `bbb` дергает `DirectJoiner` (HTTP + DDP + Pion WebRTC),
+  `ffmpeg` (декодер PCM) и Vosk; `rasp` — ЛК, Moodle и ИИ (решатель тестов).
+- Доступ к серверу: из РФ напрямую не виден, только через ПродАлексей:
+  `alias S='ssh -J moyavds root@13.143.234.228'`.
+- Секреты не читаем и не логируем. Ключи `.env` без значений: `S cut -d= -f1 /opt/ssau-bot/.env`.
 - Debug-логи по умолчанию выключены (`LOG_LEVEL=info`). Для разбора нужно
   `LOG_LEVEL=debug` в `/opt/ssau-bot/.env` и рестарт — это действие подтверждает человек.
+
+Локальный сквозной тест протокола BBB и аудио-тракта (`DirectJoiner` + `pion/webrtc/v4` + `OpusRec` → `ffmpeg` → 16 кГц PCM без PulseAudio) запускается на mock-серверах:
+
+```bash
+go test -v -race ./internal/capture/... ./internal/bbb/... -run 'TestOpus|TestDirect'
+```
 
 ## 1. Карта функций → кейсы
 
 | Функция | Где код | Кейсы |
 | --- | --- | --- |
-| Онбординг (ФИО → подгруппа → слова) | `internal/tg/handlers.go` | TC-01…TC-04 |
-| Меню, `/help`, `/today`, `/cancel`, fallback | `internal/tg/handlers.go` | TC-05…TC-08 |
-| Профиль/настройки, ФИО, подгруппа, слова | `internal/tg/handlers.go`, `keyboard.go` | TC-09…TC-12 |
-| Привязка ссылки BBB к паре | `handlers.go`, `store` | TC-13 |
-| T-15 карточка, «Зайти/Не сегодня» | `internal/tg/t15.go` | TC-14…TC-15 |
-| Live-карточка пары + «Отключиться» | `internal/tg/live.go` | TC-16 |
-| `/test`: карточка, ссылка, имя | `internal/tg/testjoin.go` | TC-17…TC-19 |
+| Бот: `/start`, кнопка пароля, `/pass`, молчание чужим | `internal/tg/start.go`, `panelpass.go` | TC-01…TC-03 |
+| Вход в панель личным паролем, срок, админ/не админ | `internal/panelpass`, `internal/webapp/server.go` | TC-04…TC-06 |
+| Первый вход, профиль, аккаунт универа, комнаты BBB | `internal/webapp/personal*.go`, `moodle_store.go` | TC-07…TC-09 |
+| Решения по парам (Сегодня/Неделя) | `internal/webapp/personal.go` | TC-10 |
+| ФИО из ЛК | `internal/lk`, `internal/uni/sync.go` | TC-11 |
+| ИИ для тестов: выбор провайдера/модели/ключа, «Проверить» | `internal/llm`, `internal/access`, `internal/webapp/llm_api.go` | TC-12…TC-13 |
+| Авторешение тестов Moodle, «Пройти», журнал, «Перерешать» | `internal/uni/quiz_solve.go`, `internal/quizlog` | TC-14…TC-17 |
+| Напоминания о сроках Moodle | `internal/tg/deadlines.go` | TC-18 |
 | Тест «болванчик» (dummy) | `internal/bbb/worker_testjoin.go` | TC-20…TC-22 |
 | Тест «со звуком» (listen) + запись | `worker_testjoin.go`, `capture` | TC-23…TC-25 |
 | Смена режима dummy↔listen | `worker_testjoin.go` | TC-26 |
 | Вейкворды в тесте | `internal/bbb/spot.go`, `internal/wake` | TC-27 |
 | Выход из теста | `worker_testjoin.go` | TC-28 |
 | Пауза теста во время пары | `worker_testjoin.go` | TC-29 |
-| Тест через панель `/api/test` | `internal/webapp/api.go` | TC-30 |
-| Авторизация и остальное API | `internal/webapp` | TC-31…TC-32 |
+| Служебные ручки через curl | `internal/webapp` | TC-30…TC-32 |
 | Конспекты после пары + GitHub | `worker_lecture.go`, `internal/notes`, `publish` | TC-33 |
 | Парсер расписания + вкладка логов | `internal/rasp`, `/api/parser` | TC-34 |
 | Устойчивость: нет ссылки, ошибки, дубли | `internal/bbb/worker.go` | TC-35…TC-36 |
@@ -46,19 +53,18 @@ Runbook для агента (и человека). Цель — прогнать
 ### 2.1. Сервисы
 
 ```bash
-ssh ssau status          # ssau-tg/rasp/panel/bbb/tunnel
-ssh ssau units           # is-active
-ssh ssau disk            # место: Vosk+записи+паки жрут диск
+S systemctl is-active ssau-tg ssau-rasp ssau-panel ssau-bbb caddy
+S df -h /                 # место: Vosk+записи+паки жрут диск
 ```
 
-Всё должно быть `active`. Если нет — `ssh ssau restart <unit>` (спросит подтверждение).
+Всё должно быть `active`. Если нет — `S systemctl restart <unit>` (подтверждает человек).
 
 ### 2.2. Логи
 
 ```bash
-ssh ssau logs ssau-bbb 300      # хвост, максимум 500 строк
-ssh ssau logs ssau-tg 200
-ssh ssau logs ssau-panel 100
+S journalctl -u ssau-bbb -n 300 --no-pager
+S journalctl -u ssau-rasp -n 200 --no-pager
+S tail -n 200 /opt/ssau-bot/ssau.log          # общий файл всех процессов
 ```
 
 Для подробностей — `LOG_LEVEL=debug` в `/opt/ssau-bot/.env` (человек) + рестарт.
@@ -72,196 +78,130 @@ go build ./...
 go vet ./...
 CGO_ENABLED=0 go test ./...          # то же, что CI
 BBB_DRY_RUN=1 go run ./cmd/bbb       # сеть BBB не трогаем: DryJoiner всегда "room"
+PANEL_DEMO=1 LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/panel   # панель на тестовых данных
 ```
 
 `BBB_DRY_RUN=1` удобен для проверки логики `ensureTestN`, но **не** проверяет реальную
 работу с Greenlight/DDP/SFU, лобби и запись — это только TC-20…TC-28 в живой комнате.
 
-Локальный сквозной тест протокола BBB и аудио-тракта (`DirectJoiner` + `pion/webrtc/v4` + `OpusRec` → `ffmpeg` → 16 кГц PCM без PulseAudio) запускается на mock-серверах:
+### 2.4. Telegram и панель
 
-```bash
-go test -v -race ./internal/capture/... ./internal/bbb/... -run 'TestOpus|TestDirect'
-```
-
-### 2.4. Telegram
-
-- Бот запущен под `TELEGRAM_BOT_TOKEN`, ты пишешь с `ADMIN_TELEGRAM_ID`.
-- `/test` и `/panel` видны только админу (`SetMyCommands` scope chat).
-- Админ получает live-карточку теста (`syncTestLive`) и пуш-уведомления (`notify.Admin`).
+- Бот запущен под `TELEGRAM_BOT_TOKEN`, ты пишешь с `ADMIN_TELEGRAM_ID` (или с аккаунта, у которого логин универа на `ADMIN_LOGIN_SUFFIX`).
+- Пароль в панель — кнопка «🔑 Пароль в панель» в боте; панель открывать с VPN пула.
+- Ход теста и тревоги приходят админу сообщениями (`notify.Admin`).
 
 ### 2.5. Тестовая комната
 
 - Создай комнату в BBB, скопируй `https://bbb.ssau.ru/b/...`.
 - Если комната с модерацией — понадобится второй человек/устройство, чтобы пустить гостя
   (иначе кейс проверяет только лобби).
-- Имя гостя по умолчанию — `тест`; меняется кнопкой «Имя» (`/test Иванов`).
+- Имя гостя по умолчанию — `тест`; меняется полем «Имя в BBB» во вкладке «Тест».
 
 ## 3. Сброс перед прогоном
 
-Чтобы результаты были чистыми:
+Во вкладке «Служебное → Тест» — «Выйти», если статус не idle.
 
 ```bash
-# в Telegram
-/test            # карточка теста
-# кнопка «Выйти», если статус не idle
-```
-
-```bash
-# БД: убрать прошлый тест и события (локально/на VDS при доступе к sqlite)
-sqlite3 /opt/ssau-bot/data/bot.db \
+# БД: убрать прошлый тест и события
+S sqlite3 /opt/ssau-bot/data/bot.db \
   "delete from settings where key='test_join'; \
-   delete from events where type in ('join','leave','wake','t15','skip','record') and message like '%тест%';"
-```
-
-```bash
-ssh ssau recordings      # при желании удалить recordings/test вручную
+   delete from events where type in ('join','leave','wake','skip','record') and message like '%тест%';"
+S ls -la /opt/ssau-bot/recordings/test      # при желании удалить вручную
 ```
 
 ## 4. Кейсы
 
-### Группа A. Health и онбординг (tg)
+### Группа A. Бот (tg)
 
-#### TC-01. Новый пользователь: /start
-- **Проверяет:** `onStart`, `sendAskFIO`, `UpsertUser`, событие `onboard`.
-- **Шаги:** с чистого аккаунта (или после `reset`) отправить `/start`.
-- **Ожидаемо:** приветствие + запрос ФИО, reply-клавиатура «Пары/Конспекты/Профиль».
-- **Логи:** `tg`, `onboard created`, дальше `fio saved`.
-- **БД:** `users` строка с `onboarded=0`, `onboard_stage=0`.
+#### TC-01. /start
+- **Проверяет:** `onStart`, `mainKeyboard`, `setMenuButton`.
+- **Шаги:** `/start` с аккаунта из вайтлиста.
+- **Ожидаемо:** «Здесь только пароль в панель и уведомления…», внизу одна кнопка «🔑 Пароль в панель», слева от поля ввода — кнопка меню «Панель».
 
-#### TC-02. Онбординг: ФИО → подгруппа → слова
-- **Проверяет:** `continueOnboarding`, `setSubgroupAndAskWords`, `finishOnboarding`,
-  callback `ob:sub:1/2`, `ob:skipw`.
-- **Шаги:** ввести ФИО → выбрать подгруппу → ввести слова или «Пропустить».
-- **Ожидаемо:** после слов — профиль (`formatOnboardDone`), `onboard_stage=3`.
-- **Логи:** `onboard fio`, `onboard subgroup`, `onboard done`.
-- **БД:** `users.fio`, `users.subgroup`, `users.wake_words`, `onboarded=1`; событие `onboard`.
+#### TC-02. Пароль в панель
+- **Проверяет:** `sendPanelPass`, `panelpass.Issue`.
+- **Шаги:** нажать «🔑 Пароль в панель» (или `/pass`).
+- **Ожидаемо:** «🔑 Пароль в панель для <ФИО из ЛК>: `xxxx-xxxx`», «Действует до ЧЧ:ММ» (1–2 часа), кнопка «Открыть панель».
+- **Логи:** `panel pass issued tg=... until=...`.
+- **Негатив:** без ключа хранилища — «Пароли в панель сейчас не выдаются».
 
-#### TC-03. Повторный /start онборднутого
-- **Проверяет:** ветку `u.Onboarded` в `onStart`.
-- **Ожидаемо:** сразу `/today`-сводка, без онбординга.
-- **Логи:** `onStart: onboarded`.
+#### TC-03. Чужим и прочему тексту
+- **Шаги:** любой текст, старые команды (`/today`, `/test`), сообщение с чужого аккаунта.
+- **Ожидаемо:** свой текст — подсказка «Бот только выдаёт пароль…»; старые команды — молчание; чужому — молчание и `allowed: rejected tg=...` в логе.
 
-#### TC-04. Whitelist
-- **Проверяет:** `allowed`.
-- **Шаги:** написать с аккаунта вне whitelist и не админа.
-- **Ожидаемо:** тишина.
-- **Логи:** `allowed: rejected tg=...`.
+### Группа B. Вход в панель (panel)
 
-### Группа B. Меню и навигация (tg)
+#### TC-04. Личный пароль
+- **Шаги:** открыть панель, ввести пароль из TC-02.
+- **Ожидаемо:** приложение открывается от лица этого человека («Ещё → ИИ для тестов»: «Ты: <ФИО>»).
+- **Негатив:** чужой/выдуманный пароль — «Пароль не подошёл.», в логе `bad password`. Пароль, выданный больше 2 часов назад, — то же.
 
-#### TC-05. Кнопки меню и команды
-- **Проверяет:** `onToday`, `onNotes`, `onSettings`, `onHelp`, `onCancel`, роутинг `onText`.
-- **Шаги:** по очереди «Пары», «Конспекты», «Профиль», `/help`, `/today`, `/cancel`.
-- **Ожидаемо:** каждая кнопка — свой экран; `/cancel` сбрасывает ожидание ввода.
-- **Логи:** `sendToday`, `sendNotes`, `sendSettings`, `onCancel`.
+#### TC-05. Не админ
+- **Ожидаемо:** нет блока «Служебное»; `curl` к `/api/now`, `/api/people`, `/api/logs`, `/api/admin/llm/people` с его паролем — 403.
 
-#### TC-06. Неизвестная команда/текст
-- **Проверяет:** fallback.
-- **Шаги:** `/qwerty`, затем случайный текст.
-- **Ожидаемо:** подсказка (`fallbackText`), не тишина.
-- **Логи:** `onText: unknown command`, `onText: fallback`.
+#### TC-06. Админ
+- **Ожидаемо:** «Ещё → Служебное» с вкладками «ИИ и ключи», «Тесты Moodle», «Тест», «Сейчас», «Люди», «Пары», «Парсер», «Логи». То же — по общему `PANEL_PASSWORD`.
 
-#### TC-07. Отмена ввода
-- **Проверяет:** `cancelKeyboard`, `clearAwait`.
-- **Шаги:** нажать «Профиль» → «Изменить имя» → «Отмена».
-- **Ожидаемо:** возврат в профиль, ввод не применяется.
-- **Логи:** `clearAwait`, `onSettingsCallback`.
+### Группа C. Своё в панели
 
-#### TC-08. HTML-экранирование
-- **Проверяет:** `internal/tg/html.go`.
-- **Шаги:** сохранить ФИО `<b>hack</b> & <script>`.
-- **Ожидаемо:** в сообщении видны символы, разметка не ломается.
-- **Юнит:** `internal/tg/html_test.go`.
+#### TC-07. Первый вход
+- **Предусловие:** у человека нет имени для BBB или подгруппы.
+- **Ожидаемо:** экран «Первый вход»; после сохранения — приложение; `users.onboarded=1`.
 
-### Группа C. Профиль и слова (tg)
+#### TC-08. Аккаунт универа
+- **Шаги:** «Ещё → Аккаунт универа», логин и пароль ЛК/Moodle.
+- **Ожидаемо:** «Moodle подключён», через ≤5 с появляется «Сдать»; пароль в `accounts` только зашифрован. Неверный пароль — «Moodle не принял логин или пароль.».
 
-#### TC-09. Смена ФИО
-- **Проверяет:** `st:fio`, `handleAwait awaitFIO`, `SetFIO`.
-- **Ожидаемо:** новое ФИО в профиле и в live/BBB-имени.
-- **Логи:** `fio saved tg=...`.
+#### TC-09. Комнаты BBB
+- **Шаги:** «Ещё → Комнаты BBB», вставить ссылку `https://bbb.ssau.ru/b/...`.
+- **Ожидаемо:** «Ссылка сохранена»; ссылка общая для группы (видна всем).
 
-#### TC-10. Смена подгруппы
-- **Проверяет:** `st:sub:1/2`, `SetSubgroup`.
-- **Ожидаемо:** галочка на выбранной, влияет на фильтр пар.
-- **Логи:** `settings subgroup`.
+#### TC-10. Решения по парам
+- **Шаги:** «Сегодня»: переключатель у онлайн-пары, «Заходить на все» / «Никуда».
+- **Ожидаемо:** `join_intents` (`yes/no`); без записи — молчание = заходить. Очная пара — 400 «Это очная пара…».
 
-#### TC-11. Слова: добавить / заменить / очистить
-- **Проверяет:** `onWords`, `st:words`, `MergeWakeWords`, `ParseWakeWords`, `isClearWords`.
-- **Шаги:** `/words фамилия, тест`; затем «Профиль → Слова» → `-`.
-- **Ожидаемо:** слова сохраняются, `-` очищает extra.
-- **Логи:** `words saved`, `words updated`.
-- **БД:** `users.wake_words`.
+#### TC-11. ФИО из ЛК
+- **Предусловие:** подключён ЛК.
+- **Ожидаемо:** при синке ЛК (раз в сутки) в логе `uni: lk name tg=...: <ФИО>`, `settings.lk_name:<tg>`; пустое имя для BBB заполнилось; ФИО видно в сообщении с паролем и в «Служебном».
 
-#### TC-12. Экранирование слов
-- **Проверяет:** `FormatWakeWords`, `model`.
-- **Ожидаемо:** дедуп, lower-case, обрезка мусора.
+### Группа D. ИИ и тесты Moodle
 
-### Группа D. Ссылка BBB к паре (tg)
+#### TC-12. Выбор провайдера, модели, ключа
+- **Шаги:** «Ещё → ИИ для тестов»: провайдер Google, модель, ключ конкретного владельца → «Сохранить».
+- **Ожидаемо:** строка «Твои тесты решает по порядку» начинается с выбранной модели на выбранном ключе, дальше та же модель на остальных ключах, потом общая цепочка. Не админ не видит ключ админа (`LLM_API_*`) и хвосты ключей; выбрать его — 400.
 
-#### TC-13. Привязка ссылки текстом
-- **Проверяет:** `extractBBBURL`, `handleBBBURL`, `pickBBBTarget`, `SetLessonBBB`.
-- **Шаги:** отправить `https://bbb.ssau.ru/b/xxxx` когда есть подходящая online-пара.
-- **Ожидаемо:** ответ «ссылка сохранена», `bbb_links[lesson:<id>]`.
-- **Логи:** `bbb link lesson=<id> tg=...`.
-- **Событие:** type `bbb`.
-- **Негатив:** если пары нет — `noBBBTarget`.
-  **Логи:** `handleBBBURL: no target`.
+#### TC-13. «Проверить» и «Все модели»
+- **Ожидаемо:** «отвечает» и текст модели (gemini-4-hydrogen думает до минуты) или «не отвечает» со списком попыток и ошибками (429 — лимит бесплатного тарифа). «Все модели» — живой список провайдера в подсказках поля.
 
-### Группа E. T-15 (tg)
+#### TC-14. Тест открылся
+- **Предусловие:** подключён Moodle, есть ключи ИИ, тест переходит из «не открыт» в открытый.
+- **Ожидаемо:** «Открылся тест в Moodle!», затем «Тест Moodle автоматически решён» с оценкой, моделью и ответами; `quiz_solved:<tg>:<cmid>`; запись `solved` в журнале.
 
-#### TC-14. Карточка T-15
-- **Проверяет:** `t15Loop`, `sendT15Card`, `PutIntent`, событие `t15`.
-- **Предусловие:** есть online-пара, стартующая в ≤15 мин, пользователь active, подгруппа совпадает.
-- **Ожидаемо:** карточка с «Зайти за меня / Не сегодня» ровно один раз.
-- **Логи:** `t15 sent tg=... lesson=...`; `t15 card` при ошибке.
-- **БД:** `join_intents.decision=pending`.
+#### TC-15. «Пройти»
+- **Шаги:** «Сдать» → у теста (в т.ч. просроченного) «Пройти».
+- **Ожидаемо:** кнопка «Запущено — результат придёт в Telegram»; за ≤5 с синк (`quiz_force`), дальше как TC-14. Moodle не пускает — «⚠️ Не получилось пройти тест» с причиной.
 
-#### TC-15. Решение по T-15
-- **Проверяет:** `onJoinCallback`, `j:` callbacks.
-- **Шаги:** «Не сегодня» → проверить, затем «Зайти» (в новом заходе).
-- **Ожидаемо:** `decision=no`/`yes`, карточка перередактирована (`formatSkipAck`/`formatJoinAck`).
-- **Логи:** `t15 decision tg=... join=false|true`; для `no` — событие `skip`.
+#### TC-16. ИИ не ответил / ответы не сохранились
+- **Ожидаемо:** попытка в Moodle **не завершена**, «⚠️ Проблема с тестом» (первый раз и дальше раз в ~3 ч), `quiz_fail` растёт, повтор на каждом обходе (30 мин); запись `failed` в журнале с попытками по моделям.
 
-### Группа F. Live-карточка пары (tg)
+#### TC-17. Журнал и «Перерешать» (админ)
+- **Шаги:** «Служебное → Тесты Moodle» → «Подробнее», «Перерешать».
+- **Ожидаемо:** кто (ФИО), модель и ключ, все попытки по цепочке, ответы по вопросам, сырой ответ ИИ, оценка; «Перерешать» снимает отметки и запускает синк.
 
-#### TC-16. Live-карточка и «Отключиться»
-- **Проверяет:** `liveLoop`, `syncLiveCard`, `clearLiveCard`, `onLeaveCallback` (`x:`).
-- **Предусловие:** bbb зашёл в пару (см. TC-35/36 или реальная пара), `presence=room|lobby`.
-- **Ожидаемо:** карточка появляется и редактируется на месте (предмет, ссылка, остаток,
-  статус, ФИО); при выходе — «Вышел из комнаты»; кнопка «Отключиться» ставит `decision=no`.
-- **Логи:** `live card sent`, `live card gone`, `leave button tg=... lesson=...`.
+#### TC-18. Напоминания о сроках
+- **Ожидаемо:** за 24 и за 3 часа до срока несданного — «⏰ Срок …» в Telegram, по одному разу (`dl_sent:*`).
 
-### Группа G. Тестовая комната: подготовка и режимы (bbb)
-
-#### TC-17. Карточка теста
-- **Проверяет:** `onTest`, `sendTestCard`, `formatTestCard`, `testMarkup`.
-- **Шаги:** `/test` без ссылки.
-- **Ожидаемо:** карточка, кнопки «Болванчик», «Со звуком», «Ссылка», «Имя», «Пульт».
-- **Логи:** `tg`, `sendTestCard`.
-
-#### TC-18. Привязка ссылки теста
-- **Проверяет:** `armTestURL`, `awaitTestURL`, `extractBBBURL`.
-- **Шаги:** `/test https://bbb.ssau.ru/b/...` или кнопка «Ссылка» → вставить URL.
-- **Ожидаемо:** «ссылка привязана», кнопки режимов активны.
-- **Логи:** `test url armed url=...`.
-- **БД:** `settings.test_join.url`.
-- **Негатив:** URL не bbb.ssau.ru → WebApp вернёт 400; в Telegram `extractBBBURL` не сработает.
-
-#### TC-19. Имя гостя
-- **Проверяет:** `setTestGuestName`, `normalizeTestName`, `tx:name`, `awaitTestName`.
-- **Шаги:** `/test Иванов Пётр`; затем «Имя» → `-`.
-- **Ожидаемо:** имя меняется, `-` возвращает `тест`.
-- **Логи:** `test guest name=...`.
+### Группа G. Тестовая комната: режимы (bbb)
 
 #### TC-20. Dummy-заход
-- **Проверяет:** `onTestCallback tx:dummy`, `tickTest`, `ensureTestN`, `DirectJoiner.Join`,
+- **Проверяет:** `POST /api/test {want:dummy}`, `tickTest`, `ensureTestN`, `DirectJoiner.Join`,
   `PublishPresence`.
-- **Шаги:** задать ссылку → «Болванчик».
+- **Шаги:** «Служебное → Тест»: ссылка, имя → «Болванчик».
 - **Ожидаемо:** бот заходит гостем (Greenlight + Meteor DDP), статус `joining → room|lobby`, админ получает
   `testInRoomText` («болванчик без звука») или сообщение про лобби.
 - **Логи (bbb):** `test join want=dummy`, `test seated state=room|lobby`,
   при ошибке `test join fail: ...`.
-- **Логи (tg):** `test callback want=dummy`, `test live card sent`.
+- **Логи (panel):** `handleTestPost: want=dummy`.
 - **БД:** `settings.test_join.status`, событие `join` «тест dummy».
 
 #### TC-21. Dummy: сессия жива
@@ -274,16 +214,16 @@ ssh ssau recordings      # при желании удалить recordings/test 
 - **Предусловие:** комната с модерацией, гость в лобби.
 - **Ожидаемо:** пуш админу «тест: лобби как «...». Пусти из модерации.»; после допуска —
   «тест: пустили как «...»», статус `room`.
-- **Логи:** `test seated state=lobby`, затем `syncTestLive` edit.
+- **Логи:** `test seated state=lobby`, затем `test seated state=room`; во вкладке «Тест» статус меняется сам (опрос каждые 4 с).
 
 #### TC-23. Listen-заход + запись
-- **Проверяет:** `tx:listen`, `attachTestRecorder`, `startSessionRecorder`, `capture.StartOpus`, `capture.SegmentPath`,
+- **Проверяет:** `POST /api/test {want:listen}`, `attachTestRecorder`, `startSessionRecorder`, `capture.StartOpus`, `capture.SegmentPath`,
   `startSpotter`, `hogs.Hold`.
-- **Шаги:** из карточки «Со звуком» (или смена режима, TC-26).
+- **Шаги:** «Служебное → Тест» → «Со звуком» (или смена режима, TC-26).
 - **Ожидаемо:** в комнате, подключен `bbb-webrtc-sfu` (`listen-only`), идёт запись; в `recordings/test/` появляется `audio-<nano>.ogg`.
 - **Логи:** `test join want=listen`, `rec seg ...`, `capture: opus rec ...`,
   `test seated state=room`.
-- **Проверка:** `ssh ssau recordings` — растущий `recordings/test/audio-*.ogg`.
+- **Проверка:** `S ls -la /opt/ssau-bot/recordings/test` — растущий `recordings/test/audio-*.ogg`.
 
 #### TC-24. Остановка и склейка записи
 - **Проверяет:** `rec.Stop`, `capture.MergeSegments`.
@@ -292,18 +232,17 @@ ssh ssau recordings      # при желании удалить recordings/test 
   переименован без перекодирования.
 - **Логи:** `capture: ffmpeg concat`, `capture: merge done`, `test stop rec`,
   `test merge` (при ошибке — WARN).
-- **Проверка:** `ssh ssau recordings` — есть `audio.ogg` размером >0.
+- **Проверка:** `S ls -la /opt/ssau-bot/recordings/test` — есть `audio.ogg` размером >0.
 
 #### TC-25. Пульт во время теста
-- **Проверяет:** `handleTestGet`/`handleTestPost`, `syncTestLive`.
-- **Шаги:** открыть Mini App «Пульт», посмотреть статус, нажать режимы/выход.
-- **Ожидаемо:** состояние теста меняется так же, как из Telegram; live-карточка
-  редактируется.
+- **Проверяет:** `handleTestGet`/`handleTestPost`, опрос вкладки «Тест».
+- **Шаги:** во вкладке «Служебное → Тест» смотреть статус, переключать режимы, «Выйти».
+- **Ожидаемо:** статус обновляется каждые 4 с; ход теста приходит админу сообщениями в Telegram (`notify.Admin`).
 - **Логи (panel):** `handleTestGet: want=...`, `handleTestPost: want=...`.
 
 #### TC-26. Смена режима dummy ↔ listen
 - **Проверяет:** ветку `mode != want` в `ensureTestN`.
-- **Шаги:** в комнате в dummy нажать «Со звуком».
+- **Шаги:** в комнате в dummy нажать «Со звуком» во вкладке «Тест».
 - **Ожидаемо:** сессия закрывается и переоткрывается с записью; `mode` меняется.
 - **Логи:** `ensureTestN: mode switch dummy -> listen`, новый `test join want=listen`.
 
@@ -321,8 +260,8 @@ ssh ssau recordings      # при желании удалить recordings/test 
 - **Юнит:** `internal/wake` (`engine_test.go`, `match_test.go`).
 
 #### TC-28. Выход из теста
-- **Проверяет:** `tx:leave`, `stopTest(reason=off)`, `clearTestLive`.
-- **Ожидаемо:** сессия закрыта, `status=idle`, `want=""`, live-карточка «Тест: вышел».
+- **Проверяет:** `POST /api/test {want:leave}`, `stopTest(reason=off)`.
+- **Ожидаемо:** сессия закрыта, `status=idle`, `want=""`, админу «тест: вышел из комнаты.».
 - **Логи:** `stopTest: reason=off`, `test stopped reason=off was_live=true`.
 - **Событие:** `leave` «тест off».
 
@@ -334,31 +273,27 @@ ssh ssau recordings      # при желании удалить recordings/test 
 - **Логи:** `bbb: test paused: lecture in progress`, `pauseTest: active=true`.
 - **Важно:** проверить, что уведомление пришло **один раз** (флаг `testPaused`).
 
-### Группа I. Панель (panel)
+### Группа I. Служебные ручки (panel)
 
 #### TC-30. `/api/test` через curl
-- **Проверяет:** авторизацию и `handleTestPost`.
 - **Шаги:**
   ```bash
-  BASE=$(ssh ssau webapp-url)         # или http://localhost:8080
+  BASE=https://ssau.r4r1ty.fun        # с IP из PANEL_ALLOW_IPS
+  PASSWORD=...                        # личный пароль админа или PANEL_PASSWORD
   curl -s -H "X-Panel-Password: $PASSWORD" "$BASE/api/test"
-  curl -s -H "X-Panel-Password: $PASSWORD" -H 'Content-Type: application/json' \
+  curl -s -X POST -H "X-Panel-Password: $PASSWORD" -H 'Content-Type: application/json' \
        -d '{"url":"https://bbb.ssau.ru/b/xxx","want":"dummy"}' "$BASE/api/test"
   ```
-- **Ожидаемо:** JSON `TestJoin`; невалидный URL → 400 `url must be https://bbb.ssau.ru/b/...`;
-  `want` без URL → 400 «сначала ссылка».
-- **Логи:** `handleTestGet`, `handleTestPost`, `bad url`.
+- **Ожидаемо:** JSON `TestJoin`; с паролем не админа — 403.
 
 #### TC-31. Авторизация
-- **Проверяет:** `auth.go`, `requirePassword`.
-- **Ожидаемо:** без заголовка — 401; неверный пароль — 401 и WARN; верный — 200.
-- **Логи:** `requirePassword: auth failed`, `passwordOK`.
+- **Ожидаемо:** без заголовка — 401; неверный/просроченный пароль — 401 и `bad password` в логе; чужой IP — 403 `forbidden` до проверки пароля; верный — 200.
 
 #### TC-32. Остальное API
 - **Проверяет:** `/api/now`, `/api/people`, `/api/lessons`, `/api/parser`, `/api/logs`,
-  `/api/settings`, `POST /api/bbb`, `POST /api/people/{id}`, `POST /api/parser/refresh`.
+  `/api/settings`, `POST /api/bbb`, `POST /api/people/{id}`, `POST /api/parser/refresh`,
+  `/api/admin/llm/people`, `/api/admin/quiz-runs`.
 - **Ожидаемо:** JSON, вкладка «Логи» читает таблицу `events`.
-- **Логи:** соответствующие `handle*`.
 
 ### Группа J. Конспекты и парсер (фоновые)
 
@@ -366,8 +301,7 @@ ssh ssau recordings      # при желании удалить recordings/test 
 - **Проверяет:** `maybeHarvest`, `maybeNotes`, `buildNotes`, `notes.Build` (STT→LLM→PDF),
   `publisher`, `announceNotes`, `cleanPack`.
 - **Предусловие:** есть пак со статусом `recorded` за прошлый день; ключи LLM/STT/vision.
-- **Ожидаемо:** `slides/`, `transcript.txt`, `notes.md`, `notes.pdf`; PDF уходит кнопкой
-  в Telegram (`/notes`); выгрузка в GitHub; локальные файлы чистятся через сутки.
+- **Ожидаемо:** `slides/`, `transcript.txt`, `notes.md`, `notes.pdf`; в Telegram уведомление «Конспект готов» с кнопкой «Скачать PDF» (присылает файл); конспект виден в панели «Конспекты»; выгрузка в GitHub; локальные файлы чистятся через сутки. LLM — общая бесплатная цепочка (`llm:` в логах).
 - **Логи:** `maybeNotes: start day=...`, `notes: Build: done`, `publish`, `notes pdf sent`.
 - **Юнит:** `internal/notes/*_test.go`, `internal/publish`.
 
@@ -381,43 +315,41 @@ ssh ssau recordings      # при желании удалить recordings/test 
 
 #### TC-35. Заход пары без ссылки
 - **Проверяет:** `missingBBB`.
-- **Ожидаемо:** `presence=error`, событие `no_bbb`, сообщение пользователю.
+- **Ожидаемо:** `presence=error`, событие `no_bbb`, пользователю «Нет ссылки… Добавь её в панели», админу одно сообщение на пару.
 - **Логи:** `bbb: no bbb link lesson=<id>`.
 
 #### TC-36. Ошибка и повтор захода
 - **Проверяет:** `ensureIn`, `joinFail`, `dropDead`, `isBlocked`.
 - **Шаги:** дать битую ссылку (`/b/несуществующая`) на пару/тест.
-- **Ожидаемо:** `presence=error`, событие `error`, пуш админу/пользователю; повтор по
-  кнопке «Зайти»; первый `dropDead` — тихий retry, второй — блок.
+- **Ожидаемо:** `presence=error`, событие `error`, пуш админу/пользователю; повтор — переключить у пары «Не заходить» → «Заходить» в панели; первый `dropDead` — тихий retry, второй — блок.
 - **Логи:** `join fail <key> tg=...: <причина>`, `drop retry`, `seat`.
 - **Тесты:** `internal/bbb/decide_test.go`, `worker_block_test.go`, `seat_test.go`.
 
 ## 5. Шпаргалка по логам
 
 ```bash
-# вся тестовая комната
-ssh ssau logs ssau-bbb 500 | grep -E 'test join|test seated|test stopped|test paused|test ffmpeg|ensureTestN|stopTest'
+# тестовая комната
+S journalctl -u ssau-bbb -n 500 --no-pager | grep -E 'test join|test seated|test stopped|test paused|ensureTestN|stopTest'
 
-# telegram-сторона теста
-ssh ssau logs ssau-tg 300 | grep -E 'test |test_card|t15 |live card|onboard|fio saved|words'
+# бот: пароли и отказы
+S journalctl -u ssau-tg -n 300 --no-pager | grep -E 'panel pass|allowed: rejected|remind|webapp url'
 
 # панель и авторизация
-ssh ssau logs ssau-panel 200 | grep -E 'handleTest|requirePassword|auth failed'
+S journalctl -u ssau-panel -n 200 --no-pager | grep -E 'bad password|allow: отказ|admin only|llm choice|quiz force|quiz resolve'
+
+# решатель тестов и ИИ
+S journalctl -u ssau-rasp -n 500 --no-pager | grep -E 'quiz|llm:|lk name'
 
 # вейкворды
-ssh ssau logs ssau-bbb 500 | grep -E 'wake|vosk|услышал'
-
-# ошибки по всем сервисам
-ssh ssau status
+S journalctl -u ssau-bbb -n 500 --no-pager | grep -E 'wake|vosk|услышал'
 ```
 
 ## 6. Сброс после прогона
 
 ```bash
-# Telegram: /test → «Выйти»
-sqlite3 /opt/ssau-bot/data/bot.db \
-  "delete from settings where key='test_join';"
-ssh ssau recordings      # удалить recordings/test при необходимости
+# панель: «Служебное → Тест» → «Выйти»
+S sqlite3 /opt/ssau-bot/data/bot.db "delete from settings where key='test_join';"
+# удалить /opt/ssau-bot/recordings/test при необходимости
 # вернуть LOG_LEVEL=info и рестарт
 ```
 

@@ -6,6 +6,7 @@ import { ago, syncClock } from "../format.js";
 import { app, busy, errorBlock, head, kindLabel, skeleton } from "../ui.js";
 import { toast } from "../toast.js";
 import { mountService } from "./service.js";
+import { aiFormHTML, bindAI } from "../ai.js";
 
 function section(id, ico, title, sub, body) {
   return html`<section class="card more-section" id="sec-${id}" aria-labelledby="h-${id}">
@@ -80,13 +81,15 @@ function roomsBody(rooms) {
 export function mountMore(root, ctx) {
   let alive = true;
   let stopService = null;
-  const st = { me: null, moodle: null, rooms: [], serviceOpen: false };
+  const st = { me: null, moodle: null, rooms: [], serviceOpen: false, ai: null };
   setHTML(root, skeleton());
 
   async function load() {
     try {
-      const [me, dl, rooms] = await Promise.all([api("api/me"), api("api/deadlines"), api("api/rooms")]);
+      const [me, dl, rooms, ai] = await Promise.all([api("api/me"), api("api/deadlines"), api("api/rooms"),
+        api("api/llm").catch(() => null)]);
       if (!alive) return;
+      st.ai = ai;
       st.me = me;
       st.moodle = dl.moodle;
       syncClock(dl.now);
@@ -113,6 +116,7 @@ export function mountMore(root, ctx) {
     setHTML(root, html`${head({ eyebrow: "Настройки и служебное", title: "Ещё" })}
       ${section("account", "key", "Аккаунт универа", "Moodle: тесты и задания со сроками; ЛК: расписание, подгруппы и ссылки BBB", html`<div id="acc-body" class="stack-lg">${accountBody(st.moodle)}</div>`)}
       ${section("profile", "user", "Профиль", "Как бот заходит за вас", profileBody(st.me))}
+      ${st.ai ? section("ai", "bot", "ИИ для тестов", "Какой моделью и чьим ключом бот решает твои тесты в Moodle", aiFormHTML(st.ai)) : ""}
       ${section("rooms", "door", "Комнаты BBB", "Ссылки по предметам — подставляются на каждую пару", roomsBody(st.rooms))}
       ${app.settings?.is_admin ? html`<details class="card fold service" id="service" ${st.serviceOpen ? "open" : ""}>
         <summary>${icon("tools")}Служебное${icon("chev", "chev")}</summary>
@@ -240,6 +244,12 @@ export function mountMore(root, ctx) {
         busy(btn, false);
       }
     }
+  });
+
+  bindAI(root, () => st.ai, (v) => { st.ai = v; }, () => {
+    render();
+    const el = root.querySelector("#sec-ai");
+    if (el) el.scrollIntoView({ block: "nearest" });
   });
 
   load();

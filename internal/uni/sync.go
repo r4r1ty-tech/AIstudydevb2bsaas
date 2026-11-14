@@ -207,6 +207,7 @@ func (s *Syncer) accountLessons(ctx context.Context, acc model.Account, withGrou
 		if len(groups) == 0 {
 			return errors.New("в ЛК нет группы")
 		}
+		s.refreshLKName(ctx, c, acc.TelegramID)
 		gid := groups[0].ID
 		for _, g := range groups {
 			if g.ID == s.GroupID {
@@ -248,6 +249,35 @@ func (s *Syncer) accountLessons(ctx context.Context, acc model.Account, withGrou
 		return nil
 	})
 	return out, err
+}
+
+// LKNameKey — ФИО человека из ЛК (страница /account), по Telegram id.
+func LKNameKey(telegramID int64) string { return "lk_name:" + strconv.FormatInt(telegramID, 10) }
+
+func lkNameAtKey(telegramID int64) string { return "lk_name_at:" + strconv.FormatInt(telegramID, 10) }
+
+// refreshLKName — раз в сутки берёт ФИО из ЛК: оно связывает человека в
+// панели, боте и журналах. Пустое «имя для BBB» заполняется им же.
+func (s *Syncer) refreshLKName(ctx context.Context, c *lk.Client, id int64) {
+	now := s.now()
+	if v, ok, _ := s.Store.GetSetting(lkNameAtKey(id)); ok && v != "" {
+		if at, err := time.Parse(time.RFC3339, v); err == nil && now.Sub(at) < 24*time.Hour {
+			return
+		}
+	}
+	name, err := c.FullName(ctx)
+	if err != nil {
+		logx.Warnf("uni", "lk name tg=%d: %v", id, err)
+		return
+	}
+	_ = s.Store.SetSetting(LKNameKey(id), name)
+	_ = s.Store.SetSetting(lkNameAtKey(id), now.Format(time.RFC3339))
+	if u, err := s.Store.GetUser(id); err == nil && u != nil && strings.TrimSpace(u.FIO) == "" {
+		if err := s.Store.SetFIO(id, name); err != nil {
+			logx.Warnf("uni", "lk name -> fio tg=%d: %v", id, err)
+		}
+	}
+	logx.Infof("uni", "lk name tg=%d: %s", id, name)
 }
 
 // yearStart — дата начала учебного года (кэш в settings, чтобы не дёргать лишнюю неделю).

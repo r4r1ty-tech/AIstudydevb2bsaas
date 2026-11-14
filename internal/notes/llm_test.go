@@ -34,7 +34,12 @@ func TestSummarizeOpenAICompatible(t *testing.T) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
 		b, _ := io.ReadAll(r.Body)
-		var req chatReq
+		var req struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
 		_ = json.Unmarshal(b, &req)
 		gotModel = req.Model
 		if len(req.Messages) > 0 {
@@ -76,9 +81,9 @@ func TestSummarizeRequiresConfig(t *testing.T) {
 		cfg  *config.Config
 		want string
 	}{
-		{"no key", &config.Config{}, "LLM_API_KEY"},
-		{"no url", &config.Config{LLMAPIKey: "k"}, "LLM_API_URL"},
-		{"no model", &config.Config{LLMAPIKey: "k", LLMAPIURL: "https://host"}, "LLM_MODEL"},
+		{"no key", &config.Config{}, "нет ключей ИИ"},
+		{"no url", &config.Config{LLMAPIKey: "k"}, "нет ключей ИИ"},
+		{"no model", &config.Config{LLMAPIKey: "k", LLMAPIURL: "https://host"}, "нет ключей ИИ"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

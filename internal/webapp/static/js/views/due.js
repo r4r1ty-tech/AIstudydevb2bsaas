@@ -3,7 +3,8 @@ import { api } from "../api.js";
 import { html, setHTML } from "../dom.js";
 import { icon } from "../icons.js";
 import { ago, duration, now, syncClock, whenLabel } from "../format.js";
-import { app, empty, errorBlock, head, skeleton } from "../ui.js";
+import { app, busy, empty, errorBlock, head, skeleton } from "../ui.js";
+import { toast } from "../toast.js";
 
 const GROUPS = [
   { id: "overdue", title: "Просрочено", ico: "warn" },
@@ -33,6 +34,8 @@ function item(d) {
       </div>
       ${d.url ? html`<a class="link-btn" href="${d.url}" target="_blank" rel="noopener noreferrer">Открыть в Moodle${icon("ext", "icon-sm")}</a>` : ""}
     </div>
+    ${d.kind === "quiz" && d.status !== "submitted" ? html`<div class="btn-row"><button type="button" class="btn btn-primary btn-sm" data-quiz-force="${d.id}">${icon("refresh")}Пройти</button>
+      <span class="field-hint">бот сам решит тест, даже просроченный, если Moodle ещё пускает</span></div>` : ""}
     ${d.todo ? html`<details class="fold"><summary>${icon("file")}Что сделать${icon("chev", "chev")}</summary><div class="fold-body"><ul class="due-todo">${d.todo.split("\n").filter(Boolean).map((t) => html`<li>${t}</li>`)}</ul></div></details>` : ""}
   </article>`;
 }
@@ -116,7 +119,22 @@ export function mountDue(root, ctx) {
     h.focus({ preventScroll: true });
   }
 
-  root.addEventListener("click", (ev) => {
+  root.addEventListener("click", async (ev) => {
+    const qf = ev.target.closest("[data-quiz-force]");
+    if (qf) {
+      busy(qf, true);
+      try {
+        const r = await api("api/quiz/force", { method: "POST", body: { cmid: Number(qf.dataset.quizForce) } });
+        toast(r.message || "Запускаю");
+        busy(qf, false);
+        qf.disabled = true;
+        qf.textContent = "Запущено — результат придёт в Telegram";
+      } catch (e) {
+        busy(qf, false);
+        toast(e.message, "error");
+      }
+      return;
+    }
     const j = ev.target.closest("[data-jump]");
     if (j) {
       const target = j.dataset.jump === "open" ? root.querySelector(".due-group") : root.querySelector(`#due-${j.dataset.jump}`);

@@ -13,7 +13,7 @@ import (
 )
 
 // Личная панель: «я» — тот, кто вошёл (viewer, по личному паролю), иначе cfg.AdminID. Решения по парам
-// живут в join_intents, как у кнопок T-15 в боте; воркер bbb читает их сам.
+// живут в join_intents; воркер bbb читает их сам. Нет записи — молчание = заходить.
 
 const (
 	decisionYes  = "yes"
@@ -451,7 +451,7 @@ func (s *Server) handleWeek(w http.ResponseWriter, r *http.Request) {
 }
 
 // setIntent пишет моё решение. "auto" возвращает пару к молчанию: есть запись —
-// pending (asked_at сохраняется, повторной карточки T-15 не будет), нет — ничего.
+// pending (asked_at сохраняется), нет — ничего.
 func (s *Server) setIntent(lessonID int64, decision string, now time.Time) error {
 	cur, err := s.src.GetIntent(s.myID(), lessonID)
 	if err != nil {
