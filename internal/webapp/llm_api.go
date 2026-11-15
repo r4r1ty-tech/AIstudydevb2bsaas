@@ -661,12 +661,34 @@ func (s *Server) handleQuizForce(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "нужен cmid")
 		return
 	}
+	if s.quizNotOpen(r.Context(), req.CMID) {
+		writeErr(w, http.StatusConflict, "Тест ещё не открыт: «Пройти» станет доступно, когда он откроется.")
+		return
+	}
 	if err := s.requeueQuiz(s.myID(), req.CMID); err != nil {
 		writeStoreErr(w, err)
 		return
 	}
 	logx.Infof("panel", "quiz force tg=%d cmid=%d", s.myID(), req.CMID)
 	writeJSON(w, map[string]any{"ok": true, "message": "Запускаю: бот зайдёт в тест в течение минуты, результат придёт в Telegram."})
+}
+
+// quizNotOpen — тест с этим cmid в «Сдать» ещё не открыт. Если его в списке нет,
+// ответ «нет» (как раньше): решает то же правило, что и в списке.
+func (s *Server) quizNotOpen(ctx context.Context, cmid int64) bool {
+	if !s.moodle.Status().Connected {
+		return false
+	}
+	list, err := s.moodle.Deadlines(ctx, s.now())
+	if err != nil {
+		return false
+	}
+	for _, d := range list {
+		if d.ID == strconv.FormatInt(cmid, 10) {
+			return d.NotOpen
+		}
+	}
+	return false
 }
 
 // handleQuizForceAll — «Пройти все»: поставить на авторешение каждый несданный
@@ -686,7 +708,8 @@ func (s *Server) handleQuizForceAll(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, d := range list {
 			cmid, perr := strconv.ParseInt(d.ID, 10, 64)
-			if d.Kind != DeadlineQuiz || d.Status == DeadlineSubmitted || d.Closed || perr != nil || cmid <= 0 {
+			// Ещё не открытые тесты в авторешение не ставим: откроются — тогда и решим.
+			if d.Kind != DeadlineQuiz || d.Status == DeadlineSubmitted || d.Closed || d.NotOpen || perr != nil || cmid <= 0 {
 				continue
 			}
 			if err := s.markQuizForce(id, cmid); err != nil {

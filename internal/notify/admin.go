@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/PaulSonOfLars/gotgbot/v2"
 
@@ -146,7 +147,19 @@ func UserMarkup(ctx context.Context, cfg *config.Config, telegramID int64, text 
 		logx.Errorf("notify", "UserMarkup: send id=%d: %v", telegramID, err)
 		return
 	}
+	logSent(telegramID, text)
 	logx.Debugf("notify", "UserMarkup: sent id=%d", telegramID)
+}
+
+// logSent пишет в журнал INFO, что сообщение доставлено: кому, сколько символов и его начало.
+// Текст уходит в журнал без переносов строк и не длиннее 60 символов.
+func logSent(telegramID int64, text string) {
+	runes := []rune(text)
+	if len(runes) > 60 {
+		runes = runes[:60]
+	}
+	head := strings.NewReplacer("\r", " ", "\n", " ").Replace(string(runes))
+	logx.Infof("notify", "sent tg=%d chars=%d \"%s\"", telegramID, utf8.RuneCountInString(text), head)
 }
 
 func Document(ctx context.Context, cfg *config.Config, telegramID int64, path, caption, filename string) error {
@@ -204,5 +217,7 @@ func HTML(ctx context.Context, cfg *config.Config, telegramID int64, text string
 	}
 	if _, err := bot.SendMessageWithContext(ctx, telegramID, text, opts); err != nil {
 		logx.Errorf("notify", "HTML: send id=%d: %v", telegramID, err)
+		return
 	}
+	logSent(telegramID, text)
 }

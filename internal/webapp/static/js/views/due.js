@@ -8,6 +8,7 @@ import { toast } from "../toast.js";
 import { confirmDialog } from "../dialog.js";
 
 const GROUPS = [
+  { id: "notopen", title: "Скоро откроются", ico: "unlock" },
   { id: "overdue", title: "Просрочено", ico: "warn" },
   { id: "soon", title: "Сегодня и завтра", ico: "hourglass" },
   { id: "week", title: "На этой неделе", ico: "calendar" },
@@ -46,7 +47,44 @@ function askPanel(items, fio) {
   </div>`;
 }
 
+// «Что сделать» — сворачиваемый блок, общий для обычной и «ещё не открытой» карточки.
+function todoFold(d) {
+  return d.todo ? html`<details class="fold"><summary>${icon("file")}Что сделать${icon("chev", "chev")}</summary><div class="fold-body"><ul class="due-todo">${d.todo.split("\n").filter(Boolean).map((t) => html`<li>${t}</li>`)}</ul></div></details>` : "";
+}
+
+// Карточка теста, который ещё не открылся: янтарная, без «Пройти»,
+// с временем открытия и закрытия (окно). Сервер относит сюда только элементы с Opens в будущем.
+function notOpenItem(d) {
+  const hasOpens = !!d.opens && !d.opens.startsWith("0001-");
+  const hasDue = !!d.due && !d.due.startsWith("0001-");
+  const opensMs = hasOpens ? Date.parse(d.opens) : NaN;
+  const dueMs = hasDue ? Date.parse(d.due) : NaN;
+  const passed = hasOpens && opensMs <= now();
+  const opensText = passed ? "открывается…" : `откроется ${whenLabel(d.opens)}`;
+  const left = hasOpens && !passed ? `через ${duration(opensMs - now())}` : "";
+  const win = hasOpens && hasDue && dueMs > opensMs ? ` · окно ${duration(dueMs - opensMs)}` : "";
+  const closes = hasDue ? `закроется ${whenLabel(d.due)}${win}` : "";
+  const href = safeHref(d.url);
+  return html`<article class="due-item notopen">
+    <p class="due-course">${d.course}${d.section ? html` · ${d.section}` : ""}</p>
+    <h3 class="due-title">${d.title}</h3>
+    <div class="due-when"><span class="chip chip-amber">${icon("unlock")}${opensText}</span>${left ? html`<span class="due-left">${left}</span>` : ""}</div>
+    ${closes ? html`<div class="due-when"><span>${icon("clock", "icon-sm")} ${closes}</span></div>` : ""}
+    <div class="due-foot">
+      <div class="row">
+        <span class="chip">${icon(d.kind === "quiz" ? "quiz" : "assign")}${d.kind === "quiz" ? "Тест" : "Задание"}</span>
+        ${statusChip(d.status, d.kind, false)}
+      </div>
+      ${href ? html`<a class="link-btn" href="${href}" target="_blank" rel="noopener noreferrer">Открыть в Moodle${icon("ext", "icon-sm")}</a>` : ""}
+    </div>
+    ${d.kind === "quiz" && d.status !== "submitted" ? html`<div class="btn-row"><button type="button" class="btn btn-sm" disabled>${icon("clock")}ещё не открыт</button>
+      <span class="field-hint">«Пройти» станет доступно, когда тест откроется</span></div>` : ""}
+    ${todoFold(d)}
+  </article>`;
+}
+
 function item(d) {
+  if (d.group === "notopen") return notOpenItem(d);
   const hasDue = d.due && !d.due.startsWith("0001-");
   const ms = hasDue ? Date.parse(d.due) - now() : 0;
   const left = d.group === "done" || !hasDue ? "" : ms < 0 ? `просрочено на ${duration(-ms)}` : `осталось ${duration(ms)}`;
@@ -65,7 +103,7 @@ function item(d) {
     ${d.kind === "quiz" && d.status !== "submitted" ? html`<div class="btn-row"><button type="button" class="btn btn-primary btn-sm" data-quiz-force="${d.id}">${icon("refresh")}Пройти</button>
       ${d.closed ? html`<button type="button" class="btn btn-sm" data-ask-open="${d.id}">${icon("file")}Попросить открыть</button>` : ""}
       <span class="field-hint">бот сам решит тест, даже просроченный, если Moodle ещё пускает</span></div>` : ""}
-    ${d.todo ? html`<details class="fold"><summary>${icon("file")}Что сделать${icon("chev", "chev")}</summary><div class="fold-body"><ul class="due-todo">${d.todo.split("\n").filter(Boolean).map((t) => html`<li>${t}</li>`)}</ul></div></details>` : ""}
+    ${todoFold(d)}
   </article>`;
 }
 
@@ -107,7 +145,8 @@ export function mountDue(root, ctx) {
     const c = d.counts || {};
     const groups = GROUPS.filter((g) => by[g.id] && by[g.id].length);
     // Несданные тесты — те же, что получат «Пройти» у себя в карточке (сервер считает так же).
-    const queued = d.deadlines.filter((x) => x.kind === "quiz" && x.status !== "submitted" && !x.closed);
+    // Ещё не открытые тесты в очередь не ставим: Moodle их не пустит (сервер считает так же).
+    const queued = d.deadlines.filter((x) => x.kind === "quiz" && x.status !== "submitted" && !x.closed && !x.not_open);
     setHTML(root, html`${head({ eyebrow: html`Moodle · ${m.synced_at ? `обновлено ${ago(m.synced_at)}` : "подключён"}`, title: "Сдать" })}
       <div class="due-summary">
         <button type="button" class="due-stat${c.overdue ? " is-coral" : ""}" data-jump="overdue" ${c.overdue ? "" : "disabled"} aria-label="Просрочено: ${c.overdue || 0}. Показать"><b>${c.overdue || 0}</b><span>просрочено</span></button>
@@ -118,6 +157,7 @@ export function mountDue(root, ctx) {
       ${groups.length ? "" : empty({ ico: "check", title: nodue.length ? "Горящих сроков нет" : "Всё сдано", text: nodue.length ? "Со сроками всё сдано. Ниже — задания без срока." : "Открытых сроков нет. Новые появятся здесь сами." })}
       ${groups.map((g) => html`<section class="due-group ${g.id}" id="due-${g.id}" aria-labelledby="dg-${g.id}">
         <h2 class="due-group-title" id="dg-${g.id}">${icon(g.ico)}${g.title} <span class="count mono">· ${by[g.id].length}</span></h2>
+        ${g.id === "notopen" ? html`<p class="field-hint">Пройти заранее нельзя: Moodle пускает в тест только после открытия.</p>` : ""}
         ${g.id === "closed" ? html`<div class="btn-row"><button type="button" class="btn btn-sm" data-ask-group>${icon("file")}Попросить открыть все</button><span class="field-hint">один текст на все закрытые тесты</span></div>` : ""}
         ${by[g.id].map(item)}
       </section>`)}

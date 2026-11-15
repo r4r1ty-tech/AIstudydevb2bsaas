@@ -149,10 +149,7 @@ func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Acc
 			continue
 		}
 
-		isOpenNow := !strings.Contains(it.Todo, "не открыт для попыток") &&
-			(it.Opens == nil || !it.Opens.After(now)) &&
-			(it.Due == nil || it.Due.After(now))
-		if !isOpenNow {
+		if !quizOpenNow(it, now) {
 			continue
 		}
 
@@ -168,8 +165,13 @@ func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Acc
 			s.notify(ctx, acc.TelegramID, "<b>Открылся тест в Moodle!</b>\n"+FormatItem(it, now, s.loc()))
 		}
 		if wasClosed || wakeKicked || failedBefore {
-			// Авто-постановка: в режиме service ошибку очереди уже записал dispatchQuiz в журнал.
-			_, _ = s.dispatchQuiz(ctx, acc, c, it, false)
+			// Ошибка постановки (например, база занята) не теряет тест: метка «ожидает повтора»
+			// заставит следующий синк поставить его снова (failedBefore), без нового уведомления.
+			if _, err := s.dispatchQuiz(ctx, acc, c, it, false); err != nil {
+				logx.Warnf("uni", "quiz tg=%d cmid=%d: постановка не удалась, повтор на следующем синке: %v",
+					acc.TelegramID, it.CMID, err)
+				s.markQuizPending(acc.TelegramID, it.CMID)
+			}
 		}
 	}
 }

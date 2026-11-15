@@ -72,6 +72,9 @@ type Syncer struct {
 	// проверяет перехват в solveSinglePageSafe). В проде nil.
 	solveHook func(idx int)
 	wg        sync.WaitGroup // ожидание завершения фоновых воркеров
+	// watchSync — синк аккаунта для наблюдателя открытия тестов; nil — SyncMoodle (тесты подменяют).
+	watchSync func(ctx context.Context, acc model.Account) error
+	watchPace *moodlePacer // темп синков наблюдателя (отдельно от quizPacer решателя)
 }
 
 func (s *Syncer) now() time.Time { return nowFn().In(s.loc()) }
@@ -526,6 +529,8 @@ func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) (
 	added, removed, changed := s.logMoodleDiff(acc.TelegramID, prev, items)
 	if len(prev) > 0 {
 		s.announceNew(ctx, acc.TelegramID, prev, items)
+		s.announceUpcomingQuizzes(ctx, acc.TelegramID, prev, items)
+		s.announceDeadlineMoves(ctx, acc.TelegramID, prev, items)
 	}
 	tasks, tests, done := 0, 0, 0
 	for _, it := range items {
@@ -555,6 +560,7 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, tg int64, 
 	for _, cr := range courses {
 		courseName[cr.ID] = cr.FullName
 	}
+	reread := rereadSet(ctx)
 	events, err := c.Timeline(ctx, now.AddDate(0, 0, -14), time.Time{})
 	if err != nil {
 		return nil, err
@@ -631,7 +637,7 @@ func (s *Syncer) collectMoodle(ctx context.Context, c *moodle.Client, tg int64, 
 		for _, p := range prev {
 			_, inTL := inTimeline[p.CMID]
 			near := p.Due != nil && p.Due.After(now.AddDate(0, 0, -3)) && p.Due.Before(now.AddDate(0, 0, 14))
-			if inTL || (!p.Finished() && near) {
+			if inTL || (!p.Finished() && near) || reread[p.CMID] {
 				acts = append(acts, moodle.Activity{CMID: p.CMID, CourseID: p.CourseID, Course: p.Course,
 					Section: p.Section, Kind: p.Kind, Name: p.Title, URL: p.URL})
 			}

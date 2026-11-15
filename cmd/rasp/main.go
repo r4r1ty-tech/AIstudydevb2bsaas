@@ -41,6 +41,12 @@ func main() {
 				defer wg.Done()
 				sy.Run(ctx)
 			}()
+			// Наблюдатель открытия тестов: синк аккаунта точно в момент открытия (обычный обход — раз в 30 мин).
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				sy.RunQuizOpenWatch(ctx)
+			}()
 			// Дождаться завершения sy.Run перед возвратом и закрытием БД в app.Run.
 			defer wg.Wait()
 		}

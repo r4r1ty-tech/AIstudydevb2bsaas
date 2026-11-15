@@ -76,6 +76,10 @@ type Deadline struct {
 	Todo    string    `json:"todo,omitempty"` // что сделать: условия, попытки, описание
 	// Closed — тест закрыт для попыток и не пройден (model.MoodleItem.Closed).
 	Closed bool `json:"closed"`
+	// Opens — когда откроется (нулевое время, если Moodle не сказал).
+	Opens time.Time `json:"opens"`
+	// NotOpen — ещё не открыт: Opens в будущем, срок не прошёл. Такие не идут в «Пройти все».
+	NotOpen bool `json:"not_open"`
 }
 
 const (

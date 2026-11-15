@@ -56,7 +56,7 @@ func TestStoreMoodleWindowsAndNoDue(t *testing.T) {
 		{CMID: 4, Kind: model.MoodleQuiz, Title: "Давно сдано", Due: at(-60 * day), Status: model.MoodleSubmitted},
 		{CMID: 5, Kind: model.MoodleAssign, Title: "Без срока", Status: model.MoodleTodo},
 		{CMID: 6, Kind: model.MoodleAssign, Title: "Без срока, сдано", Status: model.MoodleDone},
-		{CMID: 7, Kind: model.MoodleAssign, Title: "Ещё закрыто", Opens: at(day), Status: model.MoodleTodo},
+		{CMID: 7, Kind: model.MoodleAssign, Title: "Ещё не открыто", Opens: at(day), Status: model.MoodleTodo},
 	}
 	if err := st.ReplaceMoodleItems(testAdminID, items); err != nil {
 		t.Fatal(err)
@@ -69,12 +69,13 @@ func TestStoreMoodleWindowsAndNoDue(t *testing.T) {
 	for _, d := range list {
 		got[d.Title] = true
 	}
-	for _, want := range []string{"Скоро", "Свежая просрочка", "Без срока"} {
+	// Ещё не открытое показываем, а не прячем: его видно в группе «Скоро откроются».
+	for _, want := range []string{"Скоро", "Свежая просрочка", "Без срока", "Ещё не открыто"} {
 		if !got[want] {
 			t.Errorf("missing %q: %v", want, got)
 		}
 	}
-	for _, no := range []string{"Прошлый год", "Давно сдано", "Без срока, сдано", "Ещё закрыто"} {
+	for _, no := range []string{"Прошлый год", "Давно сдано", "Без срока, сдано"} {
 		if got[no] {
 			t.Errorf("must hide %q", no)
 		}
@@ -102,7 +103,7 @@ func TestDueGroupClosedQuiz(t *testing.T) {
 		{"тест, срок прошёл, не сдан", model.MoodleItem{CMID: 1, Kind: model.MoodleQuiz, Title: "Т", Status: model.MoodleTodo, Due: &past}, true, dueClosed},
 		{"тест, сдан", model.MoodleItem{CMID: 2, Kind: model.MoodleQuiz, Title: "Т", Status: model.MoodleSubmitted, Due: &past}, false, dueDone},
 		{"задание, срок прошёл", model.MoodleItem{CMID: 3, Kind: model.MoodleAssign, Title: "З", Status: model.MoodleTodo, Due: &past}, false, dueOverdue},
-		{"тест без срока, не открыт", model.MoodleItem{CMID: 4, Kind: model.MoodleQuiz, Title: "Т", Status: model.MoodleTodo, Todo: "Тест сейчас не открыт для попыток"}, true, dueClosed},
+		{"тест без срока, не открыт (по тексту страницы)", model.MoodleItem{CMID: 4, Kind: model.MoodleQuiz, Title: "Т", Status: model.MoodleTodo, Todo: "Тест сейчас не открыт для попыток"}, true, dueClosed},
 	}
 	for _, c := range cases {
 		d := deadlineFromItem(c.item, now)

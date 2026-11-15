@@ -28,9 +28,10 @@ const (
 	dueSoon    = "soon" // сегодня и завтра
 	dueWeek    = "week" // до конца этой недели
 	dueLater   = "later"
-	dueDone    = "done"   // сдано
-	dueNone    = "nodue"  // срока нет
-	dueClosed  = "closed" // тест закрыт для попыток и не пройден
+	dueDone    = "done"    // сдано
+	dueNone    = "nodue"   // срока нет
+	dueClosed  = "closed"  // тест закрыт для попыток и не пройден
+	dueNotOpen = "notopen" // ещё не открыт: Opens в будущем
 )
 
 type deadlineView struct {
@@ -52,6 +53,9 @@ func dueGroup(d Deadline, now time.Time) string {
 	if d.Closed {
 		return dueClosed
 	}
+	if d.NotOpen {
+		return dueNotOpen
+	}
 	if d.Due.IsZero() {
 		return dueNone
 	}
@@ -72,13 +76,22 @@ func dueGroup(d Deadline, now time.Time) string {
 	return dueLater
 }
 
+// sortTime — по чему сортировать срок: у ещё не открытого — момент открытия,
+// иначе срок. Без времени (ни срока, ни открытия) — ok=false, уйдёт в конец.
+func sortTime(d Deadline) (time.Time, bool) {
+	if d.NotOpen && !d.Opens.IsZero() {
+		return d.Opens, true
+	}
+	return d.Due, !d.Due.IsZero()
+}
+
 func (s *Server) handleDeadlines(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	resp := deadlinesResponse{
 		Moodle:    s.moodle.Status(),
 		Now:       now,
 		Deadlines: []deadlineView{},
-		Counts:    map[string]int{dueOverdue: 0, dueSoon: 0, dueWeek: 0, dueLater: 0, dueDone: 0, dueNone: 0, dueClosed: 0},
+		Counts:    map[string]int{dueOverdue: 0, dueSoon: 0, dueWeek: 0, dueLater: 0, dueDone: 0, dueNone: 0, dueClosed: 0, dueNotOpen: 0},
 	}
 	if resp.Moodle.Connected {
 		list, err := s.moodle.Deadlines(r.Context(), now)
@@ -88,15 +101,20 @@ func (s *Server) handleDeadlines(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sort.SliceStable(list, func(i, j int) bool {
-			if list[i].Due.IsZero() != list[j].Due.IsZero() {
-				return !list[i].Due.IsZero()
+			ti, oi := sortTime(list[i])
+			tj, oj := sortTime(list[j])
+			if oi != oj {
+				return oi
 			}
-			return list[i].Due.Before(list[j].Due)
+			return ti.Before(tj)
 		})
 		for _, d := range list {
 			v := deadlineView{Deadline: d, Group: dueGroup(d, now)}
 			if !v.Due.IsZero() {
 				v.Due = v.Due.In(s.loc)
+			}
+			if !v.Opens.IsZero() {
+				v.Opens = v.Opens.In(s.loc)
 			}
 			resp.Counts[v.Group]++
 			resp.Deadlines = append(resp.Deadlines, v)

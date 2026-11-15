@@ -61,8 +61,9 @@ func (m *storeMoodle) Deadlines(_ context.Context, now time.Time) ([]Deadline, e
 	out := make([]Deadline, 0, len(items))
 	for _, it := range items {
 		if it.Due == nil {
-			// Без срока — только несделанное и уже открытое.
-			if !it.Finished() && (it.Opens == nil || it.Opens.Before(now)) {
+			// Без срока — всё несделанное, в том числе ещё не открытое: его показываем
+			// отдельной группой, а не прячем до открытия.
+			if !it.Finished() {
 				out = append(out, deadlineFromItem(it, now))
 			}
 			continue
@@ -73,6 +74,17 @@ func (m *storeMoodle) Deadlines(_ context.Context, now time.Time) ([]Deadline, e
 		out = append(out, deadlineFromItem(it, now))
 	}
 	return out, nil
+}
+
+// notOpenItem — элемент ещё не открыт для сдачи: только если Opens в будущем.
+// Текст «не открыт для попыток» без Opens сюда не относим: это часто исчерпанные
+// попытки, такой тест остаётся закрытым (model.MoodleItem.Closed). Срок уже прошёл —
+// не «скоро», даже если Opens в будущем.
+func notOpenItem(it model.MoodleItem, now time.Time) bool {
+	if it.Finished() || (it.Due != nil && it.Due.Before(now)) {
+		return false
+	}
+	return it.Opens != nil && it.Opens.After(now)
 }
 
 func deadlineFromItem(it model.MoodleItem, now time.Time) Deadline {
@@ -89,10 +101,14 @@ func deadlineFromItem(it model.MoodleItem, now time.Time) Deadline {
 	}
 	d := Deadline{
 		ID: strconv.FormatInt(it.CMID, 10), Course: it.Course, Title: it.Title, Kind: kind, Status: status,
-		URL: it.URL, Section: it.Section, Todo: it.Todo, Closed: it.Closed(now),
+		URL: it.URL, Section: it.Section, Todo: it.Todo,
+		Closed: it.Closed(now), NotOpen: notOpenItem(it, now),
 	}
 	if it.Due != nil {
 		d.Due = *it.Due
+	}
+	if it.Opens != nil {
+		d.Opens = *it.Opens
 	}
 	return d
 }

@@ -363,6 +363,7 @@ func demoDeadlines(now time.Time) []Deadline {
 		{ID: "q-30411", Course: subjOpt, Title: "Тест по теме «Симплекс-метод»", Kind: DeadlineQuiz, Due: at(-1, 20, 0), Status: DeadlineTodo, Closed: true, URL: lms("quiz", 30411), Todo: "Разрешено попыток: 2\nОграничение по времени: 30 мин.\nМетод оценивания: Высшая оценка"},
 		{ID: "a-32050", Course: subjTFYAG, Title: "Домашнее задание 4: построить ДКА по НКА", Kind: DeadlineAssign, Due: at(0, 23, 59), Status: DeadlineTodo, URL: lms("assign", 32050)},
 		{ID: "q-32102", Course: subjSE, Title: "Тест: модели жизненного цикла ПО", Kind: DeadlineQuiz, Due: at(1, 18, 0), Status: DeadlineTodo, URL: lms("quiz", 32102)},
+		{ID: "q-32415", Course: subjSE, Title: "Тест: UML-диаграммы вариантов использования", Kind: DeadlineQuiz, Due: at(1, 15, 10), Opens: at(1, 14, 45), NotOpen: true, Status: DeadlineTodo, URL: lms("quiz", 32415), Todo: "Разрешено попыток: 1\nОграничение по времени: 25 мин."},
 		{ID: "a-32119", Course: subjTPIVS, Title: "Практика 5: диаграмма IDEF0 для своей системы", Kind: DeadlineAssign, Due: at(1, 23, 59), Status: DeadlineDraft, URL: lms("assign", 32119)},
 		{ID: "q-32240", Course: subjStat, Title: "Тест 2. Проверка гипотез", Kind: DeadlineQuiz, Due: at(inWeek, 12, 0), Status: DeadlineTodo, URL: lms("quiz", 32240)},
 		{ID: "a-29870", Course: subjOpt, Title: "Курсовая работа: первый раздел", Kind: DeadlineAssign, Due: at(12, 23, 59), Status: DeadlineTodo, URL: lms("assign", 29870)},
