@@ -36,7 +36,7 @@ func TestChooseRecorderKeepsLiveAndPicksMinID(t *testing.T) {
 	if i := w.chooseRecorder(meetKey, here[1:], now); i != 0 {
 		t.Fatalf("handover: got %d", i)
 	}
-	// Запись только что не стартовала — пауза, не дёргаем вкладки каждые 15 с.
+	// Запись только что не стартовала — пауза, не дёргаем сессии каждые 15 с.
 	delete(w.recorder, meetKey)
 	delete(w.sessions, sessionKey(20, 7))
 	w.recFailAt[meetKey] = now
@@ -386,7 +386,7 @@ func TestMissingBBBRequestsRaspRefresh(t *testing.T) {
 	}
 }
 
-// stubNotesBuild подменяет сборку конспекта на время теста: PDF без Chromium не собрать.
+// stubNotesBuild подменяет сборку конспекта на время теста: PDF без typst не собрать.
 func stubNotesBuild(t *testing.T, fn func(context.Context, *config.Config, string, model.LecturePack) error) {
 	t.Helper()
 	old := notesBuild

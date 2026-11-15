@@ -425,13 +425,14 @@ func TestStepPDFCacheHit(t *testing.T) {
 		NotesMDHash:  mdHash,
 		PDFNotesHash: mdHash,
 	}
-	if err := stepPDF(context.Background(), nil, dir, pdfPath, "Заголовок", md, bc); err != nil {
+	if err := stepPDF(context.Background(), dir, pdfPath, "Заголовок", md, bc); err != nil {
 		t.Fatalf("stepPDF с валидным кэшем вернул ошибку: %v", err)
 	}
 
-	// Если конспект изменился, stepPDF пытается перерендерить PDF (с невалидным cfg упадет)
+	// Если конспект изменился, stepPDF пытается перерендерить PDF (с несуществующим typst упадет)
 	newMD := "## Конспект\nНовое содержимое"
-	err := stepPDF(context.Background(), &config.Config{ChromeBin: "no-such-binary"}, dir, pdfPath, "Заголовок", newMD, bc)
+	t.Setenv("TYPST_BIN", "no-such-binary")
+	err := stepPDF(context.Background(), dir, pdfPath, "Заголовок", newMD, bc)
 	if err == nil {
 		t.Fatalf("ожидалась ошибка рендера при изменившемся markdown")
 	}
@@ -441,7 +442,7 @@ func TestStepPDFCacheHit(t *testing.T) {
 // Первый запуск выполняет этапы (STT, LLM, PDF) и заполняет .build_cache.json.
 // Второй запуск (даже после отключения мок-сервера) берёт все данные из кэша без сетевых запросов.
 func TestBuildCachesAllStagesEndToEnd(t *testing.T) {
-	bin := chromeForPDF(t)
+	typstForPDF(t)
 
 	// Мок-сервер для STT и LLM
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -476,7 +477,6 @@ func TestBuildCachesAllStagesEndToEnd(t *testing.T) {
 	cfg := &config.Config{
 		FishStudioAPIKey: "test-key", FishStudioAPIURL: api.URL,
 		OpenCodeAPIKey: "test-key",
-		ChromeBin:      bin,
 	}
 
 	// 1. Первый запуск Build: создаёт transcript.txt, notes.md, notes.pdf и .build_cache.json
@@ -670,7 +670,7 @@ func TestStepTranscriptDeletedOrSilentAudioIgnoresCache(t *testing.T) {
 
 		bc := &buildCache{
 			AudioDurationSec: 70,
-			AudioSize:        fileSize(audioPath),
+			AudioSize:        archive.FileSize(audioPath),
 		}
 		if err := saveBuildCache(dir, bc); err != nil {
 			t.Fatal(err)
@@ -747,7 +747,7 @@ func TestStepTranscriptInvalidatesOnShorterAudioAndSizeDrop(t *testing.T) {
 	// Сценарий 2: в кэше длительность 10 минут, а новое валидное аудио — 70 секунд (разница > 5 мин) -> инвалидация
 	bcShort := &buildCache{
 		AudioDurationSec: (10 * time.Minute).Seconds(),
-		AudioSize:        fileSize(audioPath),
+		AudioSize:        archive.FileSize(audioPath),
 	}
 	gotNew, empty, why, err := stepTranscript(context.Background(), cfg, dir, audioPath, trPath, bcShort)
 	if err != nil || empty || why != "" {
@@ -785,7 +785,7 @@ func TestStepTranscriptInvalidatesOnShorterAudioAndSizeDrop(t *testing.T) {
 // TestBuildAtomicWritesLeaveNoTempFiles проверяет, что полная сборка со слайдами и аудио
 // записывает все артефакты (включая .slides_desc.txt) без оставшихся .tmp файлов.
 func TestBuildAtomicWritesLeaveNoTempFiles(t *testing.T) {
-	bin := chromeForPDF(t)
+	typstForPDF(t)
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -824,7 +824,6 @@ func TestBuildAtomicWritesLeaveNoTempFiles(t *testing.T) {
 		FishStudioAPIKey: "test-key", FishStudioAPIURL: api.URL,
 		GrokAPIKey: "test-key", GrokAPIURL: api.URL,
 		OpenCodeAPIKey: "test-key",
-		ChromeBin:      bin,
 	}
 	if err := Build(context.Background(), cfg, root, p); err != nil {
 		t.Fatalf("Build: %v", err)

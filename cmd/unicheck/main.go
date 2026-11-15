@@ -199,13 +199,6 @@ func checkMoodle(ctx context.Context, login, pass string, loc *time.Location) bo
 	return true
 }
 
-func errOrEmpty(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
 func trim(s string, n int) string {
 	r := []rune(strings.TrimSpace(s))
 	if len(r) <= n {

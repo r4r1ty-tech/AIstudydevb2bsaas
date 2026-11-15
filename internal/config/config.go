@@ -41,8 +41,6 @@ type Config struct {
 	ListenAddr      string
 	Timezone        string
 	RecordingsDir   string
-	ChromeBin       string
-	ChromeUserDir   string
 	ProxyFile       string
 	BBBDryRun       bool
 	LecturePause    bool
@@ -53,17 +51,16 @@ type Config struct {
 	LLMAPIKey       string
 	LLMAPIURL       string
 	LLMModel        string
+	// CheaperSTTModel — модель расшифровки аудио у cheaper (CHEAPER_STT_MODEL), POST {LLM_API_URL}/audio/transcriptions.
+	CheaperSTTModel string
 	// GeminiAPIKeys — ключи Google AI Studio (GEMINI_API_KEYS через запятую):
 	// бесплатная цепочка для тестов и конспектов всех.
 	GeminiAPIKeys []string
 	// OpenCodeAPIKey / OpenCodeAPIKeys — ключи OpenCode Zen (OPENCODE_API_KEY,
 	// OPENCODE_API_KEYS через запятую), запасной провайдер. Ключ можно подписать
 	// владельцем: «Агеев:oc_sk_…» (то же для GEMINI_API_KEYS).
-	OpenCodeAPIKey  string
-	OpenCodeAPIKeys []string
-	// AdminLoginSuffix — устаревшее поле (ADMIN_LOGIN_SUFFIX): оставлено только
-	// для обратной совместимости конфига и больше не предоставляет прав администратора.
-	AdminLoginSuffix string
+	OpenCodeAPIKey   string
+	OpenCodeAPIKeys  []string
 	AssemblyAPIKey   string
 	AssemblyAPIURL   string
 	FishStudioAPIKey string
@@ -110,8 +107,6 @@ func Load() (*Config, error) {
 		ListenAddr:       strEnv("LISTEN_ADDR", DefaultListen),
 		Timezone:         strEnv("TZ", DefaultTimezone),
 		RecordingsDir:    strEnv("RECORDINGS_DIR", DefaultRecordings),
-		ChromeBin:        strEnv("CHROME_BIN", ""),
-		ChromeUserDir:    strEnv("CHROME_USER_DATA_DIR", ""),
 		ProxyFile:        strEnv("PROXY_FILE", "/opt/ssau-bot/proxies.txt"),
 		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
 		LecturePause:     boolEnv("LECTURE_PAUSE", true),
@@ -122,10 +117,10 @@ func Load() (*Config, error) {
 		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
 		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
 		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
+		CheaperSTTModel:  strEnv("CHEAPER_STT_MODEL", "whisper-large-v3-turbo"),
 		GeminiAPIKeys:    listEnv("GEMINI_API_KEYS"),
 		OpenCodeAPIKey:   strEnv("OPENCODE_API_KEY", ""),
 		OpenCodeAPIKeys:  listEnv("OPENCODE_API_KEYS"),
-		AdminLoginSuffix: strEnv("ADMIN_LOGIN_SUFFIX", "528"),
 		AssemblyAPIKey:   strEnv("ASSEMBLYAI_API_KEY", ""),
 		AssemblyAPIURL:   strEnv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com"),
 		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),

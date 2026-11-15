@@ -25,7 +25,7 @@ var stopGrace = 5 * time.Second
 
 // OpusRec writes incoming WebRTC Opus RTP packets directly to an OGG file on
 // disk and optionally decodes a parallel 16 kHz mono s16le PCM stream via
-// ffmpeg (without PulseAudio) for the wake-word spotter and silence meter.
+// ffmpeg for the wake-word spotter and silence meter.
 type OpusRec struct {
 	path string
 
@@ -86,7 +86,7 @@ func (r *OpusRec) initPCMDecoder(ctx context.Context, ffmpeg string, sampleRate 
 		"-ac", "1", "-ar", fmt.Sprintf("%d", WakeRate),
 		"-c:a", "pcm_s16le", "-f", "s16le", "pipe:1",
 	)
-	cmd.Stderr = logx.LineWriter(logx.LevelWarn, "capture", "ffmpeg-pcm: ", nil)
+	cmd.Stderr = logx.LineWriter(logx.LevelWarn, "capture", "ffmpeg-pcm: ")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()

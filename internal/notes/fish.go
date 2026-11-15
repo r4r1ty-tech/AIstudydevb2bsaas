@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -35,9 +36,11 @@ func Transcribe(ctx context.Context, cfg *config.Config, audioPath string) (stri
 		key  string
 		fn   func(context.Context, *config.Config, string) (string, error)
 	}
-	// Gemini из бесплатного пула — первым; AssemblyAI, Fish и Groq — запасные.
+	// Gemini из бесплатного пула — первым; cheaper (LLM_API_*, только STT аудио) — вторым;
+	// AssemblyAI, Fish и Groq — запасные.
 	providers := []provider{
 		{"gemini", geminiKeyMarker(cfg), transcribeGemini},
+		{"cheaper", cheaperKeyMarker(cfg), transcribeCheaper},
 		{"assemblyai", cfg.AssemblyAPIKey, transcribeAssembly},
 		{"fish", cfg.FishStudioAPIKey, transcribeFish},
 		{"groq", cfg.GroqAPIKey, transcribeGroq},
@@ -63,8 +66,8 @@ func Transcribe(ctx context.Context, cfg *config.Config, audioPath string) (stri
 		logx.Errorf("notes", "Transcribe: %s все провайдеры STT не сработали за %s: %s", tag, time.Since(started).Round(time.Second), strings.Join(fails, "; "))
 		return "", fmt.Errorf("%s", strings.Join(fails, "; "))
 	}
-	logx.Errorf("notes", "Transcribe: %s нет ключа STT (Gemini / AssemblyAI / Fish / Groq)", tag)
-	return "", fmt.Errorf("нет ключа STT (Gemini / AssemblyAI / Fish / Groq)")
+	logx.Errorf("notes", "Transcribe: %s нет ключа STT (Gemini / cheaper / AssemblyAI / Fish / Groq)", tag)
+	return "", errors.New("нет ключа STT (Gemini / cheaper / AssemblyAI / Fish / Groq)")
 }
 
 func transcribeFish(ctx context.Context, cfg *config.Config, audioPath string) (string, error) {

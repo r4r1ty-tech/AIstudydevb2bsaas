@@ -182,8 +182,7 @@ func TestInitLLMBridgeSharedPoolAndUsage(t *testing.T) {
 func TestIsAdminIgnoresLoginSuffix(t *testing.T) {
 	st, _ := openAccessTestEnv(t)
 	cfg := &config.Config{
-		AdminID:          100,
-		AdminLoginSuffix: "528",
+		AdminID: 100,
 	}
 	const userID int64 = 200
 	if err := st.PutAccount(model.Account{TelegramID: userID, Kind: model.AccountMoodle, Login: "2021-000528"}); err != nil {

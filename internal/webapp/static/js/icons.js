@@ -44,5 +44,3 @@ export function icon(name, cls = "") {
   const d = P[name] || P.other;
   return raw(`<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${d}</svg>`);
 }
-
-export const kindIcon = { lecture: "lecture", practice: "practice", lab: "lab", other: "other" };

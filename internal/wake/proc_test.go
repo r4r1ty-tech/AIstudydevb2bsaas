@@ -1,12 +1,19 @@
 package wake
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func closeRecognizer(rec Recognizer) {
+	if c, ok := rec.(io.Closer); ok {
+		_ = c.Close()
+	}
+}
 
 // wake.py loads the vosk model before it reads stdin. Push must not block
 // meanwhile: the spotter shares ffmpeg's stdout, and a blocked spotter stalls

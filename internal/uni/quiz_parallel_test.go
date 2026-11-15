@@ -297,9 +297,10 @@ func TestPartialProgressOnLaterPageError(t *testing.T) {
 			_, _ = w.Write(resp)
 			return
 		}
-		if slot == 1 || slot == 2 {
+		switch slot {
+		case 1, 2:
 			// Даём страницам 0 и 1 гарантированно успеть, хотя координатор и так ждёт 0 и 1 до проверки 2.
-		} else if slot == 4 {
+		case 4:
 			time.Sleep(15 * time.Millisecond)
 		}
 
@@ -856,7 +857,7 @@ func TestSubmitPageAnswersAllCheckSlotsAndError(t *testing.T) {
 		_, _ = w.Write([]byte(`<script>M.cfg = {"sesskey":"SK_TEST"};</script>`))
 	})
 	mux.HandleFunc("/mod/quiz/attempt.php", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(fmt.Sprintf(`<!DOCTYPE html>
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
 <html><body><script>M.cfg={"sesskey":"SK_TEST"};</script>
 <form id="responseform" method="post" action="%s/mod/quiz/processattempt.php?cmid=777" enctype="multipart/form-data">
   <input type="hidden" name="attempt" value="555">
@@ -875,7 +876,7 @@ func TestSubmitPageAnswersAllCheckSlotsAndError(t *testing.T) {
     <div class="answer"><input type="text" name="q10:2_answer" value=""></div>
     <input type="submit" name="q10:2_-submit" value="1">
   </div>
-</form></body></html>`, moodleSrv.URL)))
+</form></body></html>`, moodleSrv.URL)
 	})
 	mux.HandleFunc("/mod/quiz/processattempt.php", func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseMultipartForm(1 << 20)

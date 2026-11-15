@@ -23,7 +23,11 @@ linters:
     rules:
       # В тестах допускаем небезопасные вещи вроде фиксированных путей и временных файлов.
       - path: _test\.go
-        linters: [gosec]
+        linters: [gosec, noctx]
+      # noctx включён ради HTTP; SQL в store по принятому стилю идёт без контекста.
+      - path: internal/store/
+        text: "database/sql"
+        linters: [noctx]
 
 formatters:
   enable:

@@ -60,12 +60,8 @@ func (u User) Surname() string {
 	return out
 }
 
-const (
-	StageFIO   = 0
-	StageSub   = 1
-	StageWords = 2
-	StageDone  = 3
-)
+// StageDone — онбординг пройден (остальные стадии в коде не используются).
+const StageDone = 3
 
 var CommonWakeWords = []string{"тест", "контрольная", "мудл", "moodle"}
 

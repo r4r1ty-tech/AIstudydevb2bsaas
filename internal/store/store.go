@@ -229,6 +229,53 @@ func (s *Store) migrate() error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (telegram_id, provider, day)
 		)`,
+		// Очередь решения тестов для сервиса ssau-quiz (quiz_jobs.go): одна активная задача
+		// на пару (аккаунт, тест) — частичный уникальный индекс по queued/running.
+		`CREATE TABLE IF NOT EXISTS quiz_jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			telegram_id INTEGER NOT NULL,
+			cmid INTEGER NOT NULL,
+			course TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			forced INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
+			deadline TEXT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			claimed_by TEXT NOT NULL DEFAULT '',
+			lease_until TEXT NULL,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_quiz_jobs_active ON quiz_jobs(telegram_id, cmid) WHERE status IN ('queued', 'running')`,
+		`CREATE INDEX IF NOT EXISTS idx_quiz_jobs_claim ON quiz_jobs(status, forced, deadline, created_at)`,
+		// База проверенных ответов решателя (quiz_answers.go): ключ — хэш условия и вариантов
+		// (qhash, глобален для банка вопросов), ответ — текст вариантов, подтверждённый Moodle.
+		`CREATE TABLE IF NOT EXISTS quiz_answers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			course TEXT NOT NULL DEFAULT '',
+			cmid INTEGER NOT NULL DEFAULT 0,
+			qhash TEXT NOT NULL,
+			qtype TEXT NOT NULL DEFAULT '',
+			question_text TEXT NOT NULL DEFAULT '',
+			answer_json TEXT NOT NULL,
+			verified_at TEXT NOT NULL,
+			source_tg INTEGER NOT NULL DEFAULT 0,
+			hits INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			UNIQUE(qhash)
+		)`,
+		// Отрицательная память решателя: ответы, которые Moodle отметил как неверные (quiz_answers.go).
+		`CREATE TABLE IF NOT EXISTS quiz_wrong_answers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			qhash TEXT NOT NULL,
+			answer_json TEXT NOT NULL,
+			cmid INTEGER NOT NULL DEFAULT 0,
+			source_tg INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			UNIQUE(qhash, answer_json)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_quiz_wrong_answers_qhash ON quiz_wrong_answers(qhash)`,
 	}
 	logx.Debugf("store", "migrate: statements=%d", len(stmts))
 	tx, err := s.db.Begin()

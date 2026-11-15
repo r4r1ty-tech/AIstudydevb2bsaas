@@ -32,7 +32,7 @@ func scrubErr(err error) error {
 	return err
 }
 
-// seatName — где сейчас вкладка: для логов захода и выхода.
+// seatName — где сейчас сессия: для логов захода и выхода.
 func seatName(lobby, room, greenlight bool) string {
 	switch {
 	case greenlight:

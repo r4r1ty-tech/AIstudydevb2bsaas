@@ -29,7 +29,7 @@ func main() {
 		if cfg.BBBDryRun {
 			logx.Warnf("bbb", "DRY RUN — в BBB не подключаемся")
 		} else {
-			logx.Infof("bbb", "mode=direct (go+ddp+pion, без Chromium)")
+			logx.Infof("bbb", "mode=direct (go+ddp+pion)")
 		}
 		if err := bbb.NewWorker(cfg, st, loc).Run(ctx); err != nil {
 			logx.Errorf("bbb", "main: worker.Run: %v", err)

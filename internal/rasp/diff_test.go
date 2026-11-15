@@ -65,3 +65,22 @@ func hasDiffLine(diff string, mark byte) bool {
 	}
 	return false
 }
+
+func TestDiffChangedPair(t *testing.T) {
+	old := sampleLessons()
+	moved := old[0]
+	moved.Place = "ауд. 101"
+	got := Diff(old, []model.Lesson{moved, old[1]})
+	if !hasDiffLine(got, '~') {
+		t.Fatalf("want ~ line for changed pair, got %q", got)
+	}
+	if hasDiffLine(got, '+') || hasDiffLine(got, '-') {
+		t.Fatalf("changed pair must not be + or -: %q", got)
+	}
+	if !strings.Contains(got, "→") || !strings.Contains(got, "ауд. 101") || !strings.Contains(got, "online") {
+		t.Fatalf("changed line must show old and new: %q", got)
+	}
+	if strings.Count(got, "\n") != 0 {
+		t.Fatalf("single change must be one line: %q", got)
+	}
+}

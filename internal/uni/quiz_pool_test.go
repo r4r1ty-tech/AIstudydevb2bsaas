@@ -280,7 +280,7 @@ func (fx *poolFixture) checkSolvedAll() {
 	if v, ok, _ := fx.st.GetSetting(KickKey(fx.tg)); !ok || v != "1" {
 		fx.t.Fatalf("после решения аккаунту не поставлен пинок на синк: %q, ok=%v", v, ok)
 	}
-	if !strings.Contains(strings.Join(*fx.sent, "\n"), "автоматически решён") {
+	if !strings.Contains(strings.Join(*fx.sent, "\n"), "Тест решён") {
 		fx.t.Fatalf("нет отчёта о решении: %v", *fx.sent)
 	}
 }

@@ -26,6 +26,8 @@ const (
 	Solved = "solved" // решён и завершён
 	Failed = "failed" // ИИ не ответил или ответ не разобрали: попытка не завершена
 	Parsed = "parsed" // ключей ИИ нет: прислали текст вопросов
+	// Partial — попытка завершена, оценка неполная: решена не полностью (повтор или «Пройти»).
+	Partial = "partial"
 )
 
 // Search — один веб-запрос решателя.
@@ -48,6 +50,10 @@ type Page struct {
 	Search   []Search       `json:"search,omitempty"`
 	Refined  []int          `json:"refined,omitempty"` // слоты, ответ на которые поменялся в раундах уточнения
 	Notes    []string       `json:"notes,omitempty"`   // рисунки условия: распознаны или нет
+	// FromBase — слоты, ответы на которые взяты из базы проверенных ответов (без ИИ).
+	FromBase []int `json:"from_base,omitempty"`
+	// Confidence — уверенность модели по слотам (0..1), если модель её сообщила.
+	Confidence map[int]float64 `json:"confidence,omitempty"`
 }
 
 type Run struct {

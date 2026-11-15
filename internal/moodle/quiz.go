@@ -59,6 +59,47 @@ type QuizInfo struct {
 	Rules               []string      `json:"rules,omitempty"`
 	Feedback            string        `json:"feedback,omitempty"`
 	Attempts            []QuizAttempt `json:"attempts,omitempty"`
+	// Allowed — «Разрешено попыток» из правил (0 — без ограничений).
+	Allowed int `json:"allowed,omitempty"`
+	// Used — завершённых попыток в таблице попыток (незавершённая не считается).
+	Used int `json:"used,omitempty"`
+	// GradingMethod — «Метод оценивания» из правил: «Высшая оценка», «Последняя попытка» и т.п.
+	GradingMethod string `json:"grading_method,omitempty"`
+}
+
+// AttemptsLeft — сколько попыток ещё можно начать: -1 — без ограничений, иначе не меньше нуля.
+func (i *QuizInfo) AttemptsLeft() int {
+	if i.Allowed == 0 {
+		return -1
+	}
+	if left := i.Allowed - i.Used; left > 0 {
+		return left
+	}
+	return 0
+}
+
+var (
+	allowedAttemptsRe = regexp.MustCompile(`Разрешено попыток:\s*(\d+)`)
+	gradingMethodRe   = regexp.MustCompile(`Метод оценивания:\s*(.+)`)
+)
+
+// parseQuizRules достаёт из правил число попыток и метод оценивания.
+func parseQuizRules(info *QuizInfo) {
+	for _, r := range info.Rules {
+		if m := allowedAttemptsRe.FindStringSubmatch(r); len(m) == 2 && info.Allowed == 0 {
+			info.Allowed, _ = strconv.Atoi(m[1])
+		}
+		if m := gradingMethodRe.FindStringSubmatch(r); len(m) == 2 && info.GradingMethod == "" {
+			info.GradingMethod = strings.TrimSpace(m[1])
+		}
+	}
+	for _, a := range info.Attempts {
+		st := strings.ToLower(a.State)
+		if strings.Contains(st, "процесс") || strings.Contains(st, "progress") {
+			continue
+		}
+		info.Used++
+	}
 }
 
 // QuizAttempt — запись из таблицы попыток на странице view.php.
@@ -234,6 +275,7 @@ func (c *Client) InspectQuiz(ctx context.Context, cmid int64) (*QuizInfo, error)
 		}
 	})
 
+	parseQuizRules(info)
 	logx.Debugf(logComponent, "тест cmid=%d: can_start=%t, незавершённая попытка=%d, правил=%d, попыток=%d, feedback=%q",
 		cmid, info.CanStart, info.InProgressAttemptID, len(info.Rules), len(info.Attempts), clip(info.Feedback, 300))
 	for _, r := range info.Rules {
@@ -560,15 +602,10 @@ func isBitString(s string) bool {
 	return true
 }
 
-// extractQText — текст вопроса .qtext по порядку блоков: абзацы, списки,
+// extractQTextImages — текст вопроса .qtext по порядку блоков: абзацы, списки,
 // таблицы (строками «a | b | c») и рисунки (заглушка «[рисунок N]», адрес —
 // в images). Соседние строки из одних битов склеиваются без разделителя:
 // длинные кодовые последовательности Moodle режет на абзацы.
-func extractQText(sel *goquery.Selection) string {
-	t, _ := extractQTextImages(sel, "")
-	return t
-}
-
 func extractQTextImages(sel *goquery.Selection, base string) (string, []string) {
 	if sel.Length() == 0 {
 		return "", nil
@@ -583,7 +620,7 @@ func extractQTextImages(sel *goquery.Selection, base string) (string, []string) 
 	prevIsBits := false
 	for i, line := range w.lines {
 		currIsBits := isBitString(line)
-		if i > 0 && !(prevIsBits && currIsBits) {
+		if i > 0 && (!prevIsBits || !currIsBits) {
 			b.WriteString("\n")
 		}
 		b.WriteString(line)

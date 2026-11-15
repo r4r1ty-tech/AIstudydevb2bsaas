@@ -74,12 +74,6 @@ func (h *harness) text(from int64, text string) {
 	h.do(tgtest.Message(h.upd, from, text))
 }
 
-func (h *harness) press(from int64, data string) {
-	h.t.Helper()
-	h.upd++
-	h.do(tgtest.Callback(h.upd, from, data))
-}
-
 // onboarded stores a finished user.
 func (h *harness) onboarded(id int64, fio string, sub int) *model.User {
 	h.t.Helper()
@@ -88,51 +82,6 @@ func (h *harness) onboarded(id int64, fio string, sub int) *model.User {
 		Onboarded: true, OnboardStage: model.StageDone, CreatedAt: time.Now(),
 	}
 	if err := h.st.UpsertUser(u); err != nil {
-		h.t.Fatal(err)
-	}
-	return u
-}
-
-// lesson stores one lesson starting `in` from now and returns it with its id.
-func (h *harness) lesson(discipline, typ string, in time.Duration, online bool, sub int) model.Lesson {
-	h.t.Helper()
-	begin := time.Now().In(h.b.loc).Add(in).Truncate(time.Minute)
-	l := model.Lesson{
-		Date:       begin.Format("2006-01-02"),
-		Start:      begin.Format("15:04"),
-		End:        begin.Add(90 * time.Minute).Format("15:04"),
-		Begin:      begin,
-		Finish:     begin.Add(90 * time.Minute),
-		Discipline: discipline,
-		Teacher:    "Петров П.П.",
-		Type:       typ,
-		Subgroup:   sub,
-		Online:     online,
-	}
-	all, err := h.st.ListLessons()
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	if err := h.st.ReplaceLessons(append(all, l)); err != nil {
-		h.t.Fatal(err)
-	}
-	all, err = h.st.ListLessons()
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	for _, got := range all {
-		if got.Discipline == discipline && got.Begin.Equal(begin) {
-			return got
-		}
-	}
-	h.t.Fatalf("lesson %q not stored", discipline)
-	return model.Lesson{}
-}
-
-func (h *harness) user(id int64) *model.User {
-	h.t.Helper()
-	u, err := h.st.GetUser(id)
-	if err != nil {
 		h.t.Fatal(err)
 	}
 	return u
@@ -158,14 +107,6 @@ func (h *harness) wantText(chat int64, sub string) {
 	if got := h.lastTo(chat); !strings.Contains(got, sub) {
 		h.t.Fatalf("last message to %d = %q, want it to contain %q", chat, got, sub)
 	}
-}
-
-func (h *harness) toasts() []string {
-	var out []string
-	for _, c := range h.api.Calls("answerCallbackQuery") {
-		out = append(out, c.Param("text"))
-	}
-	return out
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }

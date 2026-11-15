@@ -28,7 +28,6 @@ import (
 var ErrNoAccount = errors.New("uni: no lk account")
 
 var (
-	tick          = time.Minute
 	kickTick      = 5 * time.Second
 	moodleEvery   = 30 * time.Minute
 	moodleFull    = 6 * time.Hour
@@ -57,6 +56,9 @@ type Syncer struct {
 
 	MoodleWorkers int // переопределение MOODLE_WORKERS (если > 0)
 	QuizWorkers   int // переопределение MOODLE_QUIZ_WORKERS (если > 0)
+	// QuizMode — QuizModeService или QuizModeInline; пусто — из QUIZ_MODE (см. quiz_service.go).
+	QuizMode     string
+	QuizParallel int // переопределение QUIZ_MAX_PARALLEL у воркера очереди (если > 0)
 
 	mu          sync.Mutex
 	lastFull    map[int64]time.Time
@@ -65,6 +67,7 @@ type Syncer struct {
 	runningQuiz map[string]bool          // активные тесты (tg:quizID), решаемые прямо сейчас
 	sem         chan struct{}            // семафор параллельных воркеров Moodle
 	quizSem     chan struct{}            // семафор параллельного решения тестов (пул решения)
+	quizPacer   *moodlePacer             // темп входов и стартов попыток воркера очереди; nil — без ограничения
 	// solveHook — тестовый крючок: вызывается в горутине страницы перед решением (паника в нём
 	// проверяет перехват в solveSinglePageSafe). В проде nil.
 	solveHook func(idx int)
