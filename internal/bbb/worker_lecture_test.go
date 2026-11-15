@@ -2,12 +2,15 @@ package bbb
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notes"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/store"
 )
 
@@ -381,4 +384,73 @@ func TestMissingBBBRequestsRaspRefresh(t *testing.T) {
 	if err != nil || req2 {
 		t.Fatalf("expected no repeat RaspRefresh on duplicate missingBBB, got (%v, %v)", req2, err)
 	}
+}
+
+// stubNotesBuild подменяет сборку конспекта на время теста: PDF без Chromium не собрать.
+func stubNotesBuild(t *testing.T, fn func(context.Context, *config.Config, string, model.LecturePack) error) {
+	t.Helper()
+	old := notesBuild
+	notesBuild = fn
+	t.Cleanup(func() { notesBuild = old })
+}
+
+// Слайды не распознаны полностью: до последней попытки это ошибка с повтором,
+// на последней конспект публикуется как есть и админ получает уведомление.
+func TestBuildNotesSlidesIncompletePublishesOnLastAttempt(t *testing.T) {
+	h := newWorkerHarness(t)
+	p := h.pack(h.lesson("Сети", "Лекция", 3*time.Hour), model.PackRecorded)
+	calls := 0
+	stubNotesBuild(t, func(context.Context, *config.Config, string, model.LecturePack) error {
+		calls++
+		return fmt.Errorf("%w: слайды [3]", notes.ErrSlidesIncomplete)
+	})
+
+	for i := 1; i < maxNoteAttempts; i++ {
+		if h.w.buildNotes(context.Background(), p.ID) {
+			t.Fatalf("попытка %d с неполными слайдами не должна считаться успехом", i)
+		}
+		got, _ := h.st.PackByID(p.ID)
+		if got.Status != model.PackError {
+			t.Fatalf("попытка %d: статус = %s, ожидался error с повтором", i, got.Status)
+		}
+		if n := h.w.noteAttemptsFor(p.ID); n != i {
+			t.Fatalf("попыток = %d, ожидалось %d", n, i)
+		}
+	}
+	h.wantSent(adminTG, "попытка 1/10")
+
+	if !h.w.buildNotes(context.Background(), p.ID) {
+		t.Fatal("на последней попытке неполные слайды должны публиковаться как есть")
+	}
+	got, _ := h.st.PackByID(p.ID)
+	if got.Status != model.PackDone {
+		t.Fatalf("статус = %s, ожидался done", got.Status)
+	}
+	if n := h.w.noteAttemptsFor(p.ID); n != 0 {
+		t.Fatalf("после успеха счётчик попыток должен сброситься, получено %d", n)
+	}
+	if calls != maxNoteAttempts {
+		t.Fatalf("сборок = %d, ожидалось %d", calls, maxNoteAttempts)
+	}
+	h.wantSent(adminTG, "слайды неполные")
+}
+
+// Ошибка, не связанная со слайдами, на последней попытке остаётся ошибкой: публикации нет.
+func TestBuildNotesOtherErrorOnLastAttemptStaysFailed(t *testing.T) {
+	h := newWorkerHarness(t)
+	p := h.pack(h.lesson("Сети", "Лекция", 3*time.Hour), model.PackRecorded)
+	stubNotesBuild(t, func(context.Context, *config.Config, string, model.LecturePack) error {
+		return errors.New("llm недоступен")
+	})
+
+	for i := 1; i <= maxNoteAttempts; i++ {
+		if h.w.buildNotes(context.Background(), p.ID) {
+			t.Fatalf("попытка %d с ошибкой сборки не должна считаться успехом", i)
+		}
+	}
+	got, _ := h.st.PackByID(p.ID)
+	if got.Status != model.PackError {
+		t.Fatalf("статус = %s, ожидался error", got.Status)
+	}
+	h.wantSent(adminTG, "попыток больше не будет")
 }

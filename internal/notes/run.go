@@ -25,6 +25,10 @@ import (
 // повторять сборку бессмысленно.
 var ErrEmptyAudio = errors.New("записи нет")
 
+// ErrSlidesIncomplete: часть слайдов не распознана vision даже после повторов. Конспект и PDF уже
+// записаны, но сборку стоит повторить: вызывающий решает, сколько раз и когда.
+var ErrSlidesIncomplete = errors.New("слайды распознаны не полностью")
+
 const (
 	minAudioLen  = time.Minute
 	minAudioPeak = -50.0 // dBFS; тишина в комнате BBB даёт около -76
@@ -448,7 +452,8 @@ func stepTranscript(ctx context.Context, cfg *config.Config, dir, audioPath, trP
 }
 
 // stepSlides описывает слайды либо берёт готовое описание из кэша по SHA-256 картинок.
-func stepSlides(ctx context.Context, cfg *config.Config, dir, slidesDir string, bc *buildCache) (string, error) {
+// Неполное описание (часть батчей не распознана) в кэш не пишется: при следующей сборке слайды пересчитаются.
+func stepSlides(ctx context.Context, cfg *config.Config, dir, slidesDir string, bc *buildCache) (SlidesResult, error) {
 	tag := lectureOf(ctx).tag()
 	slidesHash, _, err := computeSlidesHash(slidesDir)
 	if err != nil {
@@ -468,7 +473,7 @@ func stepSlides(ctx context.Context, cfg *config.Config, dir, slidesDir string, 
 		if desc != "" {
 			logx.Infof("notes", "Build: %s слайды: взяты из кэша chars=%d (sha256=%s)",
 				tag, len([]rune(desc)), slidesHash[:min(12, len(slidesHash))])
-			return desc, nil
+			return SlidesResult{Text: desc}, nil
 		}
 	}
 
@@ -484,7 +489,8 @@ func stepSlides(ctx context.Context, cfg *config.Config, dir, slidesDir string, 
 	}
 
 	visionStart := time.Now()
-	slideText, err := DescribeSlides(ctx, cfg, slidesDir)
+	det, err := DescribeSlidesDetailed(ctx, cfg, slidesDir)
+	slideText := det.Text
 	if err != nil {
 		logx.Errorf("notes", "Build: %s слайды: %v", tag, err)
 	}
@@ -493,7 +499,15 @@ func stepSlides(ctx context.Context, cfg *config.Config, dir, slidesDir string, 
 			tag, len([]rune(slideText)), time.Since(visionStart).Round(time.Millisecond))
 	}
 
-	if slideText != "" && slidesHash != "" {
+	switch {
+	case det.Incomplete:
+		// Часть слайдов осталась без vision-описания: отдаём текст как есть, но кэш не трогаем как окончательный.
+		logx.Warnf("notes", "Build: %s слайды: неполно — vision не распознал слайды %v, в кэш не пишу (пересчитаю при следующей сборке)",
+			tag, det.FailedSlides)
+		bc.SlidesHash = ""
+		bc.SlidesDesc = ""
+		_ = saveBuildCache(dir, bc)
+	case slideText != "" && slidesHash != "":
 		bc.SlidesHash = slidesHash
 		bc.SlidesDesc = slideText
 		if err := writeFileAtomic(descFile, []byte(slideText), 0644); err != nil {
@@ -502,7 +516,7 @@ func stepSlides(ctx context.Context, cfg *config.Config, dir, slidesDir string, 
 		_ = saveBuildCache(dir, bc)
 	}
 
-	return slideText, err
+	return det, err
 }
 
 // stepNotes формирует конспект notes.md через LLM либо берёт готовый файл с диска.
@@ -602,7 +616,8 @@ func Build(ctx context.Context, cfg *config.Config, root string, p model.Lecture
 	}
 
 	// Этап 2: Описание слайдов (с кэшированием по SHA-256 картинок)
-	slideText, err := stepSlides(ctx, cfg, dir, slides, bc)
+	slidesRes, err := stepSlides(ctx, cfg, dir, slides, bc)
+	slideText := slidesRes.Text
 	if err != nil {
 		logx.Errorf("notes", "Build: %s слайды: %v", tag, err)
 	}
@@ -629,6 +644,10 @@ func Build(ctx context.Context, cfg *config.Config, root string, p model.Lecture
 		return err
 	}
 
+	if slidesRes.Incomplete {
+		logx.Warnf("notes", "Build: %s конспект записан, но слайды не распознаны полностью: %v", tag, slidesRes.FailedSlides)
+		return fmt.Errorf("%w: слайды %v", ErrSlidesIncomplete, slidesRes.FailedSlides)
+	}
 	logx.Infof("notes", "Build: %s готово за %s transcript_chars=%d slides_chars=%d notes_chars=%d",
 		tag, time.Since(started).Round(time.Second), len([]rune(transcript)), len([]rune(slideText)), len([]rune(md)))
 	return nil

@@ -63,28 +63,20 @@ func (l *loginLimiter) cleanupLocked(now time.Time) {
 	l.lastCleanup = now
 }
 
-func (l *loginLimiter) check(key string, now time.Time) (bool, time.Duration) {
+// tryAttempt атомарно проверяет блок и занимает попытку входа по ключу: под
+// одним мьютексом смотрит, заблокирован ли ключ, и если нет — сразу засчитывает
+// попытку. Счётчик растёт до проверки пароля, поэтому параллельные запросы не
+// проскакивают мимо порога. Верный вход потом снимает записи через reset, так
+// что неудачей считается каждая попытка, которая не завершилась успехом.
+// blocked — ключ сейчас заблокирован, retry — сколько ещё ждать.
+func (l *loginLimiter) tryAttempt(key string, now time.Time) (blocked bool, retry time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.cleanupLocked(now)
 	e, ok := l.entries[key]
-	if !ok {
-		return false, 0
-	}
-	if e.blockedUntil.After(now) {
+	if ok && e.blockedUntil.After(now) {
 		return true, e.blockedUntil.Sub(now)
 	}
-	if now.Sub(e.firstFailAt) >= loginFailWindow {
-		delete(l.entries, key)
-	}
-	return false, 0
-}
-
-func (l *loginLimiter) recordFailure(key string, now time.Time) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.cleanupLocked(now)
-	e, ok := l.entries[key]
 	if !ok || now.Sub(e.firstFailAt) >= loginFailWindow {
 		e = &loginFailEntry{firstFailAt: now}
 		l.entries[key] = e
@@ -93,8 +85,10 @@ func (l *loginLimiter) recordFailure(key string, now time.Time) {
 	if e.failures >= loginMaxFailures {
 		e.blockedUntil = now.Add(loginBlockDuration)
 	}
+	return false, 0
 }
 
+// reset снимает записи ключа после верного входа.
 func (l *loginLimiter) reset(key string) {
 	l.mu.Lock()
 	delete(l.entries, key)
@@ -107,6 +101,17 @@ func (s *Server) loginClientKey(r *http.Request) string {
 		return ip.String()
 	}
 	return "unknown"
+}
+
+// writeBlocked отвечает 429 с Retry-After: клиент по IP временно заблокирован
+// за перебор паролей.
+func writeBlocked(w http.ResponseWriter, retry time.Duration) {
+	sec := int(math.Ceil(retry.Seconds()))
+	if sec < 1 {
+		sec = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(sec))
+	writeErr(w, http.StatusTooManyRequests, "слишком много неудачных попыток входа, попробуйте позже")
 }
 
 func hashToken(tok string) string {
@@ -236,31 +241,16 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "demo": true})
 		return
 	}
-	now := s.clock()
-	clientKey := s.loginClientKey(r)
-	if s.loginLim != nil {
-		if blocked, retryAfter := s.loginLim.check(clientKey, now); blocked {
-			sec := int(math.Ceil(retryAfter.Seconds()))
-			if sec < 1 {
-				sec = 1
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(sec))
-			logx.Warnf("panel", "login: rate limited client=%s retry_after=%ds", clientKey, sec)
-			writeErr(w, http.StatusTooManyRequests, "слишком много неудачных попыток входа, попробуйте позже")
-			return
-		}
-	}
-	id, ok := s.passwordIdentity(r)
-	if !ok {
-		if s.loginLim != nil {
-			s.loginLim.recordFailure(clientKey, now)
-		}
-		logx.Warnf("panel", "login: bad password client=%s", clientKey)
-		writeErr(w, http.StatusUnauthorized, "unauthorized")
+	id, ok, blockedFor := s.passwordAttempt(r)
+	if blockedFor > 0 {
+		logx.Warnf("panel", "login: rate limited client=%s", s.loginClientKey(r))
+		writeBlocked(w, blockedFor)
 		return
 	}
-	if s.loginLim != nil {
-		s.loginLim.reset(clientKey)
+	if !ok {
+		logx.Warnf("panel", "login: bad password client=%s", s.loginClientKey(r))
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
 	}
 	expires, err := s.startSession(w, r, id)
 	if err != nil {

@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
@@ -233,6 +235,7 @@ func TestDescribeSlidesFallbackToTextLayerWithoutKeys(t *testing.T) {
 }
 
 func TestDescribeSlidesFallbackToTextLayerOnBatchFailure(t *testing.T) {
+	fastVisionRetry(t)
 	dir := t.TempDir()
 	writeFakeSlides(t, dir, 10, true)
 
@@ -287,6 +290,7 @@ func TestDescribeSlidesFallbackToTextLayerOnBatchFailure(t *testing.T) {
 }
 
 func TestDescribeSlidesAllFailedNoTextReturnsError(t *testing.T) {
+	fastVisionRetry(t)
 	dir := t.TempDir()
 	writeFakeSlides(t, dir, 3, false)
 
@@ -369,6 +373,218 @@ func TestDescribeSlidesContextCanceled(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("ожидался 1 вызов до отмены контекста, выполнено %d", calls)
+	}
+}
+
+// fastVisionRetry убирает паузу между повторами батчей на время теста.
+func fastVisionRetry(t *testing.T) {
+	t.Helper()
+	old := visionRetryDelay
+	visionRetryDelay = time.Millisecond
+	t.Cleanup(func() { visionRetryDelay = old })
+}
+
+// visionCallsPerAttempt — сколько HTTP-запросов уходит на одну попытку батча:
+// AskParts перебирает все таргеты цепочки пула, по одному запросу на каждый.
+func visionCallsPerAttempt(cfg *config.Config) int {
+	return len(llm.MediaTargets(llm.PoolChain(cfg), false, true))
+}
+
+// visionReplyFor собирает ответ модели с заголовками «=== Слайд N ===» для номеров nums.
+func visionReplyFor(prefix string, nums ...int) string {
+	var sb strings.Builder
+	for _, n := range nums {
+		fmt.Fprintf(&sb, "=== Слайд %d ===\n%s %d\n\n", n, prefix, n)
+	}
+	return sb.String()
+}
+
+func writeVisionOK(w http.ResponseWriter, content string) {
+	w.Header().Set("Content-Type", "application/json")
+	resp, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{
+			{"message": map[string]string{"content": content}},
+		},
+	})
+	_, _ = w.Write(resp)
+}
+
+// Батч из 6 слайдов падает на первой попытке (на всех таргетах), вторая попытка проходит: результат полный.
+func TestDescribeSlidesRetriesFailedBatch(t *testing.T) {
+	fastVisionRetry(t)
+	dir := t.TempDir()
+	writeFakeSlides(t, dir, 10, true)
+	cfg := &config.Config{GeminiAPIKeys: []string{"k1:secret-1"}}
+	perAttempt := int32(visionCallsPerAttempt(cfg))
+
+	var bigCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		creq := decodeVisionRequest(t, r)
+		if creq.ImageCount == 6 {
+			if bigCalls.Add(1) <= perAttempt {
+				http.Error(w, "upstream 500", http.StatusInternalServerError)
+				return
+			}
+			writeVisionOK(w, visionReplyFor("Vision повтор слайд", 1, 2, 3, 4, 5, 6))
+			return
+		}
+		writeVisionOK(w, visionReplyFor("Vision повтор слайд", 7, 8, 9, 10))
+	}))
+	defer srv.Close()
+
+	oldURL := llm.GeminiURL
+	llm.GeminiURL = srv.URL
+	t.Cleanup(func() { llm.GeminiURL = oldURL })
+
+	ctx := llm.WithPool(context.Background(), llm.NewKeyPool())
+
+	res, err := DescribeSlidesDetailed(ctx, cfg, dir)
+	if err != nil {
+		t.Fatalf("неожиданная ошибка: %v", err)
+	}
+	if res.Incomplete || len(res.FailedSlides) != 0 {
+		t.Fatalf("после успешного повтора результат должен быть полным, получено %+v", res)
+	}
+	// Первая попытка: perAttempt запросов, все с 500. Вторая: первый же таргет отвечает успехом.
+	if n := bigCalls.Load(); n != perAttempt+1 {
+		t.Fatalf("батч из 6 слайдов: ожидалось %d запросов (полная первая попытка с сбоями и успешный первый запрос повтора), выполнено %d", perAttempt+1, n)
+	}
+	for i := 1; i <= 10; i++ {
+		want := fmt.Sprintf("Vision повтор слайд %d", i)
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("в результате нет %q:\n%s", want, res.Text)
+		}
+	}
+}
+
+// Батч из 6 слайдов падает на всех попытках: его слайды идут из текстового слоя, результат помечен неполным.
+func TestDescribeSlidesIncompleteAfterRetries(t *testing.T) {
+	fastVisionRetry(t)
+	dir := t.TempDir()
+	writeFakeSlides(t, dir, 10, true)
+	cfg := &config.Config{GeminiAPIKeys: []string{"k1:secret-1"}}
+	perAttempt := visionCallsPerAttempt(cfg)
+
+	var bigCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		creq := decodeVisionRequest(t, r)
+		if creq.ImageCount == 6 {
+			bigCalls.Add(1)
+			http.Error(w, "upstream 500", http.StatusInternalServerError)
+			return
+		}
+		writeVisionOK(w, visionReplyFor("Vision батч 2 слайд", 7, 8, 9, 10))
+	}))
+	defer srv.Close()
+
+	oldURL := llm.GeminiURL
+	llm.GeminiURL = srv.URL
+	t.Cleanup(func() { llm.GeminiURL = oldURL })
+
+	ctx := llm.WithPool(context.Background(), llm.NewKeyPool())
+
+	res, err := DescribeSlidesDetailed(ctx, cfg, dir)
+	if err != nil {
+		t.Fatalf("ожидался fallback на текстовый слой без ошибки, получено: %v", err)
+	}
+	if !res.Incomplete {
+		t.Fatalf("результат с упавшим батчем должен быть помечен Incomplete")
+	}
+	if got := fmt.Sprint(res.FailedSlides); got != "[1 2 3 4 5 6]" {
+		t.Fatalf("FailedSlides = %s, ожидались слайды 1..6", got)
+	}
+	if n := int(bigCalls.Load()); n != visionBatchAttempts*perAttempt {
+		t.Fatalf("упавший батч должен быть повторён до %d попыток по %d запросов, выполнено %d запросов",
+			visionBatchAttempts, perAttempt, n)
+	}
+	for i := 1; i <= 6; i++ {
+		ts := fmt.Sprintf("[%02d:%02d]", (i*10)/60, (i*10)%60)
+		want := fmt.Sprintf("Слайд %d %s:\nТекстовый слой слайда %d", i, ts, i)
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("для упавшего батча ожидался текстовый слой %q:\n%s", want, res.Text)
+		}
+	}
+	for i := 7; i <= 10; i++ {
+		want := fmt.Sprintf("Vision батч 2 слайд %d", i)
+		if !strings.Contains(res.Text, want) {
+			t.Fatalf("для рабочего батча ожидался vision-текст %q:\n%s", want, res.Text)
+		}
+	}
+}
+
+// Отмена ctx во время паузы между повторами прерывает их сразу, а не после всех пауз.
+func TestDescribeSlidesRetryRespectsContext(t *testing.T) {
+	old := visionRetryDelay
+	visionRetryDelay = time.Hour
+	t.Cleanup(func() { visionRetryDelay = old })
+
+	dir := t.TempDir()
+	writeFakeSlides(t, dir, 3, false)
+	cfg := &config.Config{GeminiAPIKeys: []string{"k1:secret-1"}}
+	perAttempt := visionCallsPerAttempt(cfg)
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "upstream 500", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	oldURL := llm.GeminiURL
+	llm.GeminiURL = srv.URL
+	t.Cleanup(func() { llm.GeminiURL = oldURL })
+
+	ctx, cancel := context.WithTimeout(llm.WithPool(context.Background(), llm.NewKeyPool()), 300*time.Millisecond)
+	defer cancel()
+
+	_, err := DescribeSlidesDetailed(ctx, cfg, dir)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ожидался context.DeadlineExceeded из паузы повтора, получено: %v", err)
+	}
+	if n := int(calls.Load()); n != perAttempt {
+		t.Fatalf("при отмене в паузе ожидалась одна попытка (%d запросов), выполнено %d", perAttempt, n)
+	}
+}
+
+// Все ключи на паузе после 429: повтор сейчас ничего не даст, поэтому после первого отказа
+// делается одна пауза, а на cooldown-ответе батч сдаётся без дальнейших пауз и запросов.
+func TestDescribeSlidesStopsRetryOnAllCooldown(t *testing.T) {
+	var pauses atomic.Int32
+	oldPause := visionPause
+	visionPause = func(ctx context.Context, d time.Duration) bool {
+		pauses.Add(1)
+		return true
+	}
+	t.Cleanup(func() { visionPause = oldPause })
+
+	dir := t.TempDir()
+	writeFakeSlides(t, dir, 3, false)
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"details":[{"retryDelay":"30s"}]}}`))
+	}))
+	defer srv.Close()
+
+	oldURL := llm.GeminiURL
+	llm.GeminiURL = srv.URL
+	t.Cleanup(func() { llm.GeminiURL = oldURL })
+
+	ctx := llm.WithPool(context.Background(), llm.NewKeyPool())
+	cfg := &config.Config{GeminiAPIKeys: []string{"k1:secret-1"}}
+
+	_, err := DescribeSlidesDetailed(ctx, cfg, dir)
+	if !errors.Is(err, llm.ErrAllCooldown) {
+		t.Fatalf("ожидался ErrAllCooldown, получено: %v", err)
+	}
+	if n := pauses.Load(); n != 1 {
+		t.Fatalf("ожидалась одна пауза после первого отказа, получено %d", n)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("ключ на cooldown не должен вызываться повторно: ожидался 1 запрос, получено %d", n)
 	}
 }
 

@@ -28,6 +28,8 @@ type fakeUni struct {
 	mu         sync.Mutex
 	events     string
 	assignHTML string
+	// quiz — обработчик /moodle/mod/quiz/*; nil — только заглушка view.php. Под mu.
+	quiz http.Handler
 }
 
 const ttJSON = `{"currentYear":{"id":15,"startDate":"2026-08-31"},"lessons":[
@@ -129,8 +131,19 @@ func newFake(t *testing.T) *fakeUni {
 		defer f.mu.Unlock()
 		w.Write([]byte(f.assignHTML))
 	})
-	mux.HandleFunc("/moodle/mod/quiz/view.php", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`<div class="quizinfo"><p>Разрешено попыток: 1</p></div><div class="quizstartbuttondiv"></div>`))
+	mux.HandleFunc("/moodle/mod/quiz/", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		h := f.quiz
+		f.mu.Unlock()
+		if h != nil {
+			h.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == "/moodle/mod/quiz/view.php" {
+			w.Write([]byte(`<div class="quizinfo"><p>Разрешено попыток: 1</p></div><div class="quizstartbuttondiv"></div>`))
+			return
+		}
+		http.NotFound(w, r)
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)

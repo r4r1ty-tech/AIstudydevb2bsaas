@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -276,5 +277,148 @@ func TestOwnerLookupCacheAvoidsRepeatedDecrypt(t *testing.T) {
 	}
 	if openCalls.Load() != 5 {
 		t.Fatalf("после TTL ожидали 5 вызовов Open, получили %d", openCalls.Load())
+	}
+}
+
+// Аккаунт с ФИО из ЛК: фамилия из lk_name попадает в KeyOwner.
+func addOwnerAccount(t *testing.T, st *store.Store, id int64, fio string) {
+	t.Helper()
+	if err := st.PutAccount(model.Account{TelegramID: id, Kind: model.AccountMoodle, Login: "login"}); err != nil {
+		t.Fatalf("PutAccount: %v", err)
+	}
+	if err := st.SetSetting(fmt.Sprintf("lk_name:%d", id), fio); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+}
+
+func envKeyLabels(chain []llm.Target) map[string]bool {
+	out := map[string]bool{}
+	for _, tgt := range chain {
+		if tgt.KeyLabel != "" {
+			out[tgt.KeyLabel] = true
+		}
+	}
+	return out
+}
+
+// Однофамильцы: ключ «Агеев:…» не достаётся ни одному из двух.
+func TestKeyOwnerTwoSameSurnamesGetNothing(t *testing.T) {
+	st, v := openAccessTestEnv(t)
+	cfg := &config.Config{AdminID: 1, GeminiAPIKeys: []string{"Агеев:g-ageev-env"}}
+	const a, b int64 = 2001, 2002
+	addOwnerAccount(t, st, a, "Агеев Иван Петрович")
+	addOwnerAccount(t, st, b, "Агеев Пётр Иванович")
+
+	for _, id := range []int64{a, b} {
+		if got := KeyOwner(st, id); got.Surname != "" {
+			t.Fatalf("tg=%d: фамилия однофамильцев не должна назначать владельца: %+v", id, got)
+		}
+		if chain := QuizChainWithVault(cfg, st, v, id); len(chain) != 0 {
+			t.Fatalf("tg=%d: ключ однофамильца не должен попасть в цепочку: %+v", id, chain)
+		}
+	}
+}
+
+// Один носитель фамилии — ключ по фамилии достаётся ему.
+func TestKeyOwnerUniqueSurnameGetsKey(t *testing.T) {
+	st, v := openAccessTestEnv(t)
+	cfg := &config.Config{AdminID: 1, GeminiAPIKeys: []string{"Агеев:g-ageev-env", "Костин:g-kostin-env"}}
+	const a, other int64 = 2011, 2012
+	addOwnerAccount(t, st, a, "Агеев Иван Петрович")
+	addOwnerAccount(t, st, other, "Костин Пётр Иванович")
+
+	if got := KeyOwner(st, a); got.Surname != "Агеев" || got.ID != a {
+		t.Fatalf("владелец: %+v", got)
+	}
+	labels := envKeyLabels(QuizChainWithVault(cfg, st, v, a))
+	if !labels["Агеев"] || labels["Костин"] {
+		t.Fatalf("у Агеева должен быть только его ключ: %v", labels)
+	}
+}
+
+// Подпись из цифр — точный telegram_id, даже когда фамилия неоднозначна.
+func TestKeyOwnerNumericLabelIsExactID(t *testing.T) {
+	st, v := openAccessTestEnv(t)
+	cfg := &config.Config{AdminID: 1, GeminiAPIKeys: []string{"2021:g-by-id"}}
+	const a, b int64 = 2021, 2022
+	addOwnerAccount(t, st, a, "Агеев Иван Петрович")
+	addOwnerAccount(t, st, b, "Агеев Пётр Иванович")
+
+	if labels := envKeyLabels(QuizChainWithVault(cfg, st, v, a)); !labels["2021"] {
+		t.Fatalf("ключ с подписью telegram_id своего владельца должен достаться ему: %v", labels)
+	}
+	if labels := envKeyLabels(QuizChainWithVault(cfg, st, v, b)); labels["2021"] {
+		t.Fatalf("чужой telegram_id не должен давать ключ: %v", labels)
+	}
+}
+
+// Однофамилец, виденный только по аккаунту ЛК (без Moodle), тоже считается.
+func TestKeyOwnerSurnameHolderWithOnlyLKAccountIsSeen(t *testing.T) {
+	st, v := openAccessTestEnv(t)
+	cfg := &config.Config{AdminID: 1, GeminiAPIKeys: []string{"Агеев:g-ageev-env"}}
+	const a, b int64 = 2031, 2032
+	if err := st.PutAccount(model.Account{TelegramID: a, Kind: model.AccountLK, Login: "lk"}); err != nil {
+		t.Fatalf("PutAccount LK: %v", err)
+	}
+	if err := st.SetSetting(fmt.Sprintf("lk_name:%d", a), "Агеев Андрей Анатольевич"); err != nil {
+		t.Fatalf("SetSetting: %v", err)
+	}
+	addOwnerAccount(t, st, b, "Агеев Борис Борисович")
+
+	if got := KeyOwner(st, b); got.Surname != "" {
+		t.Fatalf("Агеев Б с аккаунтом Moodle видит однофамильца ЛК: владелец %+v", got)
+	}
+	if chain := QuizChainWithVault(cfg, st, v, b); len(chain) != 0 {
+		t.Fatalf("ключ однофамильца не должен достаться Б: %+v", chain)
+	}
+	if got := KeyOwner(st, a); got.Surname != "" {
+		t.Fatalf("Агеев А (только ЛК) тоже не должен получать фамилию: %+v", got)
+	}
+}
+
+// Ошибка чтения любого списка аккаунтов — fail-closed: по фамилии никому.
+type failingAccountsStore struct {
+	*store.Store
+	failKind string
+}
+
+func (f failingAccountsStore) ListAccounts(kind string) ([]model.Account, error) {
+	if kind == f.failKind {
+		return nil, fmt.Errorf("сбой чтения %s", kind)
+	}
+	return f.Store.ListAccounts(kind)
+}
+
+func TestKeyOwnerFailsClosedOnListError(t *testing.T) {
+	st, _ := openAccessTestEnv(t)
+	const b int64 = 2041
+	addOwnerAccount(t, st, b, "Агеев Борис Борисович")
+	for _, kind := range []string{model.AccountLK, model.AccountMoodle} {
+		if got := KeyOwner(failingAccountsStore{Store: st, failKind: kind}, b); got.Surname != "" {
+			t.Fatalf("сбой ListAccounts(%s): владелец должен быть пуст, получили %+v", kind, got)
+		}
+	}
+}
+
+// «ё» и «е» — одна фамилия: два однофамильца с разным написанием неоднозначны.
+func TestKeyOwnerYoAndEAreSameSurname(t *testing.T) {
+	st, v := openAccessTestEnv(t)
+	cfg := &config.Config{AdminID: 1, GeminiAPIKeys: []string{"Петр:g-petr-env", "Елкин:g-elkin-env"}}
+	const a, b, c int64 = 2051, 2052, 2053
+	addOwnerAccount(t, st, a, "Пётр Иван Олегович")
+	addOwnerAccount(t, st, b, "Петр Сергей Львович")
+	addOwnerAccount(t, st, c, "Ёлкин Павел Игоревич")
+
+	for _, id := range []int64{a, b} {
+		if got := KeyOwner(st, id); got.Surname != "" {
+			t.Fatalf("tg=%d: Пётр/Петр неоднозначны, владелец должен быть пуст: %+v", id, got)
+		}
+		if chain := QuizChainWithVault(cfg, st, v, id); len(chain) != 0 {
+			t.Fatalf("tg=%d: ключ Петр не должен попасть в цепочку: %+v", id, chain)
+		}
+	}
+	// «Ёлкин» (единственный) получает ключ «Елкин:…».
+	if labels := envKeyLabels(QuizChainWithVault(cfg, st, v, c)); !labels["Елкин"] {
+		t.Fatalf("Ёлкин должен получить ключ Елкин: %v", labels)
 	}
 }

@@ -2,11 +2,13 @@ package uni
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,7 +101,8 @@ func (s *Syncer) getCfg() *config.Config {
 }
 
 // detectAndHandleOpenedQuizzes проверяет, какие тесты стали открытыми для попыток,
-// уведомляет пользователя и запускает парсинг или авторешение через LLM.
+// уведомляет пользователя и ставит парсинг или авторешение через LLM в пул решения (scheduleQuiz).
+// Сам не решает: возвращается сразу, синк аккаунта не ждёт решения.
 func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Account, c *moodle.Client, prev, cur []model.MoodleItem) {
 	wakeKicked := isWakeKicked(ctx)
 	if !wakeKicked && s.Store != nil {
@@ -111,7 +114,12 @@ func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Acc
 	// по нашим эвристикам «не открыт» — пусть Moodle сам скажет, можно ли.
 	forced := s.takeForced(acc.TelegramID, prev, cur)
 	for _, it := range forced {
-		s.processQuiz(ctx, acc, c, it, true)
+		// «Пройти» — ручная попытка: сбрасывает счётчик неудач.
+		s.resetQuizFailures(acc.TelegramID, it.CMID)
+		if !s.scheduleQuiz(ctx, acc, c, it, true) {
+			s.notify(ctx, acc.TelegramID, "<b>Тест уже решается или стоит в очереди</b>\n<b>Тест:</b> "+
+				html.EscapeString(it.Title)+"\nДождись отчёта.")
+		}
 	}
 
 	// При первой инициализации аккаунта (когда в базе еще нет элементов и нет wake-кика)
@@ -155,9 +163,146 @@ func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Acc
 			s.notify(ctx, acc.TelegramID, "<b>Открылся тест в Moodle!</b>\n"+FormatItem(it, now, s.loc()))
 		}
 		if wasClosed || wakeKicked || failedBefore {
-			s.processQuiz(ctx, acc, c, it, false)
+			s.scheduleQuiz(ctx, acc, c, it, false)
 		}
 	}
+}
+
+// quizMaxAttempts — сколько неудачных попыток решения подряд допускается без ручного «Пройти».
+// Дальше авто-постановка не идёт, пользователю приходит одно сообщение.
+const quizMaxAttempts = 6
+
+// scheduleQuiz ставит решение теста в фоновый пул (семафор MOODLE_QUIZ_WORKERS).
+// Единственная защита от двойного решения — блокировка (tg, cmid): берётся здесь и снимается
+// по окончании решения. Если тест уже решается или ждёт в очереди — пропуск с логом.
+// Авто-постановка (не forced) не идёт, пока тест не исчерпал quizMaxAttempts неудач.
+// Возвращает false при пропуске.
+func (s *Syncer) scheduleQuiz(ctx context.Context, acc model.Account, c *moodle.Client, it model.MoodleItem, forced bool) bool {
+	qid := strconv.FormatInt(it.CMID, 10)
+	if !forced && s.quizFailCount(acc.TelegramID, it.CMID) >= quizMaxAttempts {
+		logx.Infof("uni", "quiz tg=%d cmid=%d: %d неудачных попыток подряд, авто-решение не ставлю, ждём «Пройти»",
+			acc.TelegramID, it.CMID, quizMaxAttempts)
+		return false
+	}
+	if !s.tryLockQuiz(acc.TelegramID, qid) {
+		logx.Infof("uni", "quiz tg=%d cmid=%d: тест уже решается или ждёт в очереди, пропуск", acc.TelegramID, it.CMID)
+		return false
+	}
+	// Решение идёт на своём клиенте и сессии: общий *moodle.Client синка в фоне не используется.
+	// Сессию передаём зашифрованной (как в базе), чтобы не входить по паролю без нужды.
+	sess := acc
+	if s.Vault != nil {
+		if raw := c.Session(); raw != "" {
+			if sealed, err := s.Vault.Seal(raw); err == nil {
+				sess.Session = sealed
+			}
+		}
+	}
+	sem := s.getQuizSem()
+	logx.Infof("uni", "quiz tg=%d cmid=%d %q: в очереди решения, forced=%v", acc.TelegramID, it.CMID, it.Title, forced)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer s.unlockQuiz(acc.TelegramID, qid)
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			// Остановка до старта — не неудача решения: счётчик не растёт, повтор на следующем синке.
+			s.markQuizPending(acc.TelegramID, it.CMID)
+			logx.Infof("uni", "quiz tg=%d cmid=%d: остановка до начала решения, повтор на следующем синке", acc.TelegramID, it.CMID)
+			return
+		}
+		defer func() { <-sem }()
+		// Последний defer: паника в решении не роняет процесс, тест помечается неудачей и повторится.
+		defer func() {
+			if r := recover(); r != nil {
+				logx.Errorf("uni", "quiz tg=%d cmid=%d: паника в решении: %v\n%s", acc.TelegramID, it.CMID, r, debug.Stack())
+				s.markQuizRetry(ctx, acc.TelegramID, it)
+			}
+		}()
+		s.solveQuiz(ctx, sess, it, forced)
+	}()
+	return true
+}
+
+// solveQuiz решает один тест в фоне: вход в Moodle на своём клиенте (withSession), затем processQuizErr.
+// Протухшая сессия (ErrUnauthorized) уходит из fn в withSession: он перелогинивается и вызывает fn снова.
+// Если тест решён — аккаунту ставится пинок на синк, чтобы статусы в базе обновились.
+func (s *Syncer) solveQuiz(ctx context.Context, acc model.Account, it model.MoodleItem, forced bool) {
+	c, err := s.moodleClient()
+	if err != nil {
+		logx.Warnf("uni", "quiz tg=%d cmid=%d: клиент Moodle: %v", acc.TelegramID, it.CMID, err)
+		s.markQuizRetry(ctx, acc.TelegramID, it)
+		return
+	}
+	solved := false
+	err = s.withSession(ctx, acc, c, moodle.ErrBadLogin, moodle.ErrUnauthorized, func() error {
+		var authErr error
+		solved, authErr = s.processQuizErr(ctx, acc, c, it, forced)
+		return authErr
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			s.markQuizPending(acc.TelegramID, it.CMID)
+			return
+		}
+		logx.Warnf("uni", "quiz tg=%d cmid=%d: вход в Moodle для решения не удался: %v", acc.TelegramID, it.CMID, err)
+		s.markQuizRetry(ctx, acc.TelegramID, it)
+		if forced {
+			title := it.Title
+			if title == "" {
+				title = fmt.Sprintf("тест %d", it.CMID)
+			}
+			s.notify(ctx, acc.TelegramID, fmt.Sprintf("<b>⚠️ Не получилось пройти тест</b>\n<b>Тест:</b> %s\n<b>Почему:</b> вход в Moodle не удался",
+				html.EscapeString(title)))
+		}
+		return
+	}
+	if solved && ctx.Err() == nil {
+		// Пинок на полный синк: статусы теста в базе обновятся сразу, а не через 30 минут.
+		// Повторного решения это не вызовет: processQuizErr выходит по quiz_solved.
+		if err := Kick(s.Store, acc.TelegramID); err != nil {
+			logx.Warnf("uni", "quiz tg=%d cmid=%d: пинок после решения: %v", acc.TelegramID, it.CMID, err)
+		}
+	}
+}
+
+// quizFailCount — сколько неудачных попыток решения подряд записано в quiz_fail.
+func (s *Syncer) quizFailCount(tg, cmid int64) int {
+	n := 0
+	if v, ok, _ := s.Store.GetSetting(quizFailKey(tg, cmid)); ok {
+		_, _ = fmt.Sscan(v, &n)
+	}
+	return n
+}
+
+// markQuizRetry — неудачная попытка решения: увеличивает счётчик quiz_fail (он же ставит повтор
+// на следующем синке) и возвращает число неудач. На quizMaxAttempts шлёт пользователю одно сообщение.
+func (s *Syncer) markQuizRetry(ctx context.Context, tg int64, it model.MoodleItem) int {
+	n := s.quizFailCount(tg, it.CMID) + 1
+	_ = s.Store.SetSetting(quizFailKey(tg, it.CMID), fmt.Sprint(n))
+	if n == quizMaxAttempts {
+		title := it.Title
+		if title == "" {
+			title = fmt.Sprintf("тест %d", it.CMID)
+		}
+		s.notify(ctx, tg, fmt.Sprintf("<b>Не смог решить тест за %d попыток</b>\n<b>Тест:</b> %s\nНажми „Пройти“ в панели, чтобы попробовать ещё раз.",
+			quizMaxAttempts, html.EscapeString(title)))
+	}
+	return n
+}
+
+// markQuizPending — тест нужно решить снова, но неудачи решения не было (остановка, очередь).
+// Счётчик не растёт; флаг повтора ставится, если его нет, — следующий синк снова поставит тест.
+func (s *Syncer) markQuizPending(tg, cmid int64) {
+	if v, ok, _ := s.Store.GetSetting(quizFailKey(tg, cmid)); !ok || v == "" {
+		_ = s.Store.SetSetting(quizFailKey(tg, cmid), "0")
+	}
+}
+
+// resetQuizFailures — ручной «Пройти» сбрасывает счётчик неудач.
+func (s *Syncer) resetQuizFailures(tg, cmid int64) {
+	_ = s.Store.SetSetting(quizFailKey(tg, cmid), "")
 }
 
 // QuizForceKey — «пройти принудительно» (кнопка «Пройти» в панели).
@@ -194,14 +339,12 @@ func (s *Syncer) takeForced(id int64, prev, cur []model.MoodleItem) []model.Mood
 // processQuiz обрабатывает тест: парсит вопросы, собирает материалы курса
 // и при наличии ключа LLM решает тест и отправляет отчёт, либо присылает текст вопросов.
 // forced — «Пройти» из панели: почему не вышло, человеку сообщаем всегда.
-func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.Client, it model.MoodleItem, forced bool) {
+// processQuizErr — то же, что processQuiz, но возвращает ErrUnauthorized (сессия протухла при
+// открытии теста или старте попытки), не отмечая неудачу и не сообщая пользователю: решение
+// перезапустит solveQuiz после входа. Блокировку (tg, cmid) не берёт: её держит scheduleQuiz.
+// solved — true, только если попытка завершена (FinishAttempt) и тест помечен решённым.
+func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodle.Client, it model.MoodleItem, forced bool) (solved bool, authErr error) {
 	tag := quizTag{TG: acc.TelegramID, CMID: it.CMID, Page: quizNoPage}
-	quizLockID := fmt.Sprintf("%d", it.CMID)
-	if !s.TryLockQuiz(acc.TelegramID, quizLockID) {
-		logx.Infof("uni", "quiz %s: выход: тест уже решается в другой горутине, пропуск", tag)
-		return
-	}
-	defer s.UnlockQuiz(acc.TelegramID, quizLockID)
 
 	logx.Infof("uni", "quiz %s: вход: курс=%q название=%q forced=%v", tag, it.Course, it.Title, forced)
 	solvedKey := fmt.Sprintf("quiz_solved:%d:%d", acc.TelegramID, it.CMID)
@@ -223,16 +366,13 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 
 	// Временные сбои (страница теста, старт попытки) отмечаем в quiz_fail,
 	// чтобы следующий обход повторил тихо; закрытый тест — не сбой.
-	markRetry := func() {
-		n := 0
-		if v, ok, _ := s.Store.GetSetting(quizFailKey(acc.TelegramID, it.CMID)); ok {
-			_, _ = fmt.Sscan(v, &n)
-		}
-		_ = s.Store.SetSetting(quizFailKey(acc.TelegramID, it.CMID), fmt.Sprint(n+1))
-	}
+	markRetry := func() { s.markQuizRetry(ctx, acc.TelegramID, it) }
 
 	info, err := c.InspectQuiz(ctx, it.CMID)
 	if err != nil {
+		if errors.Is(err, moodle.ErrUnauthorized) {
+			return false, err
+		}
 		markRetry()
 		logx.Infof("uni", "quiz %s: выход: ошибка — страница теста не открылась: %v", tag, err)
 		refuse("не открылась страница теста: " + err.Error())
@@ -248,6 +388,9 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 
 	attempt, err := c.StartOrResumeAttempt(ctx, it.CMID)
 	if err != nil {
+		if errors.Is(err, moodle.ErrUnauthorized) {
+			return false, err
+		}
 		markRetry()
 		logx.Infof("uni", "quiz %s: выход: ошибка — попытка не началась: %v", tag, err)
 		refuse("попытка не началась: " + err.Error())
@@ -400,7 +543,7 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		)
 	} else {
 		allAnswers, usedModels, sentCount, runErr = s.solveAndSubmitFreeNav(
-			ctx, solveCtx, solveCancel, tag, c, ws, chain, it.Course, materials, pages, initialFast, deadline, run,
+			ctx, solveCtx, tag, c, ws, chain, it.Course, materials, pages, initialFast, deadline, run,
 		)
 	}
 
@@ -409,10 +552,18 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		run.Error = runErr.Error()
 		saveRun()
 		logx.Infof("uni", "quiz %s: выход: ошибка — %v", tag, runErr)
+		if ctx.Err() != nil {
+			// Прервано остановкой, а не сбоем решения: без уведомления и без счётчика, повтор на следующем синке.
+			s.markQuizPending(acc.TelegramID, it.CMID)
+			return false, nil
+		}
 		s.reportQuizFailure(ctx, acc.TelegramID, it, runErr, sentCount > 0)
 		return
 	}
 
+	// FinishAttempt — только если все страницы решены и отправлены (runErr == nil).
+	// Пропущенная страница (см. solveAndSubmitFreeNav) даёт runErr: попытка не завершается,
+	// тест не помечается решённым, а quiz_fail ставит повтор на следующем синке.
 	result, err := c.FinishAttempt(ctx, it.CMID, attempt.AttemptID)
 	if err != nil {
 		logx.Warnf("uni", "quiz %s: завершение попытки: %v", tag, err)
@@ -463,6 +614,13 @@ func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.C
 		b.WriteString(fmt.Sprintf("\n<a href=\"%s\">Открыть тест в Moodle</a>", html.EscapeString(it.URL)))
 	}
 	s.notify(ctx, acc.TelegramID, b.String())
+	return true, nil
+}
+
+// processQuiz — processQuizErr без ошибки сессии: для вызовов, которые не перезапускают вход (тесты).
+func (s *Syncer) processQuiz(ctx context.Context, acc model.Account, c *moodle.Client, it model.MoodleItem, forced bool) bool {
+	solved, _ := s.processQuizErr(ctx, acc, c, it, forced)
+	return solved
 }
 
 type pageSolveResult struct {
@@ -525,6 +683,28 @@ func (s *Syncer) solveSinglePage(ctx context.Context, tag quizTag, idx int, p *m
 	}
 }
 
+// solveSinglePageSafe — solveSinglePage с перехватом паники, для горутины страницы и для
+// последовательной навигации. Паника решения одной страницы не роняет процесс: результат с ошибкой
+// всё равно возвращается и уходит в resultsCh, иначе основной цикл отправки зависнет.
+func (s *Syncer) solveSinglePageSafe(ctx context.Context, tag quizTag, idx int, p *moodle.AttemptPage, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, opts solvePageOpts) (res pageSolveResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			ptag := tag
+			ptag.Page = p.Page
+			logx.Errorf("uni", "quiz %s: паника при решении страницы: %v\n%s", ptag, r, debug.Stack())
+			res = pageSolveResult{
+				idx: idx,
+				pl:  quizlog.Page{Page: p.Page, Error: fmt.Sprint(r)},
+				err: fmt.Errorf("паника при решении страницы: %v", r),
+			}
+		}
+	}()
+	if s.solveHook != nil {
+		s.solveHook(idx)
+	}
+	return s.solveSinglePage(ctx, tag, idx, p, c, ws, chain, course, materials, opts)
+}
+
 func submitPageAnswers(ctx context.Context, tag quizTag, c *moodle.Client, page *moodle.AttemptPage, answers map[int]moodle.QuizAnswer) (*moodle.AttemptPage, error) {
 	var checkSlots []int
 	for _, q := range page.Questions {
@@ -557,9 +737,18 @@ func collectRunPages(run *quizlog.Run, results []*pageSolveResult) {
 	}
 }
 
+// solveAndSubmitFreeNav решает страницы свободной навигации параллельно (не больше quizParallelism)
+// и отправляет ответы в Moodle строго по возрастанию индекса, по мере готовности.
+//
+// Ошибка одной страницы не останавливает остальные: страница, которую ИИ не решил или чьи ответы
+// Moodle не принял, пропускается — остаётся без ответа, причина пишется в журнал и в run.Pages,
+// а следующие страницы решаются и отправляются как обычно.
+// Если пропущена хотя бы одна страница, возвращается ошибка. Тогда processQuiz не вызывает
+// FinishAttempt: попытка остаётся открытой, Moodle закроет её по таймеру сам, тест не помечается
+// решённым, а quiz_fail ставит повтор на следующем синке (при повторе страницы решаются заново).
+// sent — сколько страниц успешно отправлено в Moodle.
 func (s *Syncer) solveAndSubmitFreeNav(
 	ctx, solveCtx context.Context,
-	solveCancel context.CancelFunc,
 	tag quizTag,
 	c *moodle.Client,
 	ws *websearch.Searcher,
@@ -577,13 +766,14 @@ func (s *Syncer) solveAndSubmitFreeNav(
 		return allAnswers, usedModels, 0, nil
 	}
 
-	workers := min(quizPageWorkers, n)
+	workers := quizParallelism(chain, n)
 	jobs := make(chan int, n)
 	for i := 0; i < n; i++ {
 		jobs <- i
 	}
 	close(jobs)
 
+	// Буфер на все страницы: горутины решения не ждут отправку в Moodle.
 	resultsCh := make(chan pageSolveResult, n)
 	var remaining atomic.Int64
 	remaining.Store(int64(n))
@@ -604,58 +794,73 @@ func (s *Syncer) solveAndSubmitFreeNav(
 				}
 				rem := int(remaining.Add(-1)) + 1
 				opts := pageOptsForWave(initialFast, deadline, rem, workers)
-				resultsCh <- s.solveSinglePage(solveCtx, tag, idx, pages[idx], c, ws, chain, course, materials, opts)
+				resultsCh <- s.solveSinglePageSafe(solveCtx, tag, idx, pages[idx], c, ws, chain, course, materials, opts)
 			}
 		}()
 	}
 
+	// results[i] — результат страницы с индексом i; в порядке возрастания отправляем готовые.
 	results := make([]*pageSolveResult, n)
-	drainAndCollect := func() {
-		close(resultsCh)
-		for r := range resultsCh {
-			cp := r
-			results[r.idx] = &cp
-		}
-		collectRunPages(run, results)
-	}
-	nextToSubmit := 0
-	for nextToSubmit < n {
-		if results[nextToSubmit] == nil {
+	var skipped []int // номера страниц (с 1), которые не решены или не сохранены
+	var firstErr error
+	sent := 0
+	for next := 0; next < n; next++ {
+		for results[next] == nil {
 			r := <-resultsCh
 			cp := r
 			results[r.idx] = &cp
-			continue
 		}
-		r := results[nextToSubmit]
+		r := results[next]
 		if r.usedKey != "" {
 			usedModels[r.usedKey] = true
 		}
 		for slot, ans := range r.answers {
 			allAnswers[slot] = ans
 		}
-		if r.err != nil {
-			solveCancel()
-			wg.Wait()
-			drainAndCollect()
-			return allAnswers, usedModels, nextToSubmit, r.err
-		}
 
 		ptag := tag
-		ptag.Page = pages[nextToSubmit].Page
-		if _, subErr := submitPageAnswers(ctx, ptag, c, pages[nextToSubmit], r.answers); subErr != nil {
-			logx.Warnf("uni", "quiz %s: сохранение ответов страницы: %v", ptag, subErr)
-			solveCancel()
-			wg.Wait()
-			drainAndCollect()
-			return allAnswers, usedModels, nextToSubmit, fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", nextToSubmit+1, subErr)
+		ptag.Page = pages[next].Page
+		if r.err != nil {
+			logx.Warnf("uni", "quiz %s: страница %d пропущена, ответ не отправлен, остальные идут дальше: %v", ptag, next+1, r.err)
+			skipped = append(skipped, next+1)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("страница %d не решена: %w", next+1, r.err)
+			}
+			continue
 		}
-		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, pages[nextToSubmit].Page)
-		nextToSubmit++
+		if _, subErr := submitPageAnswers(ctx, ptag, c, pages[next], r.answers); subErr != nil {
+			logx.Warnf("uni", "quiz %s: страница %d не сохранилась в Moodle, пропущена, остальные идут дальше: %v", ptag, next+1, subErr)
+			r.pl.Error = "ответы не сохранились в Moodle: " + subErr.Error()
+			skipped = append(skipped, next+1)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", next+1, subErr)
+			}
+			continue
+		}
+		sent++
+		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, pages[next].Page)
 	}
 
 	wg.Wait()
-	drainAndCollect()
-	return allAnswers, usedModels, nextToSubmit, nil
+	collectRunPages(run, results)
+	if len(skipped) > 0 {
+		return allAnswers, usedModels, sent, fmt.Errorf("пропущены страницы %v, попытку не завершаю: %w", skipped, firstErr)
+	}
+	return allAnswers, usedModels, sent, nil
+}
+
+// quizParallelism — сколько страниц одновременно решается: не больше quizPageWorkers и не больше
+// llm.MaxConcurrentPerKey запросов на каждый уникальный ключ цепочки. Ключи различаем по SecretHash,
+// один и тот же ключ в нескольких моделях цепочки считается один раз.
+func quizParallelism(chain []llm.Target, pages int) int {
+	keys := make(map[[32]byte]bool, len(chain))
+	for _, t := range chain {
+		if h, ok := t.SecretHash(); ok {
+			keys[h] = true
+		}
+	}
+	nKeys := max(len(keys), 1)
+	return max(1, min(quizPageWorkers, pages, llm.MaxConcurrentPerKey*nKeys))
 }
 
 func (s *Syncer) solveAndSubmitSeqNav(
@@ -685,7 +890,7 @@ func (s *Syncer) solveAndSubmitSeqNav(
 		pages = append(pages, cur)
 
 		opts := pageOptsForWave(initialFast, deadline, 1, 1)
-		r := s.solveSinglePage(solveCtx, tag, idx, cur, c, ws, chain, course, materials, opts)
+		r := s.solveSinglePageSafe(solveCtx, tag, idx, cur, c, ws, chain, course, materials, opts)
 		run.Pages = append(run.Pages, r.pl)
 		if r.usedKey != "" {
 			usedModels[r.usedKey] = true
@@ -864,17 +1069,11 @@ func formatAnswerText(q moodle.QuizQuestion, ans moodle.QuizAnswer) string {
 
 func quizFailKey(id, cmid int64) string { return fmt.Sprintf("quiz_fail:%d:%d", id, cmid) }
 
-// reportQuizFailure — «проблема с тестом». Синк повторит попытку через 30 минут;
-// пишем на первой неудаче и потом раз в 6 попыток (~3 часа), чтобы не спамить.
-// sent — часть ответов уже ушла в Moodle (тогда текст «ничего не отправлял» неверен).
+// reportQuizFailure — «проблема с тестом» на первой неудаче. Счётчик неудач растёт в markQuizRetry;
+// на quizMaxAttempts пользователь получает сообщение о лимите. sent — часть ответов уже ушла в Moodle
+// (тогда текст «ничего не отправлял» неверен).
 func (s *Syncer) reportQuizFailure(ctx context.Context, id int64, it model.MoodleItem, err error, sent bool) {
-	n := 0
-	if v, ok, _ := s.Store.GetSetting(quizFailKey(id, it.CMID)); ok {
-		_, _ = fmt.Sscan(v, &n)
-	}
-	n++
-	_ = s.Store.SetSetting(quizFailKey(id, it.CMID), fmt.Sprint(n))
-	if n != 1 && n%6 != 0 {
+	if s.markQuizRetry(ctx, id, it) != 1 {
 		return
 	}
 	var b strings.Builder

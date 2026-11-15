@@ -480,3 +480,107 @@ func TestLoginBruteForceRateLimit(t *testing.T) {
 		t.Fatalf("устаревшая запись для %s не удалена из лимитера", attackerIP)
 	}
 }
+
+// apiFromIP — запрос к защищённому API с паролем в заголовке с указанного IP.
+func apiFromIP(s *Server, ip, path, pw string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r.RemoteAddr = ip + ":1234"
+	if pw != "" {
+		r.Header.Set("X-Panel-Password", pw)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, r)
+	return rec
+}
+
+// Перебор через заголовок на /api/* ограничен так же, как вход: после порога
+// даже верный пароль с этого IP получает 429 с Retry-After.
+func TestHeaderPasswordBruteForceRateLimit(t *testing.T) {
+	s, key, clk := newSessionServer(t)
+	friend := config.DefaultWhitelist[1]
+	goodPw, _ := panelpass.Issue(key, friend, clk.now())
+	ip := "198.51.100.40"
+
+	for i := 0; i < loginMaxFailures; i++ {
+		if rec := apiFromIP(s, ip, "/api/me", "wrong-password"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("попытка #%d: код %d, ждали 401", i+1, rec.Code)
+		}
+	}
+	rec := apiFromIP(s, ip, "/api/me", goodPw)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("после %d ошибок по заголовку ждали 429, получили %d (%s)", loginMaxFailures, rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("отсутствует Retry-After при 429")
+	}
+	if other := apiFromIP(s, "198.51.100.41", "/api/me", goodPw); other.Code != http.StatusOK {
+		t.Fatalf("другой IP не должен быть заблокирован: %d", other.Code)
+	}
+	clk.advance(loginBlockDuration + time.Second)
+	if ok := apiFromIP(s, ip, "/api/me", goodPw); ok.Code != http.StatusOK {
+		t.Fatalf("после снятия блокировки ожидали 200, получили %d (%s)", ok.Code, ok.Body.String())
+	}
+}
+
+// Блок по паролю в заголовке не касается куки: с того же IP запросы по куке проходят.
+func TestBlockedHeaderDoesNotLimitCookieSession(t *testing.T) {
+	s, key, clk := newSessionServer(t)
+	friend := config.DefaultWhitelist[1]
+	pw, _ := panelpass.Issue(key, friend, clk.now())
+	ip := "198.51.100.50"
+
+	login := loginFromIP(s, ip, pw)
+	c := findCookie(login, sessionCookie)
+	if login.Code != http.StatusOK || c == nil {
+		t.Fatalf("вход: %d, кука: %v", login.Code, c)
+	}
+	for i := 0; i < loginMaxFailures; i++ {
+		apiFromIP(s, ip, "/api/me", "wrong-password")
+	}
+	if blocked := apiFromIP(s, ip, "/api/me", pw); blocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("заголовок с этого IP должен быть заблокирован: %d", blocked.Code)
+	}
+	for i := 0; i < 10; i++ {
+		r := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+		r.RemoteAddr = ip + ":1234"
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: c.Value})
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("запрос #%d по куке при блоке: %d (%s), ждали 200", i+1, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// Параллельные неверные пароли не проскакивают порог: ровно loginMaxFailures
+// попыток доходят до проверки, остальные получают 429.
+func TestHeaderPasswordParallelAttemptsRespectLimit(t *testing.T) {
+	s, _, _ := newSessionServer(t)
+	ip := "198.51.100.60"
+	const n = 40
+	codes := make(chan int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes <- apiFromIP(s, ip, "/api/me", "wrong-password").Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	var c401, c429 int
+	for code := range codes {
+		switch code {
+		case http.StatusUnauthorized:
+			c401++
+		case http.StatusTooManyRequests:
+			c429++
+		default:
+			t.Fatalf("неожиданный код %d", code)
+		}
+	}
+	if c401 != loginMaxFailures || c429 != n-loginMaxFailures {
+		t.Fatalf("дошли до проверки %d (ждали %d), 429: %d (ждали %d)", c401, loginMaxFailures, c429, n-loginMaxFailures)
+	}
+}

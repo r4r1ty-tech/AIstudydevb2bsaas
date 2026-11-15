@@ -422,36 +422,72 @@ func (s *Server) passwordIdentity(r *http.Request) (int64, bool) {
 	return panelpass.Who(s.passKey, s.panelIDs(), got, s.clock())
 }
 
+// passwordAttempt проверяет пароль из заголовка с учётом лимита неудач по IP.
+// Попытка засчитывается до проверки пароля (см. loginLimiter.tryAttempt), верный
+// пароль снимает записи клиента. blockedFor > 0 — клиент сейчас заблокирован,
+// пароль не проверялся. Лимит смотрит только на пароль: куку он не трогает.
+func (s *Server) passwordAttempt(r *http.Request) (id int64, ok bool, blockedFor time.Duration) {
+	if s.loginLim == nil {
+		id, ok = s.passwordIdentity(r)
+		return id, ok, 0
+	}
+	key := s.loginClientKey(r)
+	if blocked, retry := s.loginLim.tryAttempt(key, s.clock()); blocked {
+		return 0, false, retry
+	}
+	id, ok = s.passwordIdentity(r)
+	if ok {
+		s.loginLim.reset(key)
+	}
+	return id, ok, 0
+}
+
 // whoIs — кто стоит за запросом. Порядок: демо (админ), пароль в заголовке
 // (общий PANEL_PASSWORD — админ, личный часовой — его владелец; старый способ
 // входа остаётся), кука долгой сессии, панель без паролей и без ключа
 // хранилища, закрытая списком IP (админ). Иначе — отказ. viaSession — вошли по
 // куке: для таких запросов дальше включается защита от чужих сайтов.
-func (s *Server) whoIs(w http.ResponseWriter, r *http.Request) (id int64, viaSession, ok bool) {
+// retry > 0 — клиент заблокирован за перебор пароля в заголовке (ответ 429).
+// Блок не касается входа по куке: с той же кукой запрос проходит.
+func (s *Server) whoIs(w http.ResponseWriter, r *http.Request) (id int64, viaSession, ok bool, retry time.Duration) {
 	admin := s.cfg.AdminID
 	if s.demo {
-		return admin, false, true
+		return admin, false, true, 0
 	}
-	if id, ok := s.passwordIdentity(r); ok {
-		return id, false, true
+	if passwordFromRequest(r) != "" {
+		pid, pok, blockedFor := s.passwordAttempt(r)
+		if blockedFor > 0 {
+			if cid, cok := s.sessionFromCookie(w, r); cok {
+				return cid, true, true, 0
+			}
+			return 0, false, false, blockedFor
+		}
+		if pok {
+			return pid, false, true, 0
+		}
 	}
-	if id, ok := s.sessionFromCookie(w, r); ok {
-		return id, true, true
+	if cid, cok := s.sessionFromCookie(w, r); cok {
+		return cid, true, true, 0
 	}
 	// Только по IP — лишь если ключа хранилища нет в конфиге совсем. Ключ
 	// настроен, но не загрузился — личные пароли не работают, и пускать всех
 	// с разрешённых IP админом нельзя (fail-closed).
 	if s.cfg.PanelPassword == "" && len(s.passKey) == 0 && len(s.allow) > 0 &&
 		s.cfg.SecretKey == "" && s.cfg.SecretKeyFile == "" {
-		return admin, false, true
+		return admin, false, true, 0
 	}
-	return 0, false, false
+	return 0, false, false, 0
 }
 
 func (s *Server) requireAccess() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logx.Debugf("webapp", "requireAccess: %s %s demo=%v allow=%d", r.Method, r.URL.Path, s.demo, len(s.allow))
-		id, viaSession, ok := s.whoIs(w, r)
+		id, viaSession, ok, retry := s.whoIs(w, r)
+		if retry > 0 {
+			logx.Warnf("panel", "requireAccess: rate limited %s %s", r.Method, r.URL.Path)
+			writeBlocked(w, retry)
+			return
+		}
 		if !ok {
 			logx.Warnf("webapp", "requireAccess: auth failed %s %s", r.Method, r.URL.Path)
 			logx.Warnf("panel", "bad password %s", r.URL.Path)
