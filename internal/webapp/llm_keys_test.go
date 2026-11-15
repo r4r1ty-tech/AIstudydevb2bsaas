@@ -61,8 +61,8 @@ func newLLMKeysTestServerWith(t *testing.T, mutate func(*config.Config)) (*Serve
 	cfg := &config.Config{
 		ListenAddr:    config.DefaultListen,
 		Timezone:      config.DefaultTimezone,
-		AdminID:       config.DefaultAdminID,
-		Whitelist:     append([]int64(nil), config.DefaultWhitelist...),
+		AdminID:       testAdminID,
+		Whitelist:     append([]int64(nil), testWhitelist...),
 		SecretKeyFile: keyFile,
 		DBPath:        dbPath,
 	}
@@ -105,7 +105,7 @@ func TestLLMKeysPutGetShareDeleteAndNoSecretLeak(t *testing.T) {
 	llm.GeminiURL = srv.URL
 
 	s, st, passKey := newLLMKeysTestServer(t, nil)
-	student := config.DefaultWhitelist[1]
+	student := testWhitelist[1]
 
 	// 1. Запрещено сохранять ключ для cheaper.
 	if rec := reqAs(s, passKey, student, http.MethodPut, "/api/llm/keys/cheaper", `{"key":"abcd-secret-key-wxyz"}`); rec.Code != http.StatusBadRequest {
@@ -225,7 +225,7 @@ func TestLLMModelsIsolationAndOwnKey(t *testing.T) {
 
 	// В .env есть чужой ключ strangerKey, но у студента своих ключей нет.
 	s, _, passKey := newLLMKeysTestServer(t, []string{"Чужой:" + strangerKey})
-	student := config.DefaultWhitelist[1]
+	student := testWhitelist[1]
 
 	// Без своего ключа студент получает 403, чужой p.Keys[0] НЕ тратится.
 	rec := reqAs(s, passKey, student, http.MethodGet, "/api/llm/models?provider=gemini", "")
@@ -277,7 +277,7 @@ func TestLLMLimitsUsageAndCooldownAfter429(t *testing.T) {
 	llm.GeminiURL = srv.URL
 
 	s, _, passKey := newLLMKeysTestServer(t, nil)
-	student := config.DefaultWhitelist[1]
+	student := testWhitelist[1]
 
 	// Сохраняем ключ (проба с OwnerID=0 ещё не пишет usage, пока ключ не в БД).
 	rec := reqAs(s, passKey, student, http.MethodPut, "/api/llm/keys/gemini", `{"key":"`+myKey+`"}`)
@@ -370,8 +370,8 @@ func TestLLMModelsAdminFallbackKeys(t *testing.T) {
 		c.LLMAPIURL = srv.URL + "/v1"
 		c.LLMModel = "m-one"
 	})
-	admin := config.DefaultAdminID
-	student := config.DefaultWhitelist[1]
+	admin := testAdminID
+	student := testWhitelist[1]
 
 	// Админ, своего ключа нет: cheaper (AdminOnly) — ключ админа LLM_API_KEY.
 	rec := reqAs(s, passKey, admin, http.MethodGet, "/api/llm/models?provider=cheaper", "")
@@ -422,9 +422,9 @@ func TestLLMModelsAdminOwnKeyWins(t *testing.T) {
 	const adminKey = "admin-own-gemini-key-9"
 	s, _, passKey := newLLMKeysTestServer(t, []string{
 		"Чужой:stranger-env-secret-3",
-		strconv.FormatInt(config.DefaultAdminID, 10) + ":" + adminKey,
+		strconv.FormatInt(testAdminID, 10) + ":" + adminKey,
 	})
-	rec := reqAs(s, passKey, config.DefaultAdminID, http.MethodGet, "/api/llm/models?provider=gemini", "")
+	rec := reqAs(s, passKey, testAdminID, http.MethodGet, "/api/llm/models?provider=gemini", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("админ со своим ключом: %d %s", rec.Code, rec.Body)
 	}

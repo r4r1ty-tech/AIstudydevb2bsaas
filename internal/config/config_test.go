@@ -11,7 +11,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	t.Chdir(t.TempDir())
 	for _, k := range []string{
-		"TELEGRAM_BOT_TOKEN", "ADMIN_TELEGRAM_ID", "WEBAPP_PUBLIC_URL",
+		"TELEGRAM_BOT_TOKEN", "ADMIN_TELEGRAM_ID", "WHITELIST", "WEBAPP_PUBLIC_URL",
 		"DATABASE_PATH", "GROUP_ID", "GROUP_CODE", "LISTEN_ADDR", "TZ",
 		"RECORDINGS_DIR", "TYPST_BIN", "BBB_DRY_RUN",
 		"LECTURE_PAUSE", "PANEL_PASSWORD", "WHITELIST_EXTRA",
@@ -33,8 +33,9 @@ func TestLoadDefaults(t *testing.T) {
 	if c.DBPath != DefaultDBPath {
 		t.Errorf("DBPath = %q", c.DBPath)
 	}
-	if c.GroupID != DefaultGroupID || c.GroupCode != DefaultGroupCode {
-		t.Errorf("group = %d/%q", c.GroupID, c.GroupCode)
+	// Ни админа, ни группы, ни вайтлиста по умолчанию нет: всё только из .env.
+	if c.AdminID != 0 || c.GroupID != 0 || c.GroupCode != "" {
+		t.Errorf("admin/group без env = %d/%d/%q", c.AdminID, c.GroupID, c.GroupCode)
 	}
 	if c.Timezone != DefaultTimezone || c.ListenAddr != DefaultListen {
 		t.Errorf("tz/listen = %q/%q", c.Timezone, c.ListenAddr)
@@ -48,8 +49,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.BBBDryRun {
 		t.Error("BBBDryRun should default false")
 	}
-	if len(c.Whitelist) != len(DefaultWhitelist) {
-		t.Errorf("whitelist = %v", c.Whitelist)
+	if len(c.Whitelist) != 0 {
+		t.Errorf("whitelist без env = %v", c.Whitelist)
 	}
 }
 
@@ -112,11 +113,53 @@ func TestWhitelistExtra(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Whitelist) != len(DefaultWhitelist)+2 {
+	if len(c.Whitelist) != 2 {
 		t.Fatalf("whitelist = %v", c.Whitelist)
 	}
 	if !c.IsAllowed(111) || !c.IsAllowed(222) {
 		t.Error("extra ids should be allowed")
+	}
+}
+
+func TestWhitelistParse(t *testing.T) {
+	clearEnv(t)
+	// Разделители — запятая и пробелы; пустые куски и мусор (abc, 0, -5) не роняют запуск.
+	t.Setenv("WHITELIST", " 111,222  abc 0 -5 333,, ")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int64{111, 222, 333}
+	if len(c.Whitelist) != len(want) {
+		t.Fatalf("whitelist = %v, want %v", c.Whitelist, want)
+	}
+	for i := range want {
+		if c.Whitelist[i] != want[i] {
+			t.Fatalf("whitelist = %v, want %v", c.Whitelist, want)
+		}
+	}
+}
+
+func TestWhitelistAddsAdmin(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ADMIN_TELEGRAM_ID", "42")
+	t.Setenv("WHITELIST", "111")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Whitelist) != 2 || c.Whitelist[0] != 42 || c.Whitelist[1] != 111 {
+		t.Fatalf("админ должен войти первым: %v", c.Whitelist)
+	}
+
+	// Если админ уже в WHITELIST, дубля нет.
+	t.Setenv("WHITELIST", "111 42")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Whitelist) != 2 {
+		t.Fatalf("дубль админа: %v", c.Whitelist)
 	}
 }
 
@@ -125,6 +168,13 @@ func TestWhitelistExtraInvalid(t *testing.T) {
 	t.Setenv("WHITELIST_EXTRA", "abc")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error for bad id")
+	}
+}
+
+func TestIsAdminWithoutEnv(t *testing.T) {
+	c := &Config{}
+	if c.IsAdmin(0) || c.IsAdmin(42) {
+		t.Fatal("без ADMIN_TELEGRAM_ID админа быть не должно")
 	}
 }
 

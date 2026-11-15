@@ -17,7 +17,12 @@ import (
 // demoSource в памяти. Переключатели, режим дня, профиль и вход в Moodle меняют
 // это состояние; после перезапуска всё возвращается к исходному.
 
-const demoAdminID int64 = 700000001
+// Демо не читает реальные ID из конфига: все идентификаторы синтетические.
+const (
+	demoAdminID   int64 = 700000001
+	demoGroupID   int64 = 100000000
+	demoGroupCode       = "0000-000000D"
+)
 
 var demoWhitelist = []int64{demoAdminID, 700000002, 700000003, 700000004, 700000005}
 
@@ -59,12 +64,8 @@ func NewDemo(cfg *config.Config) *Server {
 	c.AdminID = demoAdminID
 	c.Whitelist = append([]int64(nil), demoWhitelist...)
 	c.PanelDemo = true
-	if c.GroupID == 0 {
-		c.GroupID = config.DefaultGroupID
-	}
-	if c.GroupCode == "" {
-		c.GroupCode = config.DefaultGroupCode
-	}
+	c.GroupID = demoGroupID
+	c.GroupCode = demoGroupCode
 	if c.GitHubOwner == "" {
 		c.GitHubOwner = "r4r1ty-tech"
 	}

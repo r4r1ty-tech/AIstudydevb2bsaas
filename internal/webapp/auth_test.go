@@ -52,7 +52,7 @@ func TestRequirePassword(t *testing.T) {
 		ListenAddr:    config.DefaultListen,
 		Timezone:      config.DefaultTimezone,
 		PanelPassword: "panel-secret",
-		GroupCode:     "6301-090301D",
+		GroupCode:     testGroupCode,
 	}, nil, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
@@ -78,7 +78,7 @@ func TestRequirePassword(t *testing.T) {
 		body, _ := io.ReadAll(rec.Body)
 		t.Fatalf("ok password: %d %s", rec.Code, body)
 	}
-	if !strings.Contains(rec.Body.String(), "6301-090301D") {
+	if !strings.Contains(rec.Body.String(), testGroupCode) {
 		t.Fatalf("body = %s", rec.Body.String())
 	}
 }

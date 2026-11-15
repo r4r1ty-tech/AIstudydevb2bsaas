@@ -81,6 +81,16 @@ func (r *Refresher) Refresh(ctx context.Context) (model.ParseRun, error) {
 		logx.Warnf("rasp", "Refresher.Refresh: source failed (%v, n=%d) — публичное расписание", err, len(ls))
 	}
 
+	// Публичное расписание нужно groupId из GROUP_ID. Без него не ходим на сайт
+	// с нулевой группой, а пишем ошибку, чтобы админ увидел её в парсере.
+	if r.GroupID == 0 {
+		logx.Errorf("rasp", "Refresher.Refresh: GROUP_ID не задан в .env — публичное расписание пропущено")
+		run.OK = false
+		run.Status = "GROUP_ID не задан"
+		r.persistFail(run)
+		return run, nil
+	}
+
 	body, status, err := Fetch(ctx, r.GroupID, 0)
 	if err != nil {
 		run.OK = false

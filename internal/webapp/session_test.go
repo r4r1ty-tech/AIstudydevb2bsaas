@@ -85,7 +85,7 @@ func loginAs(t *testing.T, s *Server, key []byte, clk *fakeClock, id int64) stri
 
 func TestLoginSetsCookieAndGrantsAccess(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	pw, _ := panelpass.Issue(key, friend, clk.now())
 
 	rec := login(t, s, pw)
@@ -140,7 +140,7 @@ func TestLoginSetsCookieAndGrantsAccess(t *testing.T) {
 func TestLoginAdminSessions(t *testing.T) {
 	s, key, clk := newSessionServer(t)
 	for name, tok := range map[string]string{
-		"личный пароль админа": loginAs(t, s, key, clk, config.DefaultAdminID),
+		"личный пароль админа": loginAs(t, s, key, clk, testAdminID),
 		"общий PANEL_PASSWORD": func() string {
 			rec := login(t, s, testPassword)
 			c := findCookie(rec, sessionCookie)
@@ -159,7 +159,7 @@ func TestLoginAdminSessions(t *testing.T) {
 func TestLoginRejectsBadPassword(t *testing.T) {
 	s, key, clk := newSessionServer(t)
 	stranger, _ := panelpass.Issue(key, 42, clk.now())
-	old, _ := panelpass.Issue(key, config.DefaultWhitelist[1], clk.now().Add(-3*time.Hour))
+	old, _ := panelpass.Issue(key, testWhitelist[1], clk.now().Add(-3*time.Hour))
 	for _, pw := range []string{stranger, old, "abcd-efgh", ""} {
 		rec := login(t, s, pw)
 		if rec.Code != http.StatusUnauthorized {
@@ -184,7 +184,7 @@ func TestSessionRejectsUnknownCookie(t *testing.T) {
 
 func TestSessionExpires(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	tok := loginAs(t, s, key, clk, friend)
 	tok2 := loginAs(t, s, key, clk, friend)
 
@@ -212,7 +212,7 @@ func TestSessionExpires(t *testing.T) {
 
 func TestSessionSlidingRenewal(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	start := clk.now()
 	tok := loginAs(t, s, key, clk, friend)
 	hash := hashToken(tok)
@@ -273,7 +273,7 @@ func TestSessionSlidingRenewal(t *testing.T) {
 // должен получить 401, а срок — выйти ровно на одно значение.
 func TestSessionRenewalParallel(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	tok := loginAs(t, s, key, clk, config.DefaultWhitelist[1])
+	tok := loginAs(t, s, key, clk, testWhitelist[1])
 	clk.advance(20 * day)
 
 	var wg sync.WaitGroup
@@ -300,7 +300,7 @@ func TestSessionRenewalParallel(t *testing.T) {
 
 func TestLogout(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	tok := loginAs(t, s, key, clk, friend)
 	other := loginAs(t, s, key, clk, friend) // второе устройство
 
@@ -332,7 +332,7 @@ func TestLogout(t *testing.T) {
 // Убрали из вайтлиста — вход по куке перестаёт работать.
 func TestSessionRevokedWhenRemovedFromWhitelist(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	tok := loginAs(t, s, key, clk, friend)
 
 	var rest []int64
@@ -352,7 +352,7 @@ func TestSessionRevokedWhenRemovedFromWhitelist(t *testing.T) {
 
 func TestSessionCookieCrossSiteWrites(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	tok := loginAs(t, s, key, clk, config.DefaultWhitelist[1])
+	tok := loginAs(t, s, key, clk, testWhitelist[1])
 
 	cross := map[string]string{"Sec-Fetch-Site": "cross-site"}
 	if code := callCookie(s, http.MethodPost, "/api/me", tok, cross).Code; code != http.StatusForbidden {
@@ -366,7 +366,7 @@ func TestSessionCookieCrossSiteWrites(t *testing.T) {
 		t.Fatalf("POST со своего сайта: %d", code)
 	}
 	// Старый способ (заголовок с паролем) от Sec-Fetch-Site не зависит.
-	pw, _ := panelpass.Issue(key, config.DefaultWhitelist[1], clk.now())
+	pw, _ := panelpass.Issue(key, testWhitelist[1], clk.now())
 	r := httptest.NewRequest(http.MethodPost, "/api/me", nil)
 	r.Header.Set("X-Panel-Password", pw)
 	r.Header.Set("Sec-Fetch-Site", "cross-site")
@@ -380,9 +380,9 @@ func TestSessionCookieCrossSiteWrites(t *testing.T) {
 // Новый вход в браузере, где уже есть кука, заменяет старую сессию.
 func TestLoginReplacesPreviousCookieSession(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	old := loginAs(t, s, key, clk, config.DefaultWhitelist[1])
+	old := loginAs(t, s, key, clk, testWhitelist[1])
 
-	pw, _ := panelpass.Issue(key, config.DefaultAdminID, clk.now())
+	pw, _ := panelpass.Issue(key, testAdminID, clk.now())
 	r := httptest.NewRequest(http.MethodPost, "/api/login", nil)
 	r.Header.Set("X-Panel-Password", pw)
 	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: old})
@@ -401,7 +401,7 @@ func TestLoginWithoutStore(t *testing.T) {
 	// Без базы сессии не выдаются, но и не падают.
 	s := New(&config.Config{
 		ListenAddr: config.DefaultListen, Timezone: config.DefaultTimezone,
-		PanelPassword: testPassword, AdminID: config.DefaultAdminID,
+		PanelPassword: testPassword, AdminID: testAdminID,
 	}, nil, nil, "")
 	rec := callPw(s, http.MethodPost, "/api/login", testPassword)
 	if rec.Code != http.StatusServiceUnavailable || findCookie(rec, sessionCookie) != nil {
@@ -422,7 +422,7 @@ func loginFromIP(s *Server, ip, pw string) *httptest.ResponseRecorder {
 
 func TestLoginBruteForceRateLimit(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	goodPw, _ := panelpass.Issue(key, config.DefaultAdminID, clk.now())
+	goodPw, _ := panelpass.Issue(key, testAdminID, clk.now())
 	attackerIP := "198.51.100.10"
 	otherIP := "198.51.100.11"
 
@@ -497,7 +497,7 @@ func apiFromIP(s *Server, ip, path, pw string) *httptest.ResponseRecorder {
 // даже верный пароль с этого IP получает 429 с Retry-After.
 func TestHeaderPasswordBruteForceRateLimit(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	goodPw, _ := panelpass.Issue(key, friend, clk.now())
 	ip := "198.51.100.40"
 
@@ -525,7 +525,7 @@ func TestHeaderPasswordBruteForceRateLimit(t *testing.T) {
 // Блок по паролю в заголовке не касается куки: с того же IP запросы по куке проходят.
 func TestBlockedHeaderDoesNotLimitCookieSession(t *testing.T) {
 	s, key, clk := newSessionServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	pw, _ := panelpass.Issue(key, friend, clk.now())
 	ip := "198.51.100.50"
 

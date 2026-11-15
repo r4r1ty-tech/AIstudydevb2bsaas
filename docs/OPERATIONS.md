@@ -9,7 +9,7 @@
 | Переменная | Дефолт | Назначение |
 | --- | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | — | Bot API-токен. Нужен `tg` и `panel` |
-| `ADMIN_TELEGRAM_ID` | `700000000` | Админ (единственный способ получить права администратора на уровне пользователя): «Служебное» в панели, `cheaper`, админские уведомления (тревоги записи, парсер, тест BBB) |
+| `ADMIN_TELEGRAM_ID` | — (обязательно, без дефолта) | Админ (единственный способ получить права администратора на уровне пользователя): «Служебное» в панели, `cheaper`, админские уведомления (тревоги записи, парсер, тест BBB) |
 | `PANEL_PASSWORD` | — | Общий пароль API панели — вход **админом** (заголовок `X-Panel-Password` или `Authorization: Bearer`, либо через `/api/login`). Остальные входят личным часовым паролем из бота, см. «Вход в панель» |
 | `PANEL_ALLOW_IPS` | — | IP и CIDR через запятую, которым открыта панель; остальным 403. Пусто — без фильтра. Фильтр стоит до пароля и закрывает и статику. Вход по одному IP (без пароля) — только если ключ хранилища не настроен совсем. Кривой элемент закрывает панель для всех |
 | `PANEL_TRUST_PROXY` | `0` | `1` — IP клиента берётся из правого элемента `X-Forwarded-For`, но только если запрос пришёл с loopback (то есть от Caddy на этой же машине) |
@@ -19,7 +19,8 @@
 | `WEBAPP_URL_FILE` | — | Файл с текущим URL туннеля. Если задан и непуст — важнее `WEBAPP_PUBLIC_URL` |
 | `LISTEN_ADDR` | `:8080` | Порт панели |
 | `DATABASE_PATH` | `data/bot.db` | Путь к sqlite |
-| `GROUP_ID` / `GROUP_CODE` | `531023229` / `6301-090301D` | Группа-якорь |
+| `GROUP_ID` / `GROUP_CODE` | — (обязательно, без дефолта) | Группа-якорь. Без `GROUP_ID` парсер пропускает публичное расписание и пишет «GROUP_ID не задан», панель отдаёт ошибку на сборку ключа BBB по дисциплине |
+| `WHITELIST` | — | Вайтлист: Telegram ID через запятую или пробел. Пустые куски пропускаются, некорректные пишутся в лог и пропускаются. Админ из `ADMIN_TELEGRAM_ID` добавляется сам |
 | `TZ` | `Europe/Samara` | Часовой пояс расписания |
 | `RECORDINGS_DIR` | `recordings` | Корень записей, слайдов, конспектов |
 | `BBB_DRY_RUN` | `0` | `1` — не ходить в сеть BBB (заглушка `DryJoiner`) |
@@ -39,7 +40,7 @@
 | `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Запасные платные ключи STT/vision: Fish и Groq идут в STT после AssemblyAI (порядок — см. раздел «Расшифровка лекций (STT)») |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH` | `r4r1ty-tech` / `LectionsSSAU` / `main` | Выгрузка конспектов в GitHub. Токен `remote.sh` берёт из `LECTURES_TOKEN` или `gh auth token` на сервере |
 | `VOSK_MODEL` / `VOSK_SCRIPT` | `/opt/ssau-bot/vosk-model`, `/opt/ssau-bot/wake.py` | Вейкворды |
-| `WHITELIST_EXTRA` | — | Доп. Telegram id через запятую |
+| `WHITELIST_EXTRA` | — | Доп. Telegram id через запятую, добавляются к `WHITELIST` |
 | `SECRET_KEY` | — | base64 от 32 байт: ключ шифрования паролей и сессий ЛК/Moodle. Пусто — ключ из `SECRET_KEY_FILE` |
 | `SECRET_KEY_FILE` | `<папка базы>/secret.key` | Файл ключа; нет — создаётся сам (0600) первым процессом. Не кладите рядом с бэкапом базы: без ключа пароли из базы не восстановить, это и задумано. Потеряли ключ — пользователи подключают аккаунт заново |
 | `LK_BASE_URL` / `MOODLE_BASE_URL` | `https://lk.ssau.ru` / `https://do.ssau.ru/moodle` | Адреса ЛК и Moodle (для стендов) |
@@ -61,7 +62,7 @@
 - Своё у каждого: решения «заходить/нет», профиль, Moodle и ЛК, выбор ИИ, «Пройти». Общее для всех вошедших: расписание (`/api/lessons`, `/api/day`, `/api/week`), ссылки BBB (`/api/bbb` меняет ссылку для всей группы), конспекты, `/api/settings`.
 - «Служебное» (`/api/now`, `/api/people*`, `/api/logs`, `/api/parser*`, `/api/test`, `/api/admin/*`) — только админу (строго `ADMIN_TELEGRAM_ID` или вход по `PANEL_PASSWORD`; суффикс логина `528` прав админа больше не даёт), остальным 403.
 - Вход по `PANEL_PASSWORD` и по одному IP — от лица `ADMIN_TELEGRAM_ID`: «мои» пары, Moodle и выбор ИИ — его.
-- Вайтлист задаётся конфигом (`DefaultWhitelist` + `WHITELIST_EXTRA`): убрать человека — правка `.env` и рестарт `ssau-panel`/`ssau-tg`, после этого его пароль не принимается. Выключатель «Бот заходит за меня» (`enabled`) на вход в панель не влияет. Сменить все пароли разом — новый `SECRET_KEY` (но тогда слетят и сохранённые пароли ЛК/Moodle и личные ключи ИИ, а долгие сессии останутся — см. выше).
+- Вайтлист задаётся `.env` (`WHITELIST` + `WHITELIST_EXTRA`): убрать человека — правка `.env` и рестарт `ssau-panel`/`ssau-tg`, после этого его пароль не принимается. Выключатель «Бот заходит за меня» (`enabled`) на вход в панель не влияет. Сменить все пароли разом — новый `SECRET_KEY` (но тогда слетят и сохранённые пароли ЛК/Moodle и личные ключи ИИ, а долгие сессии останутся — см. выше).
 - **Rate-limit на `POST /api/login` (`loginLimiter`):** 5 неудачных попыток с одного IP за 10 минут (`loginFailWindow`) блокируют этот IP на 5 минут (`loginBlockDuration`) с ответом `429 Too Many Requests` и заголовком `Retry-After`. От перебора дополнительно закрывает фильтр `PANEL_ALLOW_IPS`.
 - Ключ хранилища (`SECRET_KEY_FILE`) по умолчанию лежит рядом с базой (`data/secret.key`): бэкап `data/` целиком раскрывает и пароли ЛК/Moodle, и личные ключи из `llm_keys`. Файл ключа пропал — создаётся новый: пароли в панель сменятся, сохранённые пароли универа и ключи ИИ не расшифруются.
 
@@ -220,7 +221,7 @@ journalctl -u ssau-tg -u ssau-rasp -u ssau-panel -u ssau-bbb --since "2 hours ag
 # bbb — лекции, запись, слайды, конспекты; panel, tg
 tail -f /opt/ssau-bot/logs/rasp.log
 # один человек / один тест (во всех строках решателя есть tg=… cmid=…)
-grep 'tg=600000001' /opt/ssau-bot/logs/rasp.log
+grep 'tg=<telegram_id>' /opt/ssau-bot/logs/rasp.log
 zgrep 'cmid=58084' /opt/ssau-bot/logs/rasp.log*
 # снимки: страницы теста (quiz-view, quiz-attempt, quiz-finish), промпты и ответы ИИ (quiz-llm), лекции (notes, notes-llm)
 ls -t /opt/ssau-bot/logs/dumps/quiz-attempt | head
@@ -298,7 +299,7 @@ ssh -J jumphost root@203.0.113.20 'chmod +x /tmp/ssau-deploy/*; bash /tmp/ssau-d
 - атомарно (через временный файл `0600` в Python) обновляет `LLM_*` и `GITHUB_*` в `/opt/ssau-bot/.env` (запрещая переводы строк в значениях) и дописывает дефолты (`LECTURE_PAUSE`, `VOSK_*`, `LOG_*`);
 - при `PANEL_TUNNEL=0` отключает `ssau-tunnel.service`, иначе поднимает `tunnel.sh` (который пишет свежий URL туннеля в `webapp_url` и атомарно обновляет `WEBAPP_PUBLIC_URL` в `.env`).
 
-Секреты Actions: `VDS_SSH_KEY` (обязателен), `VDS_HOST`, `VDS_USER`, `VDS_PORT`; для админского `cheaper` `LLM_API_KEY/URL/MODEL` или `DEEPSEEK_API_KEY`, для выгрузки `LECTURES_TOKEN`. Деплой срабатывает на пуш в `main`, с другой ветки — `gh workflow run deploy.yml --ref <ветка>`.
+Секреты Actions: `VDS_SSH_KEY` и `VDS_HOST` (обязательны, без дефолта), `VDS_USER`, `VDS_PORT`; для админского `cheaper` `LLM_API_KEY/URL/MODEL` или `DEEPSEEK_API_KEY`, для выгрузки `LECTURES_TOKEN`. Деплой срабатывает на пуш в `main`, с другой ветки — `gh workflow run deploy.yml --ref <ветка>`.
 
 ## Сброс данных и миграция дубликатов
 

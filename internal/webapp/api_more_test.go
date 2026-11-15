@@ -29,10 +29,10 @@ func newServer(t *testing.T, refresh RefreshFunc) (*Server, *store.Store) {
 		ListenAddr:    config.DefaultListen,
 		Timezone:      config.DefaultTimezone,
 		PanelPassword: testPassword,
-		AdminID:       config.DefaultAdminID,
-		GroupID:       config.DefaultGroupID,
-		GroupCode:     config.DefaultGroupCode,
-		Whitelist:     append([]int64(nil), config.DefaultWhitelist...),
+		AdminID:       testAdminID,
+		GroupID:       testGroupID,
+		GroupCode:     testGroupCode,
+		Whitelist:     append([]int64(nil), testWhitelist...),
 	}, st, refresh, "")
 	return s, st
 }
@@ -233,7 +233,7 @@ func TestHandleSettingsGet(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("settings: %d %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"group_id":531023229`) {
+	if !strings.Contains(rec.Body.String(), `"group_id":100000001`) {
 		t.Fatalf("group from env expected: %s", rec.Body.String())
 	}
 
@@ -291,8 +291,8 @@ func TestHandleLessonsShowsInheritedRoom(t *testing.T) {
 func TestLessonAndRoomOwnerIsolation(t *testing.T) {
 	s, st, key, _ := newAdminServer(t)
 	s.recordingsDir = t.TempDir()
-	studentA := config.DefaultWhitelist[1]
-	studentB := config.DefaultWhitelist[2]
+	studentA := testWhitelist[1]
+	studentB := testWhitelist[2]
 	if err := st.UpsertUser(&model.User{TelegramID: studentA, FIO: "Студент А", Onboarded: true, Enabled: true, Subgroup: 1}); err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +506,7 @@ func TestLessonAndRoomOwnerIsolation(t *testing.T) {
 	}
 
 	// Админ по-прежнему видит все 3 пака в /api/notes.
-	rec = reqAs(s, key, config.DefaultAdminID, http.MethodGet, "/api/notes", "")
+	rec = reqAs(s, key, testAdminID, http.MethodGet, "/api/notes", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/api/notes admin: %d %s", rec.Code, rec.Body.String())
 	}

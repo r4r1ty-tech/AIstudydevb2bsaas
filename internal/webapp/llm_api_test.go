@@ -32,7 +32,7 @@ func newAdminServer(t *testing.T) (*Server, *store.Store, []byte, string) {
 	keyFile := filepath.Join(dir, "secret.key")
 	s := New(&config.Config{
 		ListenAddr: config.DefaultListen, Timezone: config.DefaultTimezone,
-		AdminID: config.DefaultAdminID, Whitelist: append([]int64(nil), config.DefaultWhitelist...),
+		AdminID: testAdminID, Whitelist: append([]int64(nil), testWhitelist...),
 		SecretKeyFile: keyFile, DBPath: dbPath,
 		GeminiAPIKeys: []string{"Медведев:g1secret", "Пушкин:g2secret"}, OpenCodeAPIKey: "oc",
 		LLMAPIKey: "ch", LLMAPIURL: "https://cheap/v1", LLMModel: "glm-5.3-flash",
@@ -55,7 +55,7 @@ func reqAs(s *Server, key []byte, id int64, method, path, body string) *httptest
 
 func TestAdminByLoginSuffix(t *testing.T) {
 	s, st, key, _ := newAdminServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	if c := reqAs(s, key, friend, http.MethodGet, "/api/admin/llm/people", "").Code; c != http.StatusForbidden {
 		t.Fatalf("обычный пользователь: %d, ждали 403", c)
 	}
@@ -91,15 +91,15 @@ func TestAdminByLoginSuffix(t *testing.T) {
 	if c := reqAs(s, key, friend, http.MethodPost, "/api/llm/choice", `{"provider":"cheaper"}`).Code; c != http.StatusBadRequest {
 		t.Fatalf("выбор cheaper при логине 528: %d, ждали 400", c)
 	}
-	if c := reqAs(s, key, config.DefaultAdminID, http.MethodGet, "/api/admin/llm/people", "").Code; c != http.StatusOK {
+	if c := reqAs(s, key, testAdminID, http.MethodGet, "/api/admin/llm/people", "").Code; c != http.StatusOK {
 		t.Fatalf("настоящий AdminID: %d, ждали 200", c)
 	}
 }
 
 func TestLLMChoiceRoundTrip(t *testing.T) {
 	s, store, key, _ := newAdminServer(t)
-	admin := config.DefaultAdminID
-	friend := config.DefaultWhitelist[1]
+	admin := testAdminID
+	friend := testWhitelist[1]
 	// ключи подписаны фамилией: у друга Пушкина свой ключ gemini #2
 	_ = store.SetSetting(fmt.Sprintf("lk_name:%d", friend), "Пушкин Иван Петрович")
 
@@ -169,7 +169,7 @@ func TestLLMChoiceRoundTrip(t *testing.T) {
 
 func TestQuizRunsAndResolve(t *testing.T) {
 	s, st, key, dbPath := newAdminServer(t)
-	admin := config.DefaultAdminID
+	admin := testAdminID
 	if err := quizlog.Write(quizlog.Dir(dbPath), &quizlog.Run{TelegramID: admin, CMID: 777, Status: quizlog.Failed,
 		Pages: []quizlog.Page{{Raw: "сырой ответ"}}}); err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ func TestQuizRunsAndResolve(t *testing.T) {
 		t.Fatal("нет пинка синка")
 	}
 	// «Пройти» доступно любому — для своего теста
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	if c := reqAs(s, key, friend, http.MethodPost, "/api/quiz/force", `{"cmid":55}`).Code; c != http.StatusOK {
 		t.Fatalf("force: %d", c)
 	}
@@ -215,8 +215,8 @@ func TestQuizRunsAndResolve(t *testing.T) {
 
 func TestQuizForceAll(t *testing.T) {
 	s, st, key, _ := newAdminServer(t)
-	admin := config.DefaultAdminID
-	friend := config.DefaultWhitelist[1]
+	admin := testAdminID
+	friend := testWhitelist[1]
 	if err := st.PutAccount(model.Account{TelegramID: friend, Kind: model.AccountMoodle, Login: "2021-000123", Status: model.AccountOK}); err != nil {
 		t.Fatal(err)
 	}

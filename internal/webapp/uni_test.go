@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/vault"
 )
@@ -30,7 +29,7 @@ func TestFirstRunOnboard(t *testing.T) {
 	if !me.Onboarded || me.FIO != "Иванов Иван" || me.Subgroup != 2 || !me.Active {
 		t.Fatalf("after onboard: %+v", me)
 	}
-	u, _ := st.GetUser(config.DefaultAdminID)
+	u, _ := st.GetUser(testAdminID)
 	if u == nil || u.OnboardStage != model.StageDone {
 		t.Fatalf("user %+v", u)
 	}
@@ -42,9 +41,9 @@ func TestStoreMoodleWindowsAndNoDue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &storeMoodle{st: st, v: v, owner: config.DefaultAdminID}
+	m := &storeMoodle{st: st, v: v, owner: testAdminID}
 	s.moodle = m
-	if err := st.PutAccount(model.Account{TelegramID: config.DefaultAdminID, Kind: model.AccountMoodle, Login: "s", Status: model.AccountOK}); err != nil {
+	if err := st.PutAccount(model.Account{TelegramID: testAdminID, Kind: model.AccountMoodle, Login: "s", Status: model.AccountOK}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -59,7 +58,7 @@ func TestStoreMoodleWindowsAndNoDue(t *testing.T) {
 		{CMID: 6, Kind: model.MoodleAssign, Title: "Без срока, сдано", Status: model.MoodleDone},
 		{CMID: 7, Kind: model.MoodleAssign, Title: "Ещё закрыто", Opens: at(day), Status: model.MoodleTodo},
 	}
-	if err := st.ReplaceMoodleItems(config.DefaultAdminID, items); err != nil {
+	if err := st.ReplaceMoodleItems(testAdminID, items); err != nil {
 		t.Fatal(err)
 	}
 	list, err := m.Deadlines(context.Background(), now)

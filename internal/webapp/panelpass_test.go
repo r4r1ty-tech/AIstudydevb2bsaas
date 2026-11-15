@@ -29,8 +29,8 @@ func newPassServer(t *testing.T) (*Server, []byte) {
 		ListenAddr:    config.DefaultListen,
 		Timezone:      config.DefaultTimezone,
 		PanelPassword: testPassword,
-		AdminID:       config.DefaultAdminID,
-		Whitelist:     append([]int64(nil), config.DefaultWhitelist...),
+		AdminID:       testAdminID,
+		Whitelist:     append([]int64(nil), testWhitelist...),
 		SecretKeyFile: keyFile,
 	}, st, nil, "")
 	v, err := vault.Load("", keyFile)
@@ -50,7 +50,7 @@ func callPw(s *Server, method, path, pw string) *httptest.ResponseRecorder {
 
 func TestPersonalPasswordIdentifiesUser(t *testing.T) {
 	s, key := newPassServer(t)
-	friend := config.DefaultWhitelist[1]
+	friend := testWhitelist[1]
 	pw, _ := panelpass.Issue(key, friend, time.Now())
 
 	rec := callPw(s, http.MethodGet, "/api/me", pw)
@@ -77,7 +77,7 @@ func TestPersonalPasswordIdentifiesUser(t *testing.T) {
 
 func TestAdminPasswords(t *testing.T) {
 	s, key := newPassServer(t)
-	own, _ := panelpass.Issue(key, config.DefaultAdminID, time.Now())
+	own, _ := panelpass.Issue(key, testAdminID, time.Now())
 	for _, pw := range []string{own, testPassword} {
 		var set settingsResponse
 		rec := callPw(s, http.MethodGet, "/api/settings", pw)
@@ -94,7 +94,7 @@ func TestAdminPasswords(t *testing.T) {
 func TestPersonalPasswordRejected(t *testing.T) {
 	s, key := newPassServer(t)
 	stranger, _ := panelpass.Issue(key, 42, time.Now())
-	old, _ := panelpass.Issue(key, config.DefaultWhitelist[1], time.Now().Add(-3*time.Hour))
+	old, _ := panelpass.Issue(key, testWhitelist[1], time.Now().Add(-3*time.Hour))
 	for _, pw := range []string{stranger, old, "abcd-efgh", ""} {
 		if c := callPw(s, http.MethodGet, "/api/me", pw).Code; c != http.StatusUnauthorized {
 			t.Fatalf("пароль %q: %d, ждали 401", pw, c)
@@ -116,7 +116,7 @@ func TestBrokenVaultFailsClosed(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	s := New(&config.Config{
 		ListenAddr: config.DefaultListen, Timezone: config.DefaultTimezone,
-		AdminID: config.DefaultAdminID, Whitelist: append([]int64(nil), config.DefaultWhitelist...),
+		AdminID: testAdminID, Whitelist: append([]int64(nil), testWhitelist...),
 		SecretKeyFile: bad, PanelAllowIPs: "192.0.2.0/24",
 	}, st, nil, "")
 	r := httptest.NewRequest(http.MethodGet, "/api/settings", nil)

@@ -34,8 +34,9 @@ func TestRunPassesWiredDependencies(t *testing.T) {
 		if loc.String() != "Europe/Samara" {
 			t.Errorf("loc = %s", loc)
 		}
-		if cfg.AdminID != config.DefaultAdminID {
-			t.Errorf("admin default = %d", cfg.AdminID)
+		// ADMIN_TELEGRAM_ID пуст: админа нет, процесс не падает и не берёт чужой ID.
+		if cfg.AdminID != 0 {
+			t.Errorf("admin without env = %d, want 0", cfg.AdminID)
 		}
 		if _, err := st.ListUsers(); err != nil {
 			t.Errorf("store not usable: %v", err)

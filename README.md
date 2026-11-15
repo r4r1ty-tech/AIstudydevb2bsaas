@@ -297,12 +297,13 @@ PANEL_DEMO=1 LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/panel
 | Переменная | Назначение |
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | токен бота, нужен `tg` и `panel` |
-| `ADMIN_TELEGRAM_ID` | Telegram id администратора: «Служебное», cheaper и админские уведомления |
+| `ADMIN_TELEGRAM_ID` | Telegram id администратора (обязательно, без дефолта): «Служебное», cheaper и админские уведомления |
+| `WHITELIST` | Telegram id через запятую или пробел (вайтлист бота и панели); админ добавляется сам |
 | `PANEL_PASSWORD` | общий пароль панели для входа администратором |
 | `PANEL_ALLOW_IPS`, `PANEL_TRUST_PROXY` | фильтр IP и доверие `X-Forwarded-For` от Caddy на loopback |
 | `LISTEN_ADDR`, `PANEL_DEMO` | адрес панели, демо-режим |
 | `DATABASE_PATH`, `SECRET_KEY`, `SECRET_KEY_FILE` | база, ключ шифрования паролей и сессий (создаётся сам при первом запуске) |
-| `TZ`, `GROUP_ID`, `GROUP_CODE` | часовой пояс расписания и группа-якорь |
+| `TZ`, `GROUP_ID`, `GROUP_CODE` | часовой пояс расписания (дефолт `Europe/Samara`) и группа-якорь (обязательно, без дефолта) |
 | `BBB_DRY_RUN`, `LECTURE_PAUSE`, `PROXY_FILE` | заглушка BBB, заморозка тяжёлых процессов на время пары, SOCKS5-список |
 | `GEMINI_API_KEYS`, `OPENCODE_API_KEYS` | общие бесплатные пулы ИИ |
 | `LLM_API_KEY`, `LLM_API_URL`, `LLM_MODEL` | ключ админа (cheaper): запасной ИИ и STT |
@@ -358,7 +359,7 @@ UNI_LOGIN=... UNI_PASSWORD=... go run ./cmd/unicheck
 
 `remote.sh` ставит бинарники и юниты в `/opt/ssau-bot` и `/etc/systemd/system`, устанавливает `ffmpeg`, `python3` и `typst` в `/usr/local/bin`, создаёт swap и модель Vosk. Обновляет `LLM_*` и `GITHUB_*` в `.env` и перезапускает `tg`, `rasp` и `panel`. `quiz` перезапускается только если изменился бинарник (сравнивается sha256). `bbb` перезапускается только если был запущен. При первом деплое `.env` на сервере нужно положить вручную: без него сервисы не стартуют.
 
-Секреты репозитория: `VDS_SSH_KEY` (обязателен), `VDS_HOST`, `VDS_USER`, `VDS_PORT`, `LLM_API_KEY`, `LLM_API_URL`, `LLM_MODEL` (или `DEEPSEEK_API_KEY`), `LECTURES_TOKEN`. Деплой с другой ветки: `gh workflow run deploy.yml --ref <ветка>`.
+Секреты репозитория: `VDS_SSH_KEY` и `VDS_HOST` (обязательны, без дефолта), `VDS_USER`, `VDS_PORT`, `LLM_API_KEY`, `LLM_API_URL`, `LLM_MODEL` (или `DEEPSEEK_API_KEY`), `LECTURES_TOKEN`. Деплой с другой ветки: `gh workflow run deploy.yml --ref <ветка>`.
 
 Панель работает за Caddy. Блок для Caddyfile, где `panel.example.com` — ваш домен:
 

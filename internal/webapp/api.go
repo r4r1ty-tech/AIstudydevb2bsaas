@@ -370,6 +370,11 @@ func (s *Server) handleBBB(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "need lesson_id or key or discipline+teacher")
 			return
 		}
+		if s.cfg.GroupID == 0 {
+			logx.Errorf("webapp", "handleBBB: GROUP_ID не задан в .env — ключ BBB по дисциплине не собрать")
+			writeErr(w, http.StatusServiceUnavailable, "GROUP_ID не задан в .env")
+			return
+		}
 		key = model.BBBKey(s.cfg.GroupID, req.Discipline, req.Teacher)
 	}
 	if err := s.authorizeBBBKey(key); err != nil {

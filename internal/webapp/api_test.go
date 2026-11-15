@@ -24,7 +24,7 @@ func TestTestJoinAPI(t *testing.T) {
 		ListenAddr:    config.DefaultListen,
 		Timezone:      config.DefaultTimezone,
 		PanelPassword: "panel-secret",
-		AdminID:       config.DefaultAdminID,
+		AdminID:       testAdminID,
 	}, st, nil, "")
 
 	post := func(body string) *httptest.ResponseRecorder {

@@ -86,11 +86,10 @@ func New(cfg *config.Config, st *store.Store, refresh RefreshFunc, recordingsDir
 
 func buildServer(cfg *config.Config, src Source, moodle Moodle, refresh RefreshFunc, recordingsDir string, clock func() time.Time, demo bool) *Server {
 	if cfg == nil {
+		// Без конфига админа и вайтлиста нет: панель открыта только для входа по паролю/IP.
 		cfg = &config.Config{
 			ListenAddr: config.DefaultListen,
 			Timezone:   config.DefaultTimezone,
-			AdminID:    config.DefaultAdminID,
-			Whitelist:  append([]int64(nil), config.DefaultWhitelist...),
 		}
 	} else if demo {
 		c := *cfg

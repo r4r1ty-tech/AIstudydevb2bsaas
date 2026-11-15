@@ -50,9 +50,11 @@ func Run(name string, needToken bool, fn func(context.Context, *config.Config, *
 	}
 	defer st.Close()
 
-	// Админ задаётся в env (ADMIN_TELEGRAM_ID), дефолт config.DefaultAdminID.
+	// Админ задаётся только в env (ADMIN_TELEGRAM_ID). Без него процесс работает,
+	// но админских прав ни у кого нет.
 	if cfg.AdminID == 0 {
-		cfg.AdminID = config.DefaultAdminID
+		logx.Warnf("app", "ADMIN_TELEGRAM_ID не задан в .env: админ не назначен, панель «Служебное» и админские уведомления недоступны")
+		log.Print("предупреждение: ADMIN_TELEGRAM_ID не задан в .env, админ не назначен")
 	}
 	logx.Infof("app", "admin=%d whitelist=%d", cfg.AdminID, len(cfg.Whitelist))
 

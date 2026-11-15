@@ -7,27 +7,18 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
-// Seed whitelist from PLAN.md. Live on/off lives in sqlite, not here.
-var DefaultWhitelist = []int64{
-	700000000, // admin, Mini App
-	600000001,
-	600000002,
-	600000003,
-	600000004,
-}
-
+// Несекретные значения по умолчанию. Личные данные (ADMIN_TELEGRAM_ID, WHITELIST,
+// GROUP_ID, GROUP_CODE) в коде не хранятся: они задаются только в окружении или .env.
 const (
-	DefaultAdminID    int64 = 700000000
-	DefaultGroupID    int64 = 531023229
-	DefaultGroupCode        = "6301-090301D"
-	DefaultTimezone         = "Europe/Samara"
-	DefaultListen           = ":8080"
-	DefaultDBPath           = "data/bot.db"
-	DefaultRecordings       = "recordings"
+	DefaultTimezone   = "Europe/Samara"
+	DefaultListen     = ":8080"
+	DefaultDBPath     = "data/bot.db"
+	DefaultRecordings = "recordings"
 )
 
 type Config struct {
@@ -101,14 +92,15 @@ func Load() (*Config, error) {
 	logx.Debugf("config", "Load: enter env_file=.env")
 	loadDotEnv(".env")
 
+	adminID := int64Env("ADMIN_TELEGRAM_ID", 0)
 	c := &Config{
 		BotToken:         strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		AdminID:          int64Env("ADMIN_TELEGRAM_ID", DefaultAdminID),
+		AdminID:          adminID,
 		WebAppURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
 		WebAppURLFile:    strings.TrimSpace(os.Getenv("WEBAPP_URL_FILE")),
 		DBPath:           strEnv("DATABASE_PATH", DefaultDBPath),
-		GroupID:          int64Env("GROUP_ID", DefaultGroupID),
-		GroupCode:        strEnv("GROUP_CODE", DefaultGroupCode),
+		GroupID:          int64Env("GROUP_ID", 0),
+		GroupCode:        strEnv("GROUP_CODE", ""),
 		ListenAddr:       strEnv("LISTEN_ADDR", DefaultListen),
 		Timezone:         strEnv("TZ", DefaultTimezone),
 		RecordingsDir:    strEnv("RECORDINGS_DIR", DefaultRecordings),
@@ -151,7 +143,7 @@ func Load() (*Config, error) {
 		GitHubOwner:      strEnv("GITHUB_OWNER", "r4r1ty-tech"),
 		GitHubRepo:       strEnv("GITHUB_REPO", "LectionsSSAU"),
 		GitHubBranch:     strEnv("GITHUB_BRANCH", "main"),
-		Whitelist:        append([]int64(nil), DefaultWhitelist...),
+		Whitelist:        withAdmin(whitelistEnv("WHITELIST"), adminID),
 		SecretKey:        strings.TrimSpace(os.Getenv("SECRET_KEY")),
 		LKBaseURL:        strings.TrimRight(strEnv("LK_BASE_URL", "https://lk.ssau.ru"), "/"),
 		MoodleBaseURL:    strings.TrimRight(strEnv("MOODLE_BASE_URL", "https://do.ssau.ru/moodle"), "/"),
@@ -205,7 +197,8 @@ func (c *Config) IsAllowed(id int64) bool {
 
 func (c *Config) IsAdmin(id int64) bool {
 	logx.Debugf("config", "IsAdmin: enter id=%d admin_id=%d", id, c.AdminID)
-	ok := id == c.AdminID
+	// Без ADMIN_TELEGRAM_ID админа нет ни у кого, даже при id == 0.
+	ok := c.AdminID != 0 && id == c.AdminID
 	logx.Debugf("config", "IsAdmin: id=%d admin=%v", id, ok)
 	return ok
 }
@@ -255,6 +248,40 @@ func listEnv(key string) []string {
 		}
 	}
 	return out
+}
+
+// whitelistEnv — Telegram ID через запятую или пробел (WHITELIST). Пустые куски
+// пропускаются, некорректные — с предупреждением в лог и без остановки запуска.
+func whitelistEnv(key string) []int64 {
+	logx.Debugf("config", "whitelistEnv: enter key=%s", key)
+	var out []int64
+	fields := strings.FieldsFunc(os.Getenv(key), func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	for _, f := range fields {
+		id, err := strconv.ParseInt(f, 10, 64)
+		if err != nil || id <= 0 {
+			logx.Warnf("config", "%s: пропущен некорректный Telegram ID %q", key, f)
+			continue
+		}
+		out = append(out, id)
+	}
+	logx.Debugf("config", "whitelistEnv: key=%s parsed=%d", key, len(out))
+	return out
+}
+
+// withAdmin ставит админа первым в вайтлисте, если его там ещё нет. Админ
+// (ADMIN_TELEGRAM_ID) всегда в списке, как было с прежним сидом. Пустой админ (0) не добавляется.
+func withAdmin(list []int64, admin int64) []int64 {
+	if admin == 0 {
+		return list
+	}
+	for _, id := range list {
+		if id == admin {
+			return list
+		}
+	}
+	return append([]int64{admin}, list...)
 }
 
 func strEnv(key, fallback string) string {
