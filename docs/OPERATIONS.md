@@ -151,7 +151,7 @@ PANEL_DEMO=1 LISTEN_ADDR=127.0.0.1:18080 go run ./cmd/panel
 
 ### Смена ключей: `ssau-keys`
 
-Ярлык «SSAU ключи» в меню (или `~/.local/bin/ssau-keys`, исходник `cmd/ssau-keys`) открывает терминал и спрашивает ключ ИИ (cheaperinference, `https://api.cheaperinference.com/v1`, модель по умолчанию `deepseek-v4.1-flash`) и токен Telegram-бота. Пустой ввод — не менять. Ключи проверяются (`/models` + пробный запрос, `getMe`), пишутся в `/opt/ssau-bot/.env` по SSH через `jumphost`, работающие сервисы перезапускаются, `LLM_*` уходят в секреты GitHub (иначе CI-деплой вернёт старый ключ), токен бота — ещё и в локальный `.env`.
+Ярлык «SSAU ключи» в меню (или `~/.local/bin/ssau-keys`, исходник `cmd/ssau-keys`) открывает терминал и спрашивает ключ ИИ (cheaperinference, `https://api.cheaperinference.com/v1`, модель по умолчанию `deepseek-v4.1-flash`) и токен Telegram-бота. Пустой ввод — не менять. Ключи проверяются (`/models` + пробный запрос, `getMe`), пишутся в `/opt/ssau-bot/.env` по SSH (адрес прода — `SSAU_SSH_HOST`, например `root@адрес`, jump-хост — необязательный `SSAU_SSH_JUMP`; в репозитории их нет), работающие сервисы перезапускаются, `LLM_*` уходят в секреты GitHub (иначе CI-деплой вернёт старый ключ), токен бота — ещё и в локальный `.env`.
 
 Пересборка: `go build -o ~/.local/bin/ssau-keys ./cmd/ssau-keys`.
 

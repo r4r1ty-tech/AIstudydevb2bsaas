@@ -26,8 +26,6 @@ import (
 const (
 	llmURL           = "https://api.cheaperinference.com/v1"
 	defaultModel     = "deepseek-v4.1-flash"
-	serverHost       = "root@203.0.113.20"
-	jumpHost         = "jumphost"
 	ghRepo           = "r4r1ty-tech/AIstudydevb2bsaas"
 	remoteEnv        = "/opt/ssau-bot/.env"
 	telegramBaseURL  = "https://api.telegram.org"
@@ -46,7 +44,7 @@ func main() {
 }
 
 func run() int {
-	fmt.Println("SSAU-бот: ключи прода (сервер прод-VDS, panel.example.com)")
+	fmt.Println("SSAU-бот: ключи прода")
 	fmt.Println("Пустой ввод — оставить как есть.")
 	fmt.Println()
 
@@ -373,9 +371,21 @@ func applyRemote(set map[string]string) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString([]byte(remoteScript))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20",
-		"-J", jumpHost, serverHost,
-		fmt.Sprintf(`python3 -c "import base64;exec(base64.b64decode('%s'))"`, b64))
+	// Адрес прода и jump-хост не хранятся в публичном репозитории: SSAU_SSH_HOST (user@host)
+	// и необязательный SSAU_SSH_JUMP задаются в окружении или в ~/.ssh/config.
+	host := strings.TrimSpace(os.Getenv("SSAU_SSH_HOST"))
+	if host == "" {
+		return "", errors.New("не задан SSAU_SSH_HOST (например root@адрес-сервера)")
+	}
+	if strings.HasPrefix(host, "-") {
+		return "", errors.New("SSAU_SSH_HOST не может начинаться с «-»")
+	}
+	args := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=20"}
+	if jump := strings.TrimSpace(os.Getenv("SSAU_SSH_JUMP")); jump != "" && !strings.HasPrefix(jump, "-") {
+		args = append(args, "-J", jump)
+	}
+	args = append(args, host, fmt.Sprintf(`python3 -c "import base64;exec(base64.b64decode('%s'))"`, b64))
+	cmd := exec.CommandContext(ctx, "ssh", args...) //nolint:gosec // адрес задаёт сам админ в своём окружении, опции через «-» отсечены выше
 	cmd.Stdin = strings.NewReader(stdin.String())
 	out, err := cmd.CombinedOutput()
 	return string(out), err
