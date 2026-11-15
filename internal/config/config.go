@@ -53,6 +53,11 @@ type Config struct {
 	LLMModel        string
 	// CheaperSTTModel — модель расшифровки аудио у cheaper (CHEAPER_STT_MODEL), POST {LLM_API_URL}/audio/transcriptions.
 	CheaperSTTModel string
+	// DeepgramAPIKey / DeepgramAPIURL / DeepgramModel — расшифровка аудио у Deepgram (DEEPGRAM_API_KEY,
+	// DEEPGRAM_API_URL, DEEPGRAM_MODEL): второй провайдер STT после пула Gemini. Без ключа пропускается.
+	DeepgramAPIKey string
+	DeepgramAPIURL string
+	DeepgramModel  string
 	// GeminiAPIKeys — ключи Google AI Studio (GEMINI_API_KEYS через запятую):
 	// бесплатная цепочка для тестов и конспектов всех.
 	GeminiAPIKeys []string
@@ -118,6 +123,9 @@ func Load() (*Config, error) {
 		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
 		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
 		CheaperSTTModel:  strEnv("CHEAPER_STT_MODEL", "whisper-large-v3-turbo"),
+		DeepgramAPIKey:   strEnv("DEEPGRAM_API_KEY", ""),
+		DeepgramAPIURL:   strings.TrimRight(strEnv("DEEPGRAM_API_URL", "https://api.deepgram.com"), "/"),
+		DeepgramModel:    strEnv("DEEPGRAM_MODEL", "nova-3"),
 		GeminiAPIKeys:    listEnv("GEMINI_API_KEYS"),
 		OpenCodeAPIKey:   strEnv("OPENCODE_API_KEY", ""),
 		OpenCodeAPIKeys:  listEnv("OPENCODE_API_KEYS"),
@@ -166,8 +174,8 @@ func Load() (*Config, error) {
 	logx.Debugf("config", "Load: whitelist=%d bot_token_present=%v admin=%d group=%d db=%s webapp_url=%q webapp_url_file=%q listen=%s tz=%s recordings=%s",
 		len(c.Whitelist), strings.TrimSpace(c.BotToken) != "", c.AdminID, c.GroupID,
 		c.DBPath, c.WebAppURL, c.WebAppURLFile, c.ListenAddr, c.Timezone, c.RecordingsDir)
-	logx.Debugf("config", "Load: key_lengths llm=%d grok=%d groq=%d fish=%d assembly=%d github=%d panel=%d",
-		len(c.LLMAPIKey), len(c.GrokAPIKey), len(c.GroqAPIKey), len(c.FishStudioAPIKey), len(c.AssemblyAPIKey), len(c.GitHubToken), len(c.PanelPassword))
+	logx.Debugf("config", "Load: key_lengths llm=%d grok=%d groq=%d fish=%d assembly=%d deepgram=%d github=%d panel=%d",
+		len(c.LLMAPIKey), len(c.GrokAPIKey), len(c.GroqAPIKey), len(c.FishStudioAPIKey), len(c.AssemblyAPIKey), len(c.DeepgramAPIKey), len(c.GitHubToken), len(c.PanelPassword))
 	logx.Debugf("config", "Load: panel allow_ips=%q trust_proxy=%v demo=%v", c.PanelAllowIPs, c.PanelTrustProxy, c.PanelDemo)
 	logx.Infof("config", "Load: ok whitelist=%d group=%d db=%s", len(c.Whitelist), c.GroupID, c.DBPath)
 	return c, nil

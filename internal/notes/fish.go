@@ -36,9 +36,10 @@ func Transcribe(ctx context.Context, cfg *config.Config, audioPath string) (stri
 		key  string
 		fn   func(context.Context, *config.Config, string) (string, error)
 	}
-	// Gemini из бесплатного пула — первым; cheaper (LLM_API_*, только STT аудио) — вторым;
-	// AssemblyAI, Fish и Groq — запасные.
+	// Порядок: deepgram (DEEPGRAM_API_*, точнее всех на русском) → gemini (бесплатный пул)
+	// → cheaper (LLM_API_*, только STT аудио) → assemblyai → fish → groq. Пропускается провайдер без ключа.
 	providers := []provider{
+		{"deepgram", deepgramKeyMarker(cfg), transcribeDeepgram},
 		{"gemini", geminiKeyMarker(cfg), transcribeGemini},
 		{"cheaper", cheaperKeyMarker(cfg), transcribeCheaper},
 		{"assemblyai", cfg.AssemblyAPIKey, transcribeAssembly},
@@ -66,8 +67,8 @@ func Transcribe(ctx context.Context, cfg *config.Config, audioPath string) (stri
 		logx.Errorf("notes", "Transcribe: %s все провайдеры STT не сработали за %s: %s", tag, time.Since(started).Round(time.Second), strings.Join(fails, "; "))
 		return "", fmt.Errorf("%s", strings.Join(fails, "; "))
 	}
-	logx.Errorf("notes", "Transcribe: %s нет ключа STT (Gemini / cheaper / AssemblyAI / Fish / Groq)", tag)
-	return "", errors.New("нет ключа STT (Gemini / cheaper / AssemblyAI / Fish / Groq)")
+	logx.Errorf("notes", "Transcribe: %s нет ключа STT (Deepgram / Gemini / cheaper / AssemblyAI / Fish / Groq)", tag)
+	return "", errors.New("нет ключа STT (Deepgram / Gemini / cheaper / AssemblyAI / Fish / Groq)")
 }
 
 func transcribeFish(ctx context.Context, cfg *config.Config, audioPath string) (string, error) {
