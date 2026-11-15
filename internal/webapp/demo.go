@@ -36,6 +36,7 @@ func sanitizeDemoConfig(c *config.Config) {
 	c.OpenCodeAPIKey = ""
 	c.OpenCodeAPIKeys = nil
 	c.AssemblyAPIKey = ""
+	c.DeepgramAPIKey = ""
 	c.FishStudioAPIKey = ""
 	c.GrokAPIKey = ""
 	c.GroqAPIKey = ""

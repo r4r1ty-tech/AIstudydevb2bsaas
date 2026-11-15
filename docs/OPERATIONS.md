@@ -28,13 +28,14 @@
 | `PROXY_FILE` | `/opt/ssau-bot/proxies.txt` | SOCKS5-список `login:password@ip:port`, по строке. Есть файл — каждая сессия `bbb` идёт через свой прокси |
 | `GEMINI_API_KEYS` | — | Ключи Google AI Studio через запятую (бесплатный тариф). Основная цепочка (`PoolChain`) для конспектов, STT, vision и пула: `gemini-4-hydrogen` → `gemini-3.6-flash` → `gemini-3.5-flash-lite`, внутри модели ключи (включая личные с `share_pool=1`) перемешиваются (`internal/llm`) |
 | `OPENCODE_API_KEYS` / `OPENCODE_API_KEY` | — | OpenCode Zen, бесплатная модель `glm-5.3-flash-free` — хвост цепочки. Ключи (и в `GEMINI_API_KEYS`) подписываются владельцем: `Зуев:oc_sk_…` — подпись видна в панели |
-| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | `cheaper` — **только админ**: его запасной вариант после своего выбора (`muse-spark-1.3-contributor` → `glm-5.3-flash`, `LLM_MODEL` в конце, если другой). В `PoolChain` конспектов не входит. **Используется и для расшифровки аудио** (`LLM_API_KEY` + `LLM_API_URL`, второй провайдер STT после пула Gemini, модель — `CHEAPER_STT_MODEL`, см. раздел «Расшифровка лекций (STT)»). Старые `DEEPSEEK_*` читаются как фолбэк |
+| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | `cheaper` — **только админ**: его запасной вариант после своего выбора (`muse-spark-1.3-contributor` → `glm-5.3-flash`, `LLM_MODEL` в конце, если другой). В `PoolChain` конспектов не входит. **Используется и для расшифровки аудио** (`LLM_API_KEY` + `LLM_API_URL`, первый провайдер STT, до пула Gemini, модель — `CHEAPER_STT_MODEL`, см. раздел «Расшифровка лекций (STT)»). Старые `DEEPSEEK_*` читаются как фолбэк |
 | `MOODLE_WORKERS` | `4` | Число параллельных воркеров в `uni.Syncer` (`MoodleWorkersLimit()`) для обхода Moodle |
 | `QUIZ_MODE` | `service` | `service` — тест ставится в очередь в базе (`quiz_jobs`), решает сервис `ssau-quiz`; `inline` — решает пул в процессе `rasp`, как раньше (для локальной разработки и тестов). Подробно — раздел «Решение тестов (ssau-quiz)» |
 | `QUIZ_MAX_PARALLEL` | `50` | Сколько тестов `ssau-quiz` решает одновременно, у каждого свой ключ ИИ |
 | `QUIZ_MOODLE_RPS` | `3` | Входов и стартов попыток Moodle в секунду на весь процесс `ssau-quiz` (общий ограничитель). Плюс случайный разнос старта каждой задачи 0–5 с |
 | `MOODLE_QUIZ_WORKERS` | `4` | Только при `QUIZ_MODE=inline`: сколько тестов решает пул процесса `rasp` |
-| `ASSEMBLYAI_API_KEY` | — | Платный фоллбэк STT для конспектов: порядок STT — gemini → cheaper (`LLM_API_*`) → assemblyai → fish → groq; AssemblyAI идёт после Gemini и cheaper, если они не сработали |
+| `DEEPGRAM_API_KEY` / `DEEPGRAM_MODEL` | — | Расшифровка аудио у Deepgram, второй провайдер STT после пула Gemini (модель по умолчанию `nova-3`, адрес — `DEEPGRAM_API_URL`, по умолчанию `https://api.deepgram.com`). Без ключа пропускается |
+| `ASSEMBLYAI_API_KEY` | — | Платный фоллбэк STT для конспектов: порядок STT — deepgram → gemini → cheaper (`LLM_API_*`) → assemblyai → fish → groq; AssemblyAI идёт после Deepgram, Gemini и cheaper, если они не сработали |
 | `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Запасные платные ключи STT/vision: Fish и Groq идут в STT после AssemblyAI (порядок — см. раздел «Расшифровка лекций (STT)») |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH` | `r4r1ty-tech` / `LectionsSSAU` / `main` | Выгрузка конспектов в GitHub. Токен `remote.sh` берёт из `LECTURES_TOKEN` или `gh auth token` на сервере |
 | `VOSK_MODEL` / `VOSK_SCRIPT` | `/opt/ssau-bot/vosk-model`, `/opt/ssau-bot/wake.py` | Вейкворды |
@@ -88,11 +89,12 @@
 
 Порядок провайдеров в `notes.Transcribe` (`internal/notes/fish.go`); пропускается провайдер, у которого нет ключа:
 
-1. **gemini** — бесплатный пул `GEMINI_API_KEYS`. Запись режется на куски по 10 мин с перекрытием 8 с и идёт параллельно (`transcribeGemini`). Кусок, который Gemini не расшифровал после перебора всех ключей, уходит в **cheaper** — только этот кусок, остальные Gemini не пересчитывает. Если cheaper тоже не справился, вся расшифровка переходит к следующему провайдеру.
-2. **cheaper** (`internal/notes/cheaper_stt.go`) — админский `LLM_API_KEY` + `LLM_API_URL`, запрос `POST {LLM_API_URL}/audio/transcriptions` (multipart, `language=ru`, `response_format=verbose_json`). Адрес можно задавать с `/v1` и без него, как у чат-провайдера. Модель — `CHEAPER_STT_MODEL` (по умолчанию `whisper-large-v3-turbo`). Куски по 10 мин, mp3 mono 16 кГц 48 кбит/с, до 4 параллельно. Ответы 429 и 5xx повторяются дважды: пауза по `Retry-After` (не больше минуты), иначе 2 с и 4 с.
-3. **assemblyai** → 4. **fish** → 5. **groq** — платные запасные.
+1. **deepgram** (`internal/notes/deepgram_stt.go`) — `POST {DEEPGRAM_API_URL}/v1/listen?model=…&language=ru&smart_format=true&punctuate=true&utterances=true`, тело — сырой mp3-фрагмент, заголовок `Authorization: Token …`. Модель — `DEEPGRAM_MODEL` (по умолчанию `nova-3`). Куски по 10 мин, mp3 mono 16 кГц 48 кбит/с, до 4 параллельно. Метки `[мм:сс]` строятся по `utterances`; если их нет, весь текст фрагмента получает метку его начала. Ответы 429 и 5xx повторяются дважды, как у cheaper.
+2. **gemini** — бесплатный пул `GEMINI_API_KEYS`. Запись режется на куски по 10 мин с перекрытием 8 с и идёт параллельно (`transcribeGemini`). Кусок, который Gemini не расшифровал после перебора всех ключей, уходит в **deepgram** (если задан ключ), затем в **cheaper** (если задан) — только этот кусок, остальные Gemini не пересчитывает. Если запасные тоже не справились, вся расшифровка переходит к следующему провайдеру.
+3. **cheaper** (`internal/notes/cheaper_stt.go`) — админский `LLM_API_KEY` + `LLM_API_URL`, запрос `POST {LLM_API_URL}/audio/transcriptions` (multipart, `language=ru`, `response_format=verbose_json`). Адрес можно задавать с `/v1` и без него, как у чат-провайдера. Модель — `CHEAPER_STT_MODEL` (по умолчанию `whisper-large-v3-turbo`). Куски по 10 мин, mp3 mono 16 кГц 48 кбит/с, до 4 параллельно. Ответы 429 и 5xx повторяются дважды: пауза по `Retry-After` (не больше минуты), иначе 2 с и 4 с.
+4. **assemblyai** → 5. **fish** → 6. **groq** — платные запасные.
 
-Правило «cheaper в конспектах не используется» (`ValidateChain`, `ErrCheaperNotAllowed`) действует для текста конспектов, слайдов и вопросов `Ask`. Исключение только одно: расшифровка аудио через этот провайдер. Расход админского ключа cheaper растёт на каждую лекцию, которую не смог обработать пул Gemini.
+Правило «cheaper в конспектах не используется» (`ValidateChain`, `ErrCheaperNotAllowed`) действует для текста конспектов, слайдов и вопросов `Ask`. Исключение только одно: расшифровка аудио через этот провайдер. Расход админского ключа cheaper растёт на каждую лекцию, которую не смогли обработать пул Gemini и Deepgram.
 
 ## Кто есть кто
 

@@ -18,6 +18,7 @@ func clearEnv(t *testing.T) {
 		"PANEL_ALLOW_IPS", "PANEL_TRUST_PROXY", "PANEL_DEMO",
 		"LLM_API_KEY", "LLM_API_URL", "LLM_MODEL",
 		"DEEPSEEK_API_KEY", "DEEPSEEK_API_URL", "DEEPSEEK_MODEL",
+		"DEEPGRAM_API_KEY", "DEEPGRAM_API_URL", "DEEPGRAM_MODEL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -79,6 +80,28 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if !c.BBBDryRun || c.LecturePause {
 		t.Errorf("flags = dry:%v pause:%v", c.BBBDryRun, c.LecturePause)
+	}
+}
+
+func TestDeepgramFromEnv(t *testing.T) {
+	clearEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DeepgramAPIKey != "" || c.DeepgramAPIURL != "https://api.deepgram.com" || c.DeepgramModel != "nova-3" {
+		t.Fatalf("Deepgram по умолчанию: key=%q url=%q model=%q", c.DeepgramAPIKey, c.DeepgramAPIURL, c.DeepgramModel)
+	}
+
+	t.Setenv("DEEPGRAM_API_KEY", "dg-test")
+	t.Setenv("DEEPGRAM_API_URL", "https://dg.example/")
+	t.Setenv("DEEPGRAM_MODEL", "nova-2")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DeepgramAPIKey != "dg-test" || c.DeepgramAPIURL != "https://dg.example" || c.DeepgramModel != "nova-2" {
+		t.Fatalf("Deepgram из env: key=%q url=%q model=%q", c.DeepgramAPIKey, c.DeepgramAPIURL, c.DeepgramModel)
 	}
 }
 

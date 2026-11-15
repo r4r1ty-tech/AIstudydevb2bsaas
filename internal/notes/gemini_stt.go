@@ -76,7 +76,7 @@ func geminiKeyMarker(cfg *config.Config) string {
 
 // transcribeGemini расшифровывает аудиозапись лекции через бесплатный пул ключей Gemini,
 // нарезая длинные записи на фрагменты с перекрытием и обрабатывая их параллельно.
-// Фрагмент, который Gemini не расшифровал после перебора ключей, отдаётся cheaper (если ключ задан).
+// Фрагмент, который Gemini не расшифровал после перебора ключей, отдаётся Deepgram, затем cheaper (если заданы ключи).
 func transcribeGemini(ctx context.Context, cfg *config.Config, audioPath string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -174,15 +174,15 @@ func transcribeGemini(ctx context.Context, cfg *config.Config, audioPath string)
 			err = errors.New("вернул пустой текст")
 		}
 		// Gemini не справился с фрагментом (после перебора всех ключей): только этот кусок
-		// уходит в cheaper, остальные фрагменты Gemini не пересчитываются. Если cheaper тоже
-		// не смог, ошибка уходит наверх и вся расшифровка переходит к следующему провайдеру.
-		if wctx.Err() != nil || cheaperKeyMarker(cfg) == "" {
+		// уходит в Deepgram, затем в cheaper (что задано), остальные фрагменты Gemini не пересчитываются.
+		// Если запасные тоже не смогли, ошибка уходит наверх и вся расшифровка переходит к следующему провайдеру.
+		if wctx.Err() != nil || (deepgramKeyMarker(cfg) == "" && cheaperKeyMarker(cfg) == "") {
 			return fmt.Errorf("gemini stt: фрагмент %d: %v", idx+1, err)
 		}
-		logx.Warnf("notes", "transcribeGemini: %s фрагмент %d не расшифрован Gemini (%v), пробую cheaper", tag, idx+1, err)
-		text, cErr := cheaperRecognize(wctx, cfg, chunkPaths[idx], chunks[idx].Start)
-		if cErr != nil {
-			return fmt.Errorf("gemini stt: фрагмент %d: %v; cheaper: %v", idx+1, err, cErr)
+		logx.Warnf("notes", "transcribeGemini: %s фрагмент %d не расшифрован Gemini (%v), пробую запасные провайдеры", tag, idx+1, err)
+		text, fErr := sttFallbackChunk(wctx, cfg, chunkPaths[idx], chunks[idx].Start)
+		if fErr != nil {
+			return fmt.Errorf("gemini stt: фрагмент %d: %v; запасные: %v", idx+1, err, fErr)
 		}
 		results[idx] = text
 		return nil
@@ -195,6 +195,36 @@ func transcribeGemini(ctx context.Context, cfg *config.Config, audioPath string)
 		return "", errors.New("gemini stt: пустой результат расшифровки")
 	}
 	return stitched, nil
+}
+
+// sttFallbackChunk расшифровывает один фрагмент запасными провайдерами, когда Gemini его не осилил:
+// сначала Deepgram (если задан ключ), затем cheaper (если задан). Возвращает ошибку, только если
+// все заданные провайдеры не справились; ошибки уже без ключей.
+func sttFallbackChunk(ctx context.Context, cfg *config.Config, mp3Path string, offset time.Duration) (string, error) {
+	tag := lectureOf(ctx).tag()
+	var fails []string
+	if deepgramKeyMarker(cfg) != "" {
+		text, err := deepgramRecognize(ctx, cfg, mp3Path, offset)
+		if err == nil {
+			return text, nil
+		}
+		if ctx.Err() != nil {
+			return "", err
+		}
+		logx.Warnf("notes", "sttFallbackChunk: %s фрагмент не расшифрован deepgram (%v)", tag, err)
+		fails = append(fails, "deepgram: "+err.Error())
+	}
+	if cheaperKeyMarker(cfg) != "" {
+		text, err := cheaperRecognize(ctx, cfg, mp3Path, offset)
+		if err == nil {
+			return text, nil
+		}
+		fails = append(fails, "cheaper: "+err.Error())
+	}
+	if len(fails) == 0 {
+		return "", errors.New("нет запасного провайдера для фрагмента")
+	}
+	return "", errors.New(strings.Join(fails, "; "))
 }
 
 // runChunks выполняет do(ctx, idx) для кусков 0..n-1 в workers параллельных горутинах.
