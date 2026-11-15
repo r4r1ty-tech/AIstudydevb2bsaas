@@ -2,6 +2,8 @@ module github.com/r4r1ty-tech/AIstudydevb2bsaas
 
 go 1.26.0
 
+toolchain go1.26.11
+
 require (
 	github.com/PaulSonOfLars/gotgbot/v2 v2.0.0-rc.36
 	github.com/PuerkitoBio/goquery v1.13.0
