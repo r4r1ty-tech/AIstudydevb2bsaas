@@ -372,11 +372,12 @@ func TestPartialProgressOnLaterPageError(t *testing.T) {
 	gotFinished := finished
 	mu.Unlock()
 
-	if !reflect.DeepEqual(gotOrder, []int{0, 1}) {
-		t.Fatalf("отправленные страницы = %v, ожидали [0 1]", gotOrder)
+	// Страница 2 (индекс 2) пропущена, страница 3 отправлена: ошибка одной страницы не блокирует остальные.
+	if !reflect.DeepEqual(gotOrder, []int{0, 1, 3}) {
+		t.Fatalf("отправленные страницы = %v, ожидали [0 1 3]", gotOrder)
 	}
 	if gotFinished {
-		t.Fatal("FinishAttempt НЕ должен вызываться при падении страницы 2")
+		t.Fatal("FinishAttempt НЕ должен вызываться при пропущенной странице 2")
 	}
 	if all := strings.Join(*sent, "\n"); !strings.Contains(all, "Часть ответов уже сохранена в Moodle") {
 		t.Fatalf("ожидали уведомление о частичном сохранении, got: %s", all)
@@ -816,27 +817,27 @@ func TestProcessQuizPreventsConcurrentSameQuiz(t *testing.T) {
 	f := newFake(t)
 	sy, st, _ := setup(t, f)
 	sy.MoodleBase = moodleSrv.URL
-	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10}
+	sy.Cfg = &config.Config{LLMAPIKey: t.Name(), LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10}
 	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
 	acc, _ := st.GetAccount(10, model.AccountMoodle)
+	withTestMoodleSession(t, sy, acc)
 	cli, _ := sy.moodleClient()
 	item := model.MoodleItem{CMID: 777, Course: "Курс", Kind: model.MoodleQuiz, Title: "Тест", Status: model.MoodleTodo}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		sy.processQuiz(context.Background(), *acc, cli, item, false)
-	}()
-
+	// Первый запуск идёт через пул решения: scheduleQuiz берёт блокировку (tg, cmid).
+	if !sy.scheduleQuiz(context.Background(), *acc, cli, item, false) {
+		t.Fatal("первый scheduleQuiz должен поставить тест в пул")
+	}
 	<-started
-	// Второй запуск того же теста того же студента должен мгновенно выйти из-за TryLockQuiz.
-	sy.processQuiz(context.Background(), *acc, cli, item, false)
+	// Пока тест решается, повторная постановка того же теста того же студента — пропуск.
+	if sy.scheduleQuiz(context.Background(), *acc, cli, item, false) {
+		t.Fatal("повторный scheduleQuiz для решающегося теста должен вернуть false")
+	}
 	close(release)
-	wg.Wait()
+	sy.Wait()
 
 	if attemptStarts.Load() != 1 {
-		t.Fatalf("ожидали 1 запуск попытки благодаря TryLockQuiz, было %d", attemptStarts.Load())
+		t.Fatalf("ожидали 1 запуск попытки благодаря блокировке в scheduleQuiz, было %d", attemptStarts.Load())
 	}
 	if v, ok, _ := st.GetSetting(fmt.Sprintf("quiz_solved:%d:%d", acc.TelegramID, item.CMID)); !ok || v == "" {
 		t.Fatal("ожидали завершение первого запуска теста")
@@ -1016,7 +1017,7 @@ func TestSolveAndSubmitFreeNavDrainsRemainingPagesOnEarlyFail(t *testing.T) {
 
 	run := &quizlog.Run{}
 	_, _, _, err := sy.solveAndSubmitFreeNav(
-		context.Background(), solveCtx, solveCancel,
+		context.Background(), solveCtx,
 		quizTag{TG: 1, CMID: 10}, c, nil, chain, "Курс", "",
 		pages, true, time.Time{}, run,
 	)

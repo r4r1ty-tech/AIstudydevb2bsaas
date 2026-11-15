@@ -63,7 +63,7 @@ func SetChoice(st Store, id int64, ch llm.Choice) error {
 // QuizChain — цепочка для тестов человека id (см. llm.ChainFor): у
 // обычного — только его ключи, у админа — выбор, потом cheaper и все ключи.
 func QuizChain(cfg *config.Config, st Store, id int64) []llm.Target {
-	return llm.ChainFor(cfg, GetChoice(st, id), IsAdmin(cfg, st, id), KeyOwner(st, id))
+	return llm.ChainForWithUserKeys(cfg, GetChoice(st, id), IsAdmin(cfg, st, id), KeyOwner(st, id), nil)
 }
 
 type llmKeyStore interface {
@@ -275,14 +275,80 @@ func InitLLMBridge(st *store.Store, v *vault.Vault) {
 	})
 }
 
-// KeyOwner — чьи ключи человека: фамилия из ФИО ЛК (ключи в .env
-// подписаны фамилией владельца, «Зуев:ключ»). Пусто — своих ключей нет.
-func KeyOwner(st Store, id int64) string {
+// accountLister — список аккаунтов из базы (нужен, чтобы проверить однозначность фамилии).
+type accountLister interface {
+	ListAccounts(kind string) ([]model.Account, error)
+}
+
+// warnedSurnames — фамилии, по которым уже писали предупреждение (один раз на процесс).
+var warnedSurnames sync.Map
+
+// KeyOwner — чьи ключи из .env у человека id. Подпись из одних цифр — его
+// telegram_id (такой ключ точно его). Иная подпись — фамилия из ФИО ЛК
+// (ключи в .env подписаны фамилией: «Зуев:ключ»), и она засчитывается, только
+// если среди аккаунтов ровно один человек с этой фамилией. Однофамильцы не
+// делят ключи: при неоднозначности владельца по фамилии нет.
+func KeyOwner(st Store, id int64) llm.Owner {
+	o := llm.Owner{ID: id}
 	f := strings.Fields(LKName(st, id))
 	if len(f) == 0 {
-		return ""
+		return o
 	}
-	return f[0]
+	surname := f[0]
+	n, known := surnameHolders(st, id, surname)
+	if !known {
+		return o
+	}
+	if n == 1 {
+		o.Surname = surname
+		return o
+	}
+	warnAmbiguousSurname(surname, n)
+	return o
+}
+
+// surnameHolders — сколько людей с фамилией surname среди аккаунтов ЛК и Moodle;
+// сам id учитывается всегда. Однофамилец, у которого есть только аккаунт ЛК,
+// тоже виден. known=false — любой список аккаунтов не получен: однозначность
+// не проверить, тогда по фамилии никому не назначаем (fail-closed).
+func surnameHolders(st Store, id int64, surname string) (n int, known bool) {
+	ls, ok := st.(accountLister)
+	if !ok {
+		return 0, false
+	}
+	ids := map[int64]struct{}{id: {}}
+	for _, kind := range []string{model.AccountLK, model.AccountMoodle} {
+		accs, err := ls.ListAccounts(kind)
+		if err != nil {
+			logx.Warnf("access", "KeyOwner: список аккаунтов kind=%s: %v", kind, err)
+			return 0, false
+		}
+		for _, a := range accs {
+			ids[a.TelegramID] = struct{}{}
+		}
+	}
+	want := llm.NormSurname(surname)
+	for tg := range ids {
+		if tg == id {
+			n++
+			continue
+		}
+		f := strings.Fields(LKName(st, tg))
+		if len(f) > 0 && llm.NormSurname(f[0]) == want {
+			n++
+		}
+	}
+	return n, true
+}
+
+// warnAmbiguousSurname пишет в лог, что ключи с подписью-фамилией никому не
+// назначены. Секретов в записи нет; один раз на фамилию за процесс.
+func warnAmbiguousSurname(surname string, n int) {
+	key := llm.NormSurname(surname)
+	if _, dup := warnedSurnames.LoadOrStore(key, true); dup {
+		return
+	}
+	logx.Warnf("access", "ключи с подписью «%s» никому не назначены: фамилию носят %d аккаунта(ов), подпишите ключ telegram_id", surname, n)
 }
 
 // LKName — ФИО из ЛК (uni.LKNameKey, без импорта uni), пусто — не знаем.

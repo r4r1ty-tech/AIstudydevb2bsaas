@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -209,6 +210,7 @@ func TestQuizSolveWithLLM(t *testing.T) {
 	if err != nil || acc == nil {
 		t.Fatalf("get account: %v", err)
 	}
+	withTestMoodleSession(t, sy, acc)
 
 	// Добавляем лекционный пак по курсу "Теория информации" с конспектом и транскриптом
 	tmpDir := t.TempDir()
@@ -256,6 +258,7 @@ func TestQuizSolveWithLLM(t *testing.T) {
 	prevItem := quizItem
 	prevItem.Todo = "Тест сейчас не открыт для попыток"
 	sy.detectAndHandleOpenedQuizzes(ctx, *acc, cli, []model.MoodleItem{prevItem}, []model.MoodleItem{quizItem})
+	sy.Wait()
 
 	// Проверяем вызов LLM
 	if llmCalls != 1 {
@@ -310,6 +313,7 @@ func TestQuizParseWithoutLLMKey(t *testing.T) {
 
 	addAccount(t, sy, 20, model.AccountMoodle, "student", "pass")
 	acc, _ := st.GetAccount(20, model.AccountMoodle)
+	withTestMoodleSession(t, sy, acc)
 
 	// Конфигурация БЕЗ LLM ключа
 	sy.Cfg = &config.Config{
@@ -335,6 +339,7 @@ func TestQuizParseWithoutLLMKey(t *testing.T) {
 	prevItem.Todo = "Тест сейчас не открыт для попыток"
 
 	sy.detectAndHandleOpenedQuizzes(ctx, *acc, cli, []model.MoodleItem{prevItem}, []model.MoodleItem{quizItem})
+	sy.Wait()
 
 	// Проверяем отметку quiz_parsed в базе
 	parsedVal, ok, err := st.GetSetting(fmt.Sprintf("quiz_parsed:%d:%d", acc.TelegramID, quizItem.CMID))
@@ -351,6 +356,7 @@ func TestQuizParseWithoutLLMKey(t *testing.T) {
 	// Повторный синк — не должен повторно слать то же самое!
 	sentCountBefore := len(*sent)
 	sy.detectAndHandleOpenedQuizzes(ctx, *acc, cli, []model.MoodleItem{quizItem}, []model.MoodleItem{quizItem})
+	sy.Wait()
 	if len(*sent) != sentCountBefore {
 		t.Errorf("expected no duplicate notification on repeated sync, before=%d, after=%d", sentCountBefore, len(*sent))
 	}
@@ -418,6 +424,7 @@ func TestQuizSolveLLMDownKeepsAttemptOpen(t *testing.T) {
 	sy.MoodleBase = moodleSrv.URL
 	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
 	acc, _ := st.GetAccount(10, model.AccountMoodle)
+	withTestMoodleSession(t, sy, acc)
 	dbPath := filepath.Join(t.TempDir(), "bot.db")
 	// без бесплатных ключей цепочка — один вариант LLM_* (фейк, всегда 503)
 	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10, DBPath: dbPath}
@@ -431,6 +438,7 @@ func TestQuizSolveLLMDownKeepsAttemptOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{prev}, []model.MoodleItem{item})
+	sy.Wait()
 
 	if processCalls != 0 {
 		t.Fatalf("в Moodle ушло %d запросов processattempt, ждали 0", processCalls)
@@ -444,6 +452,7 @@ func TestQuizSolveLLMDownKeepsAttemptOpen(t *testing.T) {
 	// следующий обычный обход (тест уже был открыт): пробуем снова, молча
 	notes := len(*sent)
 	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{item}, []model.MoodleItem{item})
+	sy.Wait()
 	if processCalls != 0 || len(*sent) != notes {
 		t.Fatalf("повтор: processattempt=%d, новых сообщений %d", processCalls, len(*sent)-notes)
 	}
@@ -494,17 +503,20 @@ func TestQuizForceOverdue(t *testing.T) {
 	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10}
 	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
 	acc, _ := st.GetAccount(10, model.AccountMoodle)
+	withTestMoodleSession(t, sy, acc)
 	past := time.Now().Add(-48 * time.Hour)
 	item := model.MoodleItem{CMID: 777, Course: "Теория информации", Kind: model.MoodleQuiz, Title: "Просроченный", Status: model.MoodleTodo, Due: &past}
 	cli, _ := sy.moodleClient()
 
 	// без флага — синк просроченный тест не трогает
 	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{item}, []model.MoodleItem{item})
+	sy.Wait()
 	if finished {
 		t.Fatal("просроченный тест решён без кнопки")
 	}
 	_ = st.SetSetting(QuizForceKey(10, 777), "1")
 	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{item}, []model.MoodleItem{item})
+	sy.Wait()
 	if !finished {
 		t.Fatalf("«Пройти» не довело до конца; сообщения: %v", *sent)
 	}
@@ -523,7 +535,7 @@ func TestQuizSubmitErrorKeepsAttemptOpen(t *testing.T) {
 	}))
 	defer llmSrv.Close()
 	var moodleSrv *httptest.Server
-	var finished bool
+	var finished atomic.Bool
 	mux := http.NewServeMux()
 	page := func(tpl string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -540,7 +552,7 @@ func TestQuizSubmitErrorKeepsAttemptOpen(t *testing.T) {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
 		}
-		finished = true
+		finished.Store(true)
 	})
 	moodleSrv = httptest.NewServer(mux)
 	defer moodleSrv.Close()
@@ -548,16 +560,18 @@ func TestQuizSubmitErrorKeepsAttemptOpen(t *testing.T) {
 	f := newFake(t)
 	sy, st, sent := setup(t, f)
 	sy.MoodleBase = moodleSrv.URL
-	sy.Cfg = &config.Config{LLMAPIKey: "k", LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10}
+	sy.Cfg = &config.Config{LLMAPIKey: t.Name(), LLMAPIURL: llmSrv.URL, LLMModel: "m", AdminID: 10}
 	addAccount(t, sy, 10, model.AccountMoodle, "student", "pass")
 	acc, _ := st.GetAccount(10, model.AccountMoodle)
+	withTestMoodleSession(t, sy, acc)
 	item := model.MoodleItem{CMID: 777, Course: "Теория информации", Kind: model.MoodleQuiz, Title: "Тест", Status: model.MoodleTodo}
 	prev := item
 	prev.Todo = "Тест сейчас не открыт для попыток"
 	cli, _ := sy.moodleClient()
 	sy.detectAndHandleOpenedQuizzes(context.Background(), *acc, cli, []model.MoodleItem{prev}, []model.MoodleItem{item})
+	sy.Wait()
 
-	if finished {
+	if finished.Load() {
 		t.Fatal("попытка завершена, хотя ответы не сохранились")
 	}
 	if v, ok, _ := st.GetSetting(fmt.Sprintf("quiz_solved:%d:%d", acc.TelegramID, item.CMID)); ok && v != "" {

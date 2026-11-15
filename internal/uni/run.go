@@ -21,20 +21,36 @@ func KickKey(telegramID int64) string { return fmt.Sprintf("moodle_kick:%d", tel
 // WakeKickKey — флаг «синхронизировать Moodle немедленно из-за вейкворда на паре».
 const WakeKickKey = "moodle_wake_kick"
 
-const defaultMoodleWorkers = 4
+const (
+	defaultMoodleWorkers = 4
+	defaultQuizWorkers   = 4
+)
+
+// envWorkers читает число воркеров из переменной окружения name (int > 0), иначе def.
+func envWorkers(name string, def int) int {
+	val := strings.TrimSpace(os.Getenv(name))
+	if val == "" {
+		return def
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
 
 // MoodleWorkersLimit возвращает число параллельных воркеров для обхода Moodle.
 // Читает переменную окружения MOODLE_WORKERS (int > 0), по умолчанию 4.
 func MoodleWorkersLimit() int {
-	val := strings.TrimSpace(os.Getenv("MOODLE_WORKERS"))
-	if val == "" {
-		return defaultMoodleWorkers
-	}
-	n, err := strconv.Atoi(val)
-	if err != nil || n <= 0 {
-		return defaultMoodleWorkers
-	}
-	return n
+	return envWorkers("MOODLE_WORKERS", defaultMoodleWorkers)
+}
+
+// QuizWorkersLimit возвращает, сколько тестов решается одновременно.
+// Читает переменную окружения MOODLE_QUIZ_WORKERS (int > 0), по умолчанию 4.
+// Это отдельный пул от MOODLE_WORKERS: решение тестов занимает десятки минут
+// и не должно держать слоты обхода аккаунтов.
+func QuizWorkersLimit() int {
+	return envWorkers("MOODLE_QUIZ_WORKERS", defaultQuizWorkers)
 }
 
 func (s *Syncer) workersLimit() int {
@@ -51,6 +67,20 @@ func (s *Syncer) getSem() chan struct{} {
 		s.sem = make(chan struct{}, s.workersLimit())
 	}
 	return s.sem
+}
+
+// getQuizSem — семафор пула решения тестов (отдельно от семафора обхода аккаунтов).
+func (s *Syncer) getQuizSem() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.quizSem == nil {
+		n := s.QuizWorkers
+		if n <= 0 {
+			n = QuizWorkersLimit()
+		}
+		s.quizSem = make(chan struct{}, n)
+	}
+	return s.quizSem
 }
 
 // tryLockAccount пытается заблокировать аккаунт для синхронизации.

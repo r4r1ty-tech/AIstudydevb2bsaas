@@ -497,6 +497,7 @@ func TestWithWakeKickedAndDetectOpenedQuizzes(t *testing.T) {
 
 	// 1. Без флага в контексте и при пустом prev уведомлений быть не должно.
 	sy.detectAndHandleOpenedQuizzes(baseCtx, acc, cli, nil, []model.MoodleItem{openQuiz})
+	sy.Wait()
 	if len(notes) != 0 {
 		t.Fatalf("без wakeKicked и при пустом prev не ждали уведомлений, получили: %v", notes)
 	}
@@ -504,6 +505,7 @@ func TestWithWakeKickedAndDetectOpenedQuizzes(t *testing.T) {
 	// 2. С withWakeKicked в контексте, даже если WakeKickKey удалён из Store и prev пустой,
 	// тест должен быть замечен и отправлено уведомление.
 	sy.detectAndHandleOpenedQuizzes(wakeCtx, acc, cli, nil, []model.MoodleItem{openQuiz})
+	sy.Wait()
 	if len(notes) != 1 || !strings.Contains(notes[0], "Открылся тест в Moodle!") {
 		t.Fatalf("с wakeCtx и пустым prev ждали уведомление о тесте, получили: %v", notes)
 	}
@@ -511,10 +513,12 @@ func TestWithWakeKickedAndDetectOpenedQuizzes(t *testing.T) {
 	// 3. Тест уже был открыт в prev: без wakeKicked уведомления нет, с wakeCtx — есть.
 	notes = nil
 	sy.detectAndHandleOpenedQuizzes(baseCtx, acc, cli, []model.MoodleItem{openQuiz}, []model.MoodleItem{openQuiz})
+	sy.Wait()
 	if len(notes) != 0 {
 		t.Fatalf("без wakeKicked для уже открытого теста не ждали уведомлений, получили: %v", notes)
 	}
 	sy.detectAndHandleOpenedQuizzes(wakeCtx, acc, cli, []model.MoodleItem{openQuiz}, []model.MoodleItem{openQuiz})
+	sy.Wait()
 	if len(notes) != 1 || !strings.Contains(notes[0], "Открылся тест в Moodle!") {
 		t.Fatalf("с wakeCtx для открытого теста ждали уведомление, получили: %v", notes)
 	}
@@ -525,6 +529,7 @@ func TestWithWakeKickedAndDetectOpenedQuizzes(t *testing.T) {
 		t.Fatalf("WakeKick: %v", err)
 	}
 	sy.detectAndHandleOpenedQuizzes(baseCtx, acc, cli, []model.MoodleItem{openQuiz}, []model.MoodleItem{openQuiz})
+	sy.Wait()
 	if len(notes) != 1 || !strings.Contains(notes[0], "Открылся тест в Moodle!") {
 		t.Fatalf("при WakeKickKey в Store прямой вызов тоже должен видеть wakeKicked, получили: %v", notes)
 	}

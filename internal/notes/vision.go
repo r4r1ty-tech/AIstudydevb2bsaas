@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,10 +128,36 @@ func hasVisionConfigured(cfg *config.Config) bool {
 	return len(llm.MediaTargets(llm.PoolChain(cfg), false, true)) > 0 || len(visionProviders(cfg)) > 0
 }
 
-// DescribeSlides распознаёт слайды из каталога slidesDir батчами через пул LLM-ключей
+// visionBatchAttempts — сколько раз пробуем один батч: первый вызов и два повтора.
+const visionBatchAttempts = 3
+
+// visionRetryDelay — базовая пауза перед повтором батча: перед попыткой n ждём n*visionRetryDelay.
+// Переменная, а не константа, чтобы тесты не ждали реальные секунды.
+var visionRetryDelay = 10 * time.Second
+
+// SlidesResult — результат распознавания слайдов.
+type SlidesResult struct {
+	// Text — описание для конспекта: vision-описания и текстовый слой из slides.json.
+	Text string
+	// Incomplete — часть батчей не распознана даже после повторов. Для их слайдов в Text
+	// только текстовый слой из slides.json (или ничего). Такой результат нельзя кэшировать как окончательный.
+	Incomplete bool
+	// FailedSlides — номера слайдов из батчей, которые не удалось распознать.
+	FailedSlides []int
+}
+
+// DescribeSlides возвращает только текст описания слайдов; подробности — в DescribeSlidesDetailed.
+func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (string, error) {
+	res, err := DescribeSlidesDetailed(ctx, cfg, slidesDir)
+	return res.Text, err
+}
+
+// DescribeSlidesDetailed распознаёт слайды из каталога slidesDir батчами через пул LLM-ключей
 // (только бесплатные vision-ключи без Cheaper/AdminOnly) и при необходимости подставляет
 // текстовый слой из slides.json с отметками времени первого показа.
-func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (string, error) {
+// Неудавшийся батч повторяется до visionBatchAttempts раз. Если и это не помогло, его слайды
+// берутся из текстового слоя, а результат помечается как Incomplete.
+func DescribeSlidesDetailed(ctx context.Context, cfg *config.Config, slidesDir string) (SlidesResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -138,11 +165,11 @@ func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (
 
 	entries, err := loadSlideEntries(slidesDir)
 	if err != nil {
-		return "", err
+		return SlidesResult{}, err
 	}
 	if len(entries) == 0 {
 		logx.Debugf("notes", "DescribeSlides: no slides or text layer in %s, skip", slidesDir)
-		return "", nil
+		return SlidesResult{}, nil
 	}
 
 	visionItems := make([]visionSlideItem, 0, len(entries))
@@ -173,10 +200,11 @@ func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (
 
 	visionTexts := make(map[int]string, len(visionItems))
 	var lastErr error
+	var failedSlides []int
 
 	poolChain := llm.MediaTargets(llm.PoolChain(cfg), false, true)
 	if err := ValidateChain(poolChain); err != nil {
-		return "", err
+		return SlidesResult{}, err
 	}
 
 	usePool := len(poolChain) > 0
@@ -188,7 +216,7 @@ func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (
 	if len(visionItems) > 0 && (usePool || len(legacyProvs) > 0) {
 		for start := 0; start < len(visionItems); start += visionBatchSize {
 			if err := ctx.Err(); err != nil {
-				return "", err
+				return SlidesResult{}, err
 			}
 			end := start + visionBatchSize
 			if end > len(visionItems) {
@@ -203,29 +231,15 @@ func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (
 				parts = append(parts, llm.ImagePart(it.raw, it.mime))
 			}
 
-			var reply string
-			var batchErr error
-			if usePool {
-				chain := llm.MediaTargets(llm.PoolChain(cfg), false, true)
-				if err := ValidateChain(chain); err != nil {
-					return "", err
-				}
-				res, err := llm.AskParts(ctx, chain, visionSysPrompt, parts)
-				if err != nil {
-					batchErr = err
-				} else {
-					reply = res.Text
-				}
-			} else {
-				reply, batchErr = describePartsLegacy(ctx, legacyProvs, visionSysPrompt, parts)
-			}
-
+			reply, batchErr := askVisionBatch(ctx, poolChain, usePool, legacyProvs, parts, batchNums)
 			if err := ctx.Err(); err != nil {
-				return "", err
+				return SlidesResult{}, err
 			}
 			if batchErr != nil {
-				logx.Warnf("notes", "DescribeSlides: batch %d..%d failed: %v", batchNums[0], batchNums[len(batchNums)-1], batchErr)
+				logx.Warnf("notes", "DescribeSlides: batch %d..%d не распознан после %d попыток: %v",
+					batchNums[0], batchNums[len(batchNums)-1], visionBatchAttempts, batchErr)
 				lastErr = batchErr
+				failedSlides = append(failedSlides, batchNums...)
 				continue
 			}
 
@@ -257,13 +271,73 @@ func DescribeSlides(ctx context.Context, cfg *config.Config, slidesDir string) (
 	}
 
 	res := strings.TrimSpace(b.String())
+	incomplete := len(failedSlides) > 0
 	if res == "" && lastErr != nil {
 		logx.Errorf("notes", "DescribeSlides: all vision batches failed and no text layer: %v", lastErr)
-		return "", lastErr
+		return SlidesResult{Incomplete: true, FailedSlides: failedSlides}, lastErr
 	}
 
-	logx.Infof("notes", "DescribeSlides: done slides=%d vision=%d result_chars=%d", len(entries), len(visionTexts), len(res))
-	return res, nil
+	logx.Infof("notes", "DescribeSlides: done slides=%d vision=%d result_chars=%d incomplete=%t",
+		len(entries), len(visionTexts), len(res), incomplete)
+	return SlidesResult{Text: res, Incomplete: incomplete, FailedSlides: failedSlides}, nil
+}
+
+// askVisionBatch отправляет батч и при неудаче повторяет его с растущей паузой.
+// Пустой ответ считается неудачей. Отмена ctx прерывает повторы сразу.
+func askVisionBatch(ctx context.Context, poolChain []llm.Target, usePool bool, legacyProvs []visionProvider, parts []llm.Part, nums []int) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= visionBatchAttempts; attempt++ {
+		reply, err := askVisionOnce(ctx, poolChain, usePool, legacyProvs, parts)
+		if err == nil {
+			return reply, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		lastErr = err
+		// Все ключи на паузе из-за лимита: повтор сейчас ничего не даст, сдаёмся сразу.
+		if attempt == visionBatchAttempts || errors.Is(err, llm.ErrAllCooldown) {
+			break
+		}
+		wait := visionRetryDelay * time.Duration(attempt)
+		logx.Warnf("notes", "DescribeSlides: batch %d..%d попытка %d/%d неудачна: %v, повтор через %s",
+			nums[0], nums[len(nums)-1], attempt, visionBatchAttempts, err, wait)
+		if !visionPause(ctx, wait) {
+			return "", ctx.Err()
+		}
+	}
+	return "", lastErr
+}
+
+// askVisionOnce — одна попытка отправки батча: через пул ключей либо через запасных провайдеров.
+func askVisionOnce(ctx context.Context, poolChain []llm.Target, usePool bool, legacyProvs []visionProvider, parts []llm.Part) (string, error) {
+	if !usePool {
+		return describePartsLegacy(ctx, legacyProvs, visionSysPrompt, parts)
+	}
+	res, err := llm.AskParts(ctx, poolChain, visionSysPrompt, parts)
+	if err != nil {
+		return "", err
+	}
+	text := strings.TrimSpace(res.Text)
+	if text == "" {
+		return "", errors.New("vision: пустой ответ")
+	}
+	return text, nil
+}
+
+// visionPause ждёт перед повтором батча; в тестах подменяется, чтобы не ждать реальные секунды.
+var visionPause = sleepVisionRetry
+
+// sleepVisionRetry ждёт d или отмены ctx. Возвращает false, если ctx отменён раньше.
+func sleepVisionRetry(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // DescribeImage возвращает текстовое описание одной картинки (рисунка из вопроса теста).

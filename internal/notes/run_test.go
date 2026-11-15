@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,7 +261,8 @@ func TestStepSlidesCacheHit(t *testing.T) {
 
 	// Вызываем stepSlides с cfg = nil: без кэша DescribeSlides вернул бы пустую строку,
 	// так как провайдеров нет. С кэшем должно вернуться описание из bc.
-	res, err := stepSlides(context.Background(), nil, dir, slidesDir, bc)
+	resS, err := stepSlides(context.Background(), nil, dir, slidesDir, bc)
+	res := resS.Text
 	if err != nil {
 		t.Fatalf("stepSlides вернул ошибку: %v", err)
 	}
@@ -275,12 +277,85 @@ func TestStepSlidesCacheHit(t *testing.T) {
 	if err := os.WriteFile(slidesDescPath(dir), []byte("Слайд 1: описание из файла диска"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	resFile, err := stepSlides(context.Background(), nil, dir, slidesDir, bcEmptyDesc)
+	resFileS, err := stepSlides(context.Background(), nil, dir, slidesDir, bcEmptyDesc)
+	resFile := resFileS.Text
 	if err != nil {
 		t.Fatalf("stepSlides вернул ошибку: %v", err)
 	}
 	if resFile != "Слайд 1: описание из файла диска" {
 		t.Fatalf("ожидалось описание из .slides_desc.txt, получено: %q", resFile)
+	}
+}
+
+// TestStepSlidesIncompleteNotCached проверяет, что неполное описание (vision упал на всех повторах)
+// не кэшируется: при следующей сборке слайды пересчитываются и берётся полный vision-результат.
+func TestStepSlidesIncompleteNotCached(t *testing.T) {
+	fastVisionRetry(t)
+	dir := t.TempDir()
+	slidesDir := filepath.Join(dir, "slides")
+	if err := os.MkdirAll(slidesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFakeSlides(t, slidesDir, 3, true)
+	cfg := &config.Config{GeminiAPIKeys: []string{"k1:secret-1"}}
+	perAttempt := visionCallsPerAttempt(cfg)
+
+	var (
+		failing atomic.Bool
+		calls   atomic.Int32
+	)
+	failing.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if failing.Load() {
+			http.Error(w, "upstream 500", http.StatusInternalServerError)
+			return
+		}
+		writeVisionOK(w, visionReplyFor("Vision полный слайд", 1, 2, 3))
+	}))
+	defer srv.Close()
+
+	oldURL := llm.GeminiURL
+	llm.GeminiURL = srv.URL
+	t.Cleanup(func() { llm.GeminiURL = oldURL })
+
+	ctx := llm.WithPool(context.Background(), llm.NewKeyPool())
+	bc := &buildCache{}
+
+	// Первая сборка: vision не справился, слайды пришли из текстового слоя.
+	resS, err := stepSlides(ctx, cfg, dir, slidesDir, bc)
+	if err != nil {
+		t.Fatalf("stepSlides вернул ошибку: %v", err)
+	}
+	res := resS.Text
+	if !resS.Incomplete || len(resS.FailedSlides) != 3 {
+		t.Fatalf("неполный результат должен быть помечен Incomplete со слайдами 1..3: %+v", resS)
+	}
+	if !strings.Contains(res, "Текстовый слой слайда 1") {
+		t.Fatalf("ожидался текстовый слой как запасной вариант:\n%s", res)
+	}
+	if bc.SlidesHash != "" || bc.SlidesDesc != "" {
+		t.Fatalf("неполное описание не должно попасть в кэш: hash=%q", bc.SlidesHash)
+	}
+	if n := int(calls.Load()); n != visionBatchAttempts*perAttempt {
+		t.Fatalf("ожидалось %d попыток vision по %d запросов, выполнено %d запросов", visionBatchAttempts, perAttempt, n)
+	}
+
+	// Вторая сборка: vision восстановился — слайды обязаны пересчитаться, а не отдаться из кэша.
+	failing.Store(false)
+	res2S, err := stepSlides(ctx, cfg, dir, slidesDir, bc)
+	if err != nil {
+		t.Fatalf("повторный stepSlides вернул ошибку: %v", err)
+	}
+	res2 := res2S.Text
+	if res2S.Incomplete {
+		t.Fatalf("полный пересчёт не должен быть помечен Incomplete")
+	}
+	if !strings.Contains(res2, "Vision полный слайд 1") {
+		t.Fatalf("при пересчёте ожидалось полное vision-описание:\n%s", res2)
+	}
+	if bc.SlidesHash == "" {
+		t.Fatalf("полный результат должен записаться в кэш")
 	}
 }
 

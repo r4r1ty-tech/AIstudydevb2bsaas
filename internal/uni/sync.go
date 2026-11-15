@@ -56,6 +56,7 @@ type Syncer struct {
 	DescribeImage func(ctx context.Context, src string) (string, error)
 
 	MoodleWorkers int // переопределение MOODLE_WORKERS (если > 0)
+	QuizWorkers   int // переопределение MOODLE_QUIZ_WORKERS (если > 0)
 
 	mu          sync.Mutex
 	lastFull    map[int64]time.Time
@@ -63,7 +64,11 @@ type Syncer struct {
 	runningAcc  map[int64]bool           // активные аккаунты, синхронизируемые прямо сейчас
 	runningQuiz map[string]bool          // активные тесты (tg:quizID), решаемые прямо сейчас
 	sem         chan struct{}            // семафор параллельных воркеров Moodle
-	wg          sync.WaitGroup           // ожидание завершения фоновых воркеров
+	quizSem     chan struct{}            // семафор параллельного решения тестов (пул решения)
+	// solveHook — тестовый крючок: вызывается в горутине страницы перед решением (паника в нём
+	// проверяет перехват в solveSinglePageSafe). В проде nil.
+	solveHook func(idx int)
+	wg        sync.WaitGroup // ожидание завершения фоновых воркеров
 }
 
 func (s *Syncer) now() time.Time { return nowFn().In(s.loc()) }
@@ -496,48 +501,9 @@ func (s *Syncer) SyncMoodle(ctx context.Context, acc model.Account, full bool) (
 			return err
 		}
 
-		// Защита от одновременного решения одного и того же теста несколькими горутинами.
-		var lockedQuizzes []string
-		var curItems []model.MoodleItem
-		for _, it := range items {
-			if it.Kind == model.MoodleQuiz {
-				qid := strconv.FormatInt(it.CMID, 10)
-				if !s.tryLockQuiz(acc.TelegramID, qid) {
-					logx.Infof("uni", "moodle tg=%d quiz cmid=%d: тест уже решается в другой горутине, пропуск", acc.TelegramID, it.CMID)
-					continue
-				}
-				lockedQuizzes = append(lockedQuizzes, qid)
-			}
-			curItems = append(curItems, it)
-		}
-		var prevItems []model.MoodleItem
-		for _, it := range prev {
-			if it.Kind == model.MoodleQuiz {
-				qid := strconv.FormatInt(it.CMID, 10)
-				alreadyLocked := false
-				for _, lq := range lockedQuizzes {
-					if lq == qid {
-						alreadyLocked = true
-						break
-					}
-				}
-				if !alreadyLocked {
-					if !s.tryLockQuiz(acc.TelegramID, qid) {
-						logx.Infof("uni", "moodle tg=%d quiz cmid=%d (prev): тест уже решается в другой горутине, пропуск", acc.TelegramID, it.CMID)
-						continue
-					}
-					lockedQuizzes = append(lockedQuizzes, qid)
-				}
-			}
-			prevItems = append(prevItems, it)
-		}
-		defer func() {
-			for _, qid := range lockedQuizzes {
-				s.unlockQuiz(acc.TelegramID, qid)
-			}
-		}()
-
-		s.detectAndHandleOpenedQuizzes(ctx, acc, c, prevItems, curItems)
+		// Решение тестов уходит в отдельный пул (scheduleQuiz), синк аккаунта не ждёт его
+		// и освобождает слот сразу. Защита от двойного решения — блокировка (tg, cmid) в scheduleQuiz.
+		s.detectAndHandleOpenedQuizzes(ctx, acc, c, prev, items)
 		return nil
 	})
 	if err != nil {

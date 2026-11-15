@@ -518,7 +518,7 @@ func TestChainForWithUserKeysOrderAndIsolation(t *testing.T) {
 	userKeys := map[string]Key{
 		Gemini: {Label: "личный", Secret: "db-secret-зуев", OwnerID: 55},
 	}
-	chain := ChainForWithUserKeys(cfg, Choice{}, false, "Зуев", userKeys)
+	chain := ChainForWithUserKeys(cfg, Choice{}, false, Owner{Surname: "Зуев"}, userKeys)
 	if len(chain) == 0 || !chain[0].MatchesSecret("db-secret-зуев") || chain[0].OwnerID != 55 {
 		t.Fatalf("личный ключ из БД должен идти первым: %+v", chain)
 	}
@@ -528,7 +528,48 @@ func TestChainForWithUserKeysOrderAndIsolation(t *testing.T) {
 		}
 	}
 	// У другого пользователя без личных ключей цепочка пустая.
-	if other := ChainForWithUserKeys(cfg, Choice{}, false, "Петров", nil); len(other) != 0 {
+	if other := ChainForWithUserKeys(cfg, Choice{}, false, Owner{Surname: "Петров"}, nil); len(other) != 0 {
 		t.Fatalf("у Петрова не должно быть чужих ключей: %+v", other)
+	}
+}
+
+// Подпись-фамилия даёт ключ только при заданной фамилии владельца; подпись из
+// цифр — точный telegram_id, фамилия её не открывает.
+func TestOwnsKeyBySurnameAndID(t *testing.T) {
+	bySurname := Key{Label: "Зуев", Secret: "s"}
+	byID := Key{Label: "1234567", Secret: "s"}
+	if !OwnsKey(bySurname, Owner{Surname: "зуев"}) {
+		t.Fatal("фамилия без учёта регистра должна совпасть")
+	}
+	if OwnsKey(bySurname, Owner{ID: 1234567}) {
+		t.Fatal("без фамилии владельца ключ по подписи-фамилии не должен открываться")
+	}
+	if OwnsKey(bySurname, Owner{}) {
+		t.Fatal("пустой владелец не должен получать ключи")
+	}
+	if !OwnsKey(byID, Owner{ID: 1234567}) {
+		t.Fatal("подпись-цифры должна совпасть с telegram_id")
+	}
+	if OwnsKey(byID, Owner{ID: 7654321, Surname: "1234567"}) {
+		t.Fatal("подпись-цифры не должна совпадать по другому id или фамилии")
+	}
+	if OwnsKey(byID, Owner{Surname: "1234567"}) {
+		t.Fatal("подпись-цифры без telegram_id не должна открываться по фамилии")
+	}
+	if OwnsKey(Key{Label: "ключ 1", Secret: "s"}, Owner{ID: 1}) {
+		t.Fatal("безымянный ключ не должен принадлежать никому")
+	}
+}
+
+// «ё» и «е» в фамилии совпадают; регистр не важен.
+func TestOwnsKeyNormalizesYoAndCase(t *testing.T) {
+	if !OwnsKey(Key{Label: "Пётр", Secret: "s"}, Owner{Surname: "Петр"}) {
+		t.Fatal("«Пётр» должен совпасть с «Петр»")
+	}
+	if !OwnsKey(Key{Label: "Петр", Secret: "s"}, Owner{Surname: "ПЁТР"}) {
+		t.Fatal("«Петр» должен совпасть с «ПЁТР»")
+	}
+	if OwnsKey(Key{Label: "Пётр", Secret: "s"}, Owner{Surname: "Петров"}) {
+		t.Fatal("разные фамилии не должны совпадать")
 	}
 }

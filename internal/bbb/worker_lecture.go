@@ -255,13 +255,23 @@ func (w *Worker) allLecturesFinishedToday() bool {
 	if err != nil {
 		return false
 	}
-	return archive.AllLecturesFinished(all, time.Now())
+	return archive.AllLecturesFinished(all, time.Now().In(w.lectureLoc()))
+}
+
+// lectureLoc — часовой пояс расписания (w.Loc, по умолчанию UTC). «Сегодня» и «день»
+// считаем в нём, а не в локальной зоне процесса: иначе около полуночи даты расходятся.
+func (w *Worker) lectureLoc() *time.Location {
+	if w == nil || w.Loc == nil {
+		return time.UTC
+	}
+	return w.Loc
 }
 
 func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
 	if w == nil || w.Store == nil {
 		return
 	}
+	now = now.In(w.lectureLoc())
 	all, err := w.Store.ListLessons()
 	if err != nil || !archive.ShouldHarvest(all, now, archive.HarvestGrace) {
 		if err != nil {
@@ -285,7 +295,7 @@ func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
 		defer w.jobWG.Done()
 		defer w.endJob()
 		w.harvestDay(ctx, day)
-		if all, err := w.Store.ListLessons(); err == nil && archive.AllLecturesFinished(all, time.Now()) {
+		if all, err := w.Store.ListLessons(); err == nil && archive.AllLecturesFinished(all, time.Now().In(w.lectureLoc())) {
 			w.setSetting(slidesDoneKey+day, "1")
 		}
 	}()
@@ -338,7 +348,7 @@ func (w *Worker) openNoteDays(now time.Time) []string {
 		loc = time.UTC
 	}
 	today := now.In(loc).Format("2006-01-02")
-	yesterday := archive.NotesDay(now)
+	yesterday := archive.NotesDay(now.In(loc))
 	first := now.In(loc).AddDate(0, 0, -noteCatchUpDays).Format("2006-01-02")
 
 	var days []string
@@ -647,6 +657,9 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 }
 
 // buildNotes builds and publishes one pack; false means it failed.
+// notesBuild — сборка конспекта; в тестах подменяется заглушкой (PDF без Chromium не собрать).
+var notesBuild = notes.Build
+
 func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 	logx.Debugf("bbb", "buildNotes: pack=%d", id)
 	p, err := w.Store.PackByID(id)
@@ -683,7 +696,7 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 	}
 	w.hogs().Hold()
 	buildStart := time.Now()
-	err = notes.Build(ctx, w.Cfg, w.recRoot(), *p)
+	err = notesBuild(ctx, w.Cfg, w.recRoot(), *p)
 	w.hogs().Release()
 	buildDur := time.Since(buildStart).Round(time.Second)
 	if errors.Is(err, notes.ErrEmptyAudio) {
@@ -699,6 +712,11 @@ func (w *Worker) buildNotes(ctx context.Context, id int64) bool {
 		logx.Warnf("bbb", "buildNotes: %s закрыт как empty за %s: %v", packTag(p), buildDur, err)
 		notify.Admin(ctx, w.Cfg, fmt.Sprintf("лекция «%s» %s: %v — конспекта не будет", p.Discipline, p.Date, err))
 		return true
+	}
+	// Слайды не распознаны полностью: повторяем сборку, на последней попытке публикуем как есть.
+	if errors.Is(err, notes.ErrSlidesIncomplete) && attempt >= maxNoteAttempts {
+		notify.Admin(ctx, w.Cfg, fmt.Sprintf("конспект «%s» %s: слайды неполные (%v), публикую как есть", p.Discipline, p.Date, err))
+		err = nil
 	}
 	if err != nil {
 		n := w.noteFail(p.ID)

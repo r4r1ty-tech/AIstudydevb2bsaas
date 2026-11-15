@@ -18,6 +18,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -370,10 +371,43 @@ func ProviderWithUserKey(cfg *config.Config, provider, secret string, ownerID in
 	return target(p, p.Models[0], 0), true
 }
 
-// OwnsKey — ключ подписан этим человеком (подпись = фамилия, без регистра).
-func OwnsKey(k Key, owner string) bool {
-	owner = strings.TrimSpace(owner)
-	return owner != "" && strings.EqualFold(strings.TrimSpace(k.Label), owner)
+// Owner — кому принадлежат ключи из .env с подписью. Подпись-фамилия совпадает
+// с Surname, только если фамилия однозначна среди аккаунтов (это решает
+// access.KeyOwner); подпись-цифры — точный telegram_id из ID.
+type Owner struct {
+	ID      int64
+	Surname string
+}
+
+// OwnsKey — ключ подписан этим человеком. Подпись из одних цифр — точный
+// telegram_id; иная подпись — фамилия без учёта регистра, и только если
+// Owner.Surname задан (пустая фамилия никому не даёт ключей).
+func OwnsKey(k Key, owner Owner) bool {
+	label := strings.TrimSpace(k.Label)
+	if label == "" {
+		return false
+	}
+	if isDigits(label) {
+		return owner.ID != 0 && label == strconv.FormatInt(owner.ID, 10)
+	}
+	surname := strings.TrimSpace(owner.Surname)
+	return surname != "" && NormSurname(label) == NormSurname(surname)
+}
+
+// NormSurname — фамилия для сравнения: без пробелов по краям, без учёта
+// регистра, «ё» как «е» (Пётров и Петров — одна фамилия).
+func NormSurname(s string) string {
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "ё", "е")
+}
+
+// isDigits — строка непуста и состоит только из цифр.
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 func providersWithUserKeys(cfg *config.Config, userKeys map[string]Key) ([]Provider, map[string]int) {
@@ -430,13 +464,13 @@ func findProviderInList(provs []Provider, id string) (Provider, bool) {
 // Админ — его выбор первым, а если не ответил: cheaper (muse-spark-1.3-
 // contributor первой), потом все ключи всех моделей.
 func ChainFor(cfg *config.Config, ch Choice, admin bool, owner string) []Target {
-	return ChainForWithUserKeys(cfg, ch, admin, owner, nil)
+	return ChainForWithUserKeys(cfg, ch, admin, Owner{Surname: owner}, nil)
 }
 
 // ChainForWithUserKeys строит цепочку с учётом личных ключей пользователя из БД.
 // Личный ключ пользователя из БД ставится первым в его цепочке (после явного выбора)
 // и никогда не попадает в цепочку другого пользователя.
-func ChainForWithUserKeys(cfg *config.Config, ch Choice, admin bool, owner string, userKeys map[string]Key) []Target {
+func ChainForWithUserKeys(cfg *config.Config, ch Choice, admin bool, owner Owner, userKeys map[string]Key) []Target {
 	var out []Target
 	seen := map[string]bool{}
 	add := func(ts ...Target) {
@@ -537,7 +571,7 @@ func ChainForWithUserKeys(cfg *config.Config, ch Choice, admin bool, owner strin
 
 // ChainForTest строит цепочку ровно для проверки выбранного провайдера/модели/ключа в панели,
 // с учётом личных ключей из БД и без подмешивания чужих ключей для не-админа.
-func ChainForTest(cfg *config.Config, ch Choice, admin bool, owner string, userKeys map[string]Key) []Target {
+func ChainForTest(cfg *config.Config, ch Choice, admin bool, owner Owner, userKeys map[string]Key) []Target {
 	provs, dbIdx := providersWithUserKeys(cfg, userKeys)
 	p, ok := findProviderInList(provs, ch.Provider)
 	if !ok || (p.AdminOnly && !admin) {

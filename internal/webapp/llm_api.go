@@ -180,6 +180,8 @@ func (s *Server) handleLLMModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Свой ключ из .env (подпись — фамилия однозначная или свой telegram_id).
+	// Сначала свой ключ из .env; админу ниже есть фолбэк на ключ провайдера.
 	if userSecret == "" {
 		owner := access.KeyOwner(s.st, id)
 		for _, k := range p.Keys {
@@ -189,11 +191,14 @@ func (s *Server) handleLLMModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Фолбэк только админу, и только когда своего ключа нет (решение заказчика):
+	// AdminOnly-провайдер (cheaper) — ключ админа LLM_API_KEY; обычный провайдер —
+	// его первый ключ, как было раньше. Не-админу фолбэка нет.
 	if userSecret == "" && s.viewerIsAdmin() && len(p.Keys) > 0 {
 		userSecret = p.Keys[0].Secret
 	}
 	if userSecret == "" {
-		writeErr(w, http.StatusForbidden, "сначала добавь свой ключ для этого провайдера")
+		writeErr(w, http.StatusForbidden, "сначала добавь свой ключ для этого провайдера: личный в панели или подписанный в .env своим telegram_id")
 		return
 	}
 

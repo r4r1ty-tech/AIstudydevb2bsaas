@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,12 @@ func (b *syncLogBuf) String() string {
 
 func newLLMKeysTestServer(t *testing.T, geminiEnvKeys []string) (*Server, *store.Store, []byte) {
 	t.Helper()
+	return newLLMKeysTestServerWith(t, func(c *config.Config) { c.GeminiAPIKeys = geminiEnvKeys })
+}
+
+// newLLMKeysTestServerWith — то же, но конфиг правит mutate (например LLM_API_*).
+func newLLMKeysTestServerWith(t *testing.T, mutate func(*config.Config)) (*Server, *store.Store, []byte) {
+	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "bot.db")
 	st, err := store.Open(dbPath)
@@ -51,15 +58,16 @@ func newLLMKeysTestServer(t *testing.T, geminiEnvKeys []string) (*Server, *store
 		_ = st.Close()
 	})
 	keyFile := filepath.Join(dir, "secret.key")
-	s := New(&config.Config{
+	cfg := &config.Config{
 		ListenAddr:    config.DefaultListen,
 		Timezone:      config.DefaultTimezone,
 		AdminID:       config.DefaultAdminID,
 		Whitelist:     append([]int64(nil), config.DefaultWhitelist...),
 		SecretKeyFile: keyFile,
 		DBPath:        dbPath,
-		GeminiAPIKeys: geminiEnvKeys,
-	}, st, nil, "")
+	}
+	mutate(cfg)
+	s := New(cfg, st, nil, "")
 	v, err := vault.Load("", keyFile)
 	if err != nil {
 		t.Fatal(err)
@@ -315,5 +323,112 @@ func TestLLMLimitsUsageAndCooldownAfter429(t *testing.T) {
 	gem = limResp.Providers[0]
 	if gem.CooldownSec <= 0 || gem.CooldownUntil == "" {
 		t.Fatalf("после 429 ожидался активный cooldown в limits: %+v", gem)
+	}
+}
+
+// Админ без своего ключа: провайдер cheaper (AdminOnly) — ключ админа LLM_API_KEY;
+// обычный провайдер — его первый ключ, как было (решение заказчика). Не-админ
+// фолбэка не получает: без своего ключа — 403, чужой не тратится.
+func TestLLMModelsAdminFallbackKeys(t *testing.T) {
+	origURL := llm.GeminiURL
+	t.Cleanup(func() { llm.GeminiURL = origURL })
+
+	var mu sync.Mutex
+	var auths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			mu.Lock()
+			auths = append(auths, r.Header.Get("Authorization"))
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"data":[{"id":"models/m-one"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"работает"}}]}`))
+	}))
+	defer srv.Close()
+	llm.GeminiURL = srv.URL
+
+	lastAuth := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(auths) == 0 {
+			return ""
+		}
+		return auths[len(auths)-1]
+	}
+	requests := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(auths)
+	}
+
+	const strangerKey = "stranger-env-secret-2"
+	const cheapAdminKey = "cheap-admin-llm-key-7"
+	s, _, passKey := newLLMKeysTestServerWith(t, func(c *config.Config) {
+		c.GeminiAPIKeys = []string{"Чужой:" + strangerKey}
+		c.LLMAPIKey = cheapAdminKey
+		c.LLMAPIURL = srv.URL + "/v1"
+		c.LLMModel = "m-one"
+	})
+	admin := config.DefaultAdminID
+	student := config.DefaultWhitelist[1]
+
+	// Админ, своего ключа нет: cheaper (AdminOnly) — ключ админа LLM_API_KEY.
+	rec := reqAs(s, passKey, admin, http.MethodGet, "/api/llm/models?provider=cheaper", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("админ, cheaper: %d %s, ждали 200", rec.Code, rec.Body)
+	}
+	if got := lastAuth(); got != "Bearer "+cheapAdminKey {
+		t.Fatalf("cheaper ушёл с ключом %q, ждали ключ админа LLM_API_KEY", got)
+	}
+
+	// Админ, своего ключа нет, обычный провайдер: первый ключ провайдера, как было.
+	rec = reqAs(s, passKey, admin, http.MethodGet, "/api/llm/models?provider=gemini", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("админ, gemini без своего ключа: %d %s, ждали 200 (фолбэк первым ключом)", rec.Code, rec.Body)
+	}
+	if got := lastAuth(); got != "Bearer "+strangerKey {
+		t.Fatalf("gemini ушёл с ключом %q, ждали первый ключ провайдера", got)
+	}
+
+	// Не-админ без своего ключа: 403, ни одного запроса к провайдеру.
+	before := requests()
+	rec = reqAs(s, passKey, student, http.MethodGet, "/api/llm/models?provider=gemini", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("не-админ без своего ключа: %d %s, ждали 403", rec.Code, rec.Body)
+	}
+	if requests() != before {
+		t.Fatal("при 403 не должно быть запросов к провайдеру")
+	}
+}
+
+// Админ со своим ключом (подпись — его telegram_id) получает именно его, а не фолбэк.
+func TestLLMModelsAdminOwnKeyWins(t *testing.T) {
+	origURL := llm.GeminiURL
+	t.Cleanup(func() { llm.GeminiURL = origURL })
+
+	var lastAuth atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/models") {
+			lastAuth.Store(r.Header.Get("Authorization"))
+			_, _ = w.Write([]byte(`{"data":[{"id":"models/m-one"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"работает"}}]}`))
+	}))
+	defer srv.Close()
+	llm.GeminiURL = srv.URL
+
+	const adminKey = "admin-own-gemini-key-9"
+	s, _, passKey := newLLMKeysTestServer(t, []string{
+		"Чужой:stranger-env-secret-3",
+		strconv.FormatInt(config.DefaultAdminID, 10) + ":" + adminKey,
+	})
+	rec := reqAs(s, passKey, config.DefaultAdminID, http.MethodGet, "/api/llm/models?provider=gemini", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("админ со своим ключом: %d %s", rec.Code, rec.Body)
+	}
+	if got, _ := lastAuth.Load().(string); got != "Bearer "+adminKey {
+		t.Fatalf("/models ушёл с ключом %q, ждали свой %q", got, "Bearer "+adminKey)
 	}
 }
