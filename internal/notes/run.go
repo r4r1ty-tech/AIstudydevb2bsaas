@@ -346,14 +346,6 @@ func countSlideImages(dir string) int {
 	return n
 }
 
-func fileSize(path string) int64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return st.Size()
-}
-
 // stepTranscript выполняет расшифровку аудиозаписи либо берёт готовый transcript.txt из кэша.
 func stepTranscript(ctx context.Context, cfg *config.Config, dir, audioPath, trPath string, bc *buildCache) (string, bool, string, error) {
 	tag := lectureOf(ctx).tag()
@@ -367,7 +359,7 @@ func stepTranscript(ctx context.Context, cfg *config.Config, dir, audioPath, trP
 		return "", true, why, nil
 	}
 
-	audioSz := fileSize(audioPath)
+	audioSz := archive.FileSize(audioPath)
 
 	// Проверяем наличие уже существующего непустого transcript.txt (только при годном аудио)
 	rawTr, err := os.ReadFile(trPath)
@@ -562,7 +554,7 @@ func stepNotes(ctx context.Context, cfg *config.Config, dir, mdPath string, disc
 }
 
 // stepPDF рендерит PDF из Markdown либо пропускает шаг, если валидный PDF уже существует.
-func stepPDF(ctx context.Context, cfg *config.Config, dir, pdfPath, title, md string, bc *buildCache) error {
+func stepPDF(ctx context.Context, dir, pdfPath, title, md string, bc *buildCache) error {
 	mdHash := computeStringSHA256(md)
 
 	st, err := os.Stat(pdfPath)
@@ -577,12 +569,12 @@ func stepPDF(ctx context.Context, cfg *config.Config, dir, pdfPath, title, md st
 	}
 
 	pdfStart := time.Now()
-	if err := WritePDF(ctx, cfg, title, md, pdfPath); err != nil {
+	if err := WritePDF(ctx, title, md, pdfPath); err != nil {
 		logx.Errorf("notes", "Build: pdf %s: %v", pdfPath, err)
 		return err
 	}
 	logx.Infof("notes", "Build: pdf готов bytes=%d за %s путь=%s",
-		fileSize(pdfPath), time.Since(pdfStart).Round(time.Millisecond), pdfPath)
+		archive.FileSize(pdfPath), time.Since(pdfStart).Round(time.Millisecond), pdfPath)
 
 	bc.PDFNotesHash = mdHash
 	_ = saveBuildCache(dir, bc)
@@ -640,7 +632,7 @@ func Build(ctx context.Context, cfg *config.Config, root string, p model.Lecture
 
 	// Этап 4: Рендер PDF (с пропуском, если PDF уже актуален)
 	title := fmt.Sprintf("%s · лекция %d", p.Discipline, p.Number)
-	if err := stepPDF(ctx, cfg, dir, pdfPath, title, md, bc); err != nil {
+	if err := stepPDF(ctx, dir, pdfPath, title, md, bc); err != nil {
 		return err
 	}
 

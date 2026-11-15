@@ -63,7 +63,8 @@ func TestBuildSilentAudioIsEmpty(t *testing.T) {
 func TestBuildThinTranscriptIsEmpty(t *testing.T) {
 	llm := false
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/asr" {
+		// STT-пути: Fish (/v1/asr) и cheaper (/v1/audio/transcriptions) — не LLM.
+		if r.URL.Path == "/v1/asr" || r.URL.Path == "/v1/audio/transcriptions" {
 			_, _ = w.Write([]byte(`{"text":"Продолжение следует..."}`))
 			return
 		}

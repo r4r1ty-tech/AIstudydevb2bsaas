@@ -63,8 +63,7 @@ var lobbyTextMarks = []string{
 	"встреча еще не",
 }
 
-// DirectJoiner joins BBB rooms purely over HTTP + Meteor DDP + Pion WebRTC,
-// without launching Chromium or PulseAudio.
+// DirectJoiner joins BBB rooms purely over HTTP + Meteor DDP + Pion WebRTC.
 type DirectJoiner struct {
 	Proxies *proxyrelay.Pool
 }

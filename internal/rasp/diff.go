@@ -37,10 +37,12 @@ func Diff(old, new []model.Lesson) string {
 		}
 	}
 	sort.Strings(removed)
+	sort.Strings(changed)
 	sort.Strings(added)
-	logx.Debugf("rasp", "Diff: removed=%d added=%d", len(removed), len(added))
-	lines := make([]string, 0, len(removed)+len(added))
+	logx.Debugf("rasp", "Diff: removed=%d changed=%d added=%d", len(removed), len(changed), len(added))
+	lines := make([]string, 0, len(removed)+len(changed)+len(added))
 	lines = append(lines, removed...)
+	lines = append(lines, changed...)
 	lines = append(lines, added...)
 	result := strings.Join(lines, "\n")
 	logx.Debugf("rasp", "Diff: result_bytes=%d", len(result))

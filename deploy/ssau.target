@@ -2,7 +2,7 @@
 Description=SSAU lecture stack
 # ssau-tunnel.service сюда не входит: remote.sh включает его (WantedBy=ssau.target)
 # только без PANEL_TUNNEL=0 — на проде панель за Caddy.
-Wants=ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service
+Wants=ssau-tg.service ssau-rasp.service ssau-quiz.service ssau-panel.service ssau-bbb.service
 After=network-online.target
 
 [Install]

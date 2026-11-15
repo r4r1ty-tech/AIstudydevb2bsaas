@@ -17,6 +17,9 @@ var ErrCheaperNotAllowed = errors.New("для конспектов запрещ�
 
 // ValidateChain проверяет цепочку на отсутствие cheaper и таргетов AdminOnly.
 // Если найден хотя бы один запрещённый таргет, немедленно возвращает ErrCheaperNotAllowed без сетевых вызовов.
+// Правило действует для текста конспектов, слайдов и Ask. Единственное исключение — расшифровка аудио
+// через cheaper (transcribeCheaper в cheaper_stt.go, LLM_API_* и CHEAPER_STT_MODEL): она идёт мимо
+// этой проверки и не использует цепочку llm, поэтому здесь ничего не меняется.
 func ValidateChain(chain []llm.Target) error {
 	for _, t := range chain {
 		if t.Provider == llm.Cheaper || t.AdminOnly {

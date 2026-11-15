@@ -117,7 +117,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 
 func TestLineWriterSplitsLines(t *testing.T) {
 	buf := captureLog(t)
-	w := LineWriter(LevelWarn, "capture", "ffmpeg: ", nil)
+	w := LineWriter(LevelWarn, "capture", "ffmpeg: ")
 	for _, chunk := range []string{"first li", "ne\r\nsecond\n\n   \nthi", "rd\n"} {
 		if n, err := w.Write([]byte(chunk)); err != nil || n != len(chunk) {
 			t.Fatalf("Write = %d, %v", n, err)
@@ -134,18 +134,17 @@ func TestLineWriterSplitsLines(t *testing.T) {
 	}
 }
 
-func TestLineWriterFilterAndLevel(t *testing.T) {
+func TestLineWriterPrefixAndLevel(t *testing.T) {
 	buf := captureLog(t)
-	keep := func(s string) bool { return strings.Contains(s, "pulse") }
-	w := LineWriter(LevelWarn, "bbb", "chromium: ", keep)
-	_, _ = w.Write([]byte("dbus noise\npa_context_connect: pulse refused\n"))
-	if out := buf.String(); strings.Contains(out, "dbus") || !strings.Contains(out, "pulse refused") {
-		t.Fatalf("filter: %q", out)
+	w := LineWriter(LevelWarn, "bbb", "ffmpeg: ")
+	_, _ = w.Write([]byte("bad input\n"))
+	if out := buf.String(); !strings.Contains(out, "ffmpeg: bad input") {
+		t.Fatalf("prefix: %q", out)
 	}
 
 	buf.Reset()
 	setLevel(t, LevelError)
-	_, _ = LineWriter(LevelWarn, "x", "", nil).Write([]byte("hidden\n"))
+	_, _ = LineWriter(LevelWarn, "x", "").Write([]byte("hidden\n"))
 	if buf.Len() != 0 {
 		t.Fatalf("warn line must be filtered at error level: %q", buf.String())
 	}
@@ -153,7 +152,7 @@ func TestLineWriterFilterAndLevel(t *testing.T) {
 
 func TestLineWriterFlushesHugeLine(t *testing.T) {
 	buf := captureLog(t)
-	w := LineWriter(LevelWarn, "x", "", nil).(*lineWriter)
+	w := LineWriter(LevelWarn, "x", "").(*lineWriter)
 	_, _ = w.Write(bytes.Repeat([]byte("a"), maxLine+10))
 	if buf.Len() == 0 || len(w.buf) != 0 {
 		t.Fatalf("oversized partial line must flush, pending=%d", len(w.buf))

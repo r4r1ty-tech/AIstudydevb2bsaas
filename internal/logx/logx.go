@@ -179,16 +179,14 @@ const maxLine = 4096
 
 // LineWriter turns a child process's stderr into log lines, so ffmpeg or
 // wake.py errors land in LOG_FILE and not only in the short journald window.
-// keep, if set, drops lines it returns false for (noisy Chromium stderr).
-func LineWriter(l Level, component, prefix string, keep func(string) bool) io.Writer {
-	return &lineWriter{level: l, component: component, prefix: prefix, keep: keep}
+func LineWriter(l Level, component, prefix string) io.Writer {
+	return &lineWriter{level: l, component: component, prefix: prefix}
 }
 
 type lineWriter struct {
 	level     Level
 	component string
 	prefix    string
-	keep      func(string) bool
 
 	mu  sync.Mutex
 	buf []byte
@@ -215,7 +213,7 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 
 func (w *lineWriter) emit(line string) {
 	line = strings.TrimSpace(strings.TrimRight(line, "\r"))
-	if line == "" || (w.keep != nil && !w.keep(line)) {
+	if line == "" {
 		return
 	}
 	logf(w.level, w.component, "%s%s", w.prefix, line)

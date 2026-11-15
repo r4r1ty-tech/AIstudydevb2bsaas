@@ -270,23 +270,6 @@ func (s *Store) EnsurePack(l model.Lesson, bbbURL, root string) (*model.LectureP
 	return p, nil
 }
 
-func (s *Store) nextLectureNumber(discipline string) (int, error) {
-	logx.Debugf("store", "nextLectureNumber: enter discipline=%s", discipline)
-	var n sql.NullInt64
-	err := s.db.QueryRow(`SELECT MAX(number) FROM lecture_packs WHERE discipline = ?`, discipline).Scan(&n)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		logx.Errorf("store", "nextLectureNumber: query discipline=%s: %v", discipline, err)
-		return 0, fmt.Errorf("store: next lecture number: %w", err)
-	}
-	if !n.Valid {
-		logx.Debugf("store", "nextLectureNumber: out discipline=%s number=1", discipline)
-		return 1, nil
-	}
-	out := int(n.Int64) + 1
-	logx.Debugf("store", "nextLectureNumber: out discipline=%s number=%d", discipline, out)
-	return out, nil
-}
-
 // PackByLesson ищет пак лекции по lesson_id.
 // Сначала проверяется таблица псевдонимов pack_lessons, затем основная таблица lecture_packs.
 func (s *Store) PackByLesson(lessonID int64) (*model.LecturePack, error) {

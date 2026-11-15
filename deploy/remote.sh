@@ -78,10 +78,12 @@ except Exception:
 
 tg=$(need tg)
 rasp=$(need rasp)
+quiz=$(need quiz)
 panel=$(need panel)
 bbb=$(need bbb)
 unit_tg=$(need ssau-tg.service)
 unit_rasp=$(need ssau-rasp.service)
+unit_quiz=$(need ssau-quiz.service)
 unit_panel=$(need ssau-panel.service)
 unit_bbb=$(need ssau-bbb.service)
 unit_tunnel=$(need ssau-tunnel.service)
@@ -92,9 +94,9 @@ target=$(need ssau.target)
 install -d -m 755 "$APP" "$APP/data" "$APP/recordings"
 
 need_pkgs=()
-# chromium + fonts-liberation используются для сборки PDF конспектов (notes/pdf.go);
-# BBB-клиент и запись аудио работают напрямую из Go без браузера и PulseAudio.
-for p in chromium ffmpeg fonts-liberation ca-certificates python3 python3-pip unzip; do
+# BBB-клиент и запись аудио работают напрямую из Go без браузера и PulseAudio;
+# PDF конспектов печатает typst (см. install typst ниже), Chromium не нужен.
+for p in ffmpeg ca-certificates python3 python3-pip unzip; do
   if ! dpkg -s "$p" >/dev/null 2>&1; then
     need_pkgs+=("$p")
   fi
@@ -104,6 +106,11 @@ if ((${#need_pkgs[@]})); then
   apt-get update -qq
   apt-get install -y -qq "${need_pkgs[@]}"
 fi
+
+# typst печатает PDF конспектов (internal/notes/pdf.go). Бинарник с фиксированной версией
+# и sha256 проверяет CI (.github/workflows/deploy.yml) и кладёт в артефакты деплоя.
+typst_src=$(need typst)
+install -m 755 "$typst_src" /usr/local/bin/typst
 
 ensure_swap() {
   local file=/swapfile
@@ -176,10 +183,22 @@ fi
 
 install -m 755 "$tg" "$APP/tg"
 install -m 755 "$rasp" "$APP/rasp"
+# quiz (очередь решения тестов): перезапуск только если бинарник изменился (sha256 старого и нового).
+quiz_sha_old=none
+if [[ -f "$APP/quiz" ]]; then
+  quiz_sha_old=$(sha256sum "$APP/quiz" | awk '{print $1}')
+fi
+quiz_sha_new=$(sha256sum "$quiz" | awk '{print $1}')
+install -m 755 "$quiz" "$APP/quiz"
+quiz_changed=0
+if [[ "$quiz_sha_old" != "$quiz_sha_new" ]]; then
+  quiz_changed=1
+fi
 install -m 755 "$panel" "$APP/panel"
 install -m 755 "$bbb" "$APP/bbb"
 install -m 644 "$unit_tg" /etc/systemd/system/ssau-tg.service
 install -m 644 "$unit_rasp" /etc/systemd/system/ssau-rasp.service
+install -m 644 "$unit_quiz" /etc/systemd/system/ssau-quiz.service
 install -m 644 "$unit_panel" /etc/systemd/system/ssau-panel.service
 install -m 644 "$unit_bbb" /etc/systemd/system/ssau-bbb.service
 install -m 644 "$unit_tunnel" /etc/systemd/system/ssau-tunnel.service
@@ -192,7 +211,7 @@ systemctl disable --now ssau-bot.service 2>/dev/null || true
 rm -f /etc/systemd/system/ssau-bot.service
 
 systemctl daemon-reload
-systemctl enable ssau.target ssau-tg.service ssau-rasp.service ssau-panel.service ssau-bbb.service
+systemctl enable ssau.target ssau-tg.service ssau-rasp.service ssau-quiz.service ssau-panel.service ssau-bbb.service
 
 # PANEL_TUNNEL=0 в .env: панель за своим Caddy с сертификатом, cloudflared не нужен.
 tunnel_on=1
@@ -238,12 +257,18 @@ if systemctl is-active --quiet ssau-bbb.service; then
 fi
 
 systemctl restart ssau-tg.service ssau-rasp.service ssau-panel.service
+# ssau-quiz перезапускаем только при новом бинарнике; если сервиса ещё нет в работе (первая установка) — стартуем.
+if [[ "$quiz_changed" -eq 1 ]]; then
+  systemctl restart ssau-quiz.service
+elif ! systemctl is-active --quiet ssau-quiz.service; then
+  systemctl start ssau-quiz.service
+fi
 [[ $tunnel_on -eq 0 ]] || systemctl restart ssau-tunnel.service
 if [[ "$bbb_was_active" -eq 1 ]]; then
   systemctl restart ssau-bbb.service
 fi
 sleep 1
-systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-panel.service || true
+systemctl --no-pager --full status ssau-tg.service ssau-rasp.service ssau-quiz.service ssau-panel.service || true
 if [[ "$bbb_was_active" -eq 1 ]]; then
   systemctl --no-pager --full status ssau-bbb.service || true
 else

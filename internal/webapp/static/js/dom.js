@@ -36,10 +36,6 @@ export function $(sel, root = document) {
   return root.querySelector(sel);
 }
 
-export function $$(sel, root = document) {
-  return Array.from(root.querySelectorAll(sel));
-}
-
 function fromHTML(markup) {
   const t = document.createElement("template");
   t.innerHTML = markup.trim();

@@ -276,7 +276,7 @@ func TestQuizSolveWithLLM(t *testing.T) {
 		t.Fatalf("expected notifications sent to user")
 	}
 	allNotifs := strings.Join(*sent, "\n---\n")
-	if !strings.Contains(allNotifs, "автоматически решён") {
+	if !strings.Contains(allNotifs, "Тест решён") {
 		t.Errorf("expected report notification about solved quiz, got: %s", allNotifs)
 	}
 	if !strings.Contains(allNotifs, "5,00") {
@@ -341,19 +341,20 @@ func TestQuizParseWithoutLLMKey(t *testing.T) {
 	sy.detectAndHandleOpenedQuizzes(ctx, *acc, cli, []model.MoodleItem{prevItem}, []model.MoodleItem{quizItem})
 	sy.Wait()
 
-	// Проверяем отметку quiz_parsed в базе
-	parsedVal, ok, err := st.GetSetting(fmt.Sprintf("quiz_parsed:%d:%d", acc.TelegramID, quizItem.CMID))
-	if err != nil || !ok || parsedVal == "" {
-		t.Fatalf("expected quiz_parsed setting set, ok=%v, val=%q, err=%v", ok, parsedVal, err)
-	}
-
-	// Проверяем, что отправлен полный текст вопросов
+	// Без ключа и без открытой попытки новую не начинаем: одно сообщение «нужен ключ ИИ»,
+	// текст теста не шлём, попытка не стартует.
 	allNotifs := strings.Join(*sent, "\n---\n")
-	if !strings.Contains(allNotifs, "Чему равна энтропия") || !strings.Contains(allNotifs, "Максимуму") {
-		t.Errorf("expected parsed questions and choices in notification, got: %s", allNotifs)
+	if !strings.Contains(strings.ToLower(allNotifs), "нужен ключ ии") {
+		t.Errorf("expected notice about missing AI key, got: %s", allNotifs)
+	}
+	if strings.Contains(allNotifs, "Чему равна энтропия") {
+		t.Errorf("без открытой попытки текст теста не должен уходить: %s", allNotifs)
+	}
+	if parsed, ok, _ := st.GetSetting(fmt.Sprintf("quiz_parsed:%d:%d", acc.TelegramID, quizItem.CMID)); ok && parsed != "" {
+		t.Errorf("quiz_parsed не должен ставиться без открытой попытки")
 	}
 
-	// Повторный синк — не должен повторно слать то же самое!
+	// Повторный синк — не должен повторно слать сообщение о ключе.
 	sentCountBefore := len(*sent)
 	sy.detectAndHandleOpenedQuizzes(ctx, *acc, cli, []model.MoodleItem{quizItem}, []model.MoodleItem{quizItem})
 	sy.Wait()
@@ -523,7 +524,7 @@ func TestQuizForceOverdue(t *testing.T) {
 	if v, _, _ := st.GetSetting(QuizForceKey(10, 777)); v != "" {
 		t.Fatal("флаг «пройти» не снят")
 	}
-	if !strings.Contains(strings.Join(*sent, "\n"), "автоматически решён") {
+	if !strings.Contains(strings.Join(*sent, "\n"), "Тест решён") {
 		t.Fatalf("нет отчёта: %v", *sent)
 	}
 }

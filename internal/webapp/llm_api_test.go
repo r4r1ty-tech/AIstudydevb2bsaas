@@ -33,7 +33,7 @@ func newAdminServer(t *testing.T) (*Server, *store.Store, []byte, string) {
 	s := New(&config.Config{
 		ListenAddr: config.DefaultListen, Timezone: config.DefaultTimezone,
 		AdminID: config.DefaultAdminID, Whitelist: append([]int64(nil), config.DefaultWhitelist...),
-		SecretKeyFile: keyFile, DBPath: dbPath, AdminLoginSuffix: "528",
+		SecretKeyFile: keyFile, DBPath: dbPath,
 		GeminiAPIKeys: []string{"Медведев:g1secret", "Пушкин:g2secret"}, OpenCodeAPIKey: "oc",
 		LLMAPIKey: "ch", LLMAPIURL: "https://cheap/v1", LLMModel: "glm-5.3-flash",
 	}, st, nil, "")

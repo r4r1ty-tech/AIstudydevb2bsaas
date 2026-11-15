@@ -78,6 +78,7 @@ type pageCtx struct {
 	allowed  map[string]bool   // url из выдачи: открывать можно только их
 	feedback map[int]string    // slot → почему прошлый ответ не принят
 	queried  map[string]bool
+	wrong    map[int][]string // slot → ранее проверенные неверные ответы (текстом)
 }
 
 func (pc *pageCtx) addFindings(f map[int]webFinding) {
@@ -92,6 +93,7 @@ func (pc *pageCtx) addFindings(f map[int]webFinding) {
 type pageAsk struct {
 	search map[int]string
 	open   []string
+	conf   map[int]float64 // slot → уверенность модели 0..1
 }
 
 // quizTag — метка для подробного лога: по ней grep'ом находятся человек (tg),
@@ -114,6 +116,8 @@ func (s *Syncer) solvePage(ctx context.Context, tag quizTag, c *moodle.Client, w
 	return s.solvePageWithOpts(ctx, tag, c, ws, chain, course, materials, questions, solvePageOpts{})
 }
 
+// solvePageWithOpts решает страницу: сначала вопросы, найденные в базе проверенных ответов
+// (сопоставленные с текущими вариантами по тексту), затем ИИ — только для остальных.
 func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, questions []moodle.QuizQuestion, opts solvePageOpts) (map[int]moodle.QuizAnswer, llm.Result, quizlog.Page, error) {
 	var pl quizlog.Page
 	var res llm.Result
@@ -133,6 +137,34 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 		return nil, res, pl, fmt.Errorf("решатель не умеет заполнять %s — пройди его руками", strings.Join(unsup, ", "))
 	}
 
+	known, rest := s.answersFromBase(tag, questions)
+	if len(known) > 0 {
+		// Пометка для отчёта: какие слоты взяты из базы, а не от ИИ.
+		pl.FromBase = sortedSlots(known)
+		pl.Notes = append(pl.Notes, fmt.Sprintf("ответы из базы проверенных: слоты %v", pl.FromBase))
+	}
+	if len(rest) == 0 {
+		logx.Debugf("uni", "quiz %s: вся страница из базы, ИИ не вызываю", tag)
+		return known, res, pl, nil
+	}
+
+	answers, res, aiPl, err := s.solvePageAI(ctx, tag, c, ws, chain, course, materials, questions, rest, opts)
+	aiPl.FromBase = pl.FromBase
+	aiPl.Notes = append(pl.Notes, aiPl.Notes...)
+	if answers == nil {
+		answers = make(map[int]moodle.QuizAnswer, len(known))
+	}
+	for slot, a := range known {
+		answers[slot] = a
+	}
+	return answers, res, aiPl, err
+}
+
+// solvePageAI решает через ИИ вопросы, которых нет в базе: раунды, веб-поиск, проверка ответов.
+// all — все вопросы страницы (исходные, для хэшей базы), questions — те, что решает ИИ.
+func (s *Syncer) solvePageAI(ctx context.Context, tag quizTag, c *moodle.Client, ws *websearch.Searcher, chain []llm.Target, course, materials string, all, questions []moodle.QuizQuestion, opts solvePageOpts) (map[int]moodle.QuizAnswer, llm.Result, quizlog.Page, error) {
+	var pl quizlog.Page
+	var res llm.Result
 	fast := opts.FastMode
 	if !fast && !opts.Deadline.IsZero() && time.Until(opts.Deadline) < quizFastModeRemaining {
 		fast = true
@@ -145,7 +177,13 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 	qs := s.describeQuestionImages(ctx, tag, c, questions, &pl)
 	logx.Debugf("uni", "quiz %s: вопросов %d, цепочка ИИ %d, материалы %d симв.", tag, len(qs), len(chain), len([]rune(materials)))
 
-	pc := &pageCtx{web: map[int]webFinding{}, opened: map[string]string{}, allowed: map[string]bool{}, queried: map[string]bool{}}
+	pc := &pageCtx{web: map[int]webFinding{}, opened: map[string]string{}, allowed: map[string]bool{}, queried: map[string]bool{}, feedback: map[int]string{}, wrong: map[int][]string{}}
+	wrongAll := s.wrongAnswersFor(tag, all)
+	for slot, list := range wrongAll {
+		for _, w := range list {
+			pc.wrong[slot] = append(pc.wrong[slot], w.text)
+		}
+	}
 	if ws != nil {
 		queries := map[int]string{}
 		for _, q := range qs {
@@ -169,6 +207,7 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 		rounds = rn
 		ans, ask, r, err := s.askPage(ctx, tag, rn, chain, course, materials, qs, pc)
 		pl.Attempts = append(pl.Attempts, r.Attempts...)
+		s.noteConfidence(&pl, ask)
 		if r.Text != "" {
 			pl.Raw += fmt.Sprintf("--- раунд %d ---\n%s\n", rn, r.Text)
 		}
@@ -220,6 +259,35 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 			break
 		}
 		logx.Debugf("uni", "quiz %s: раунд %d: уточнение, непринятых слотов %d", tag, rn, len(bad))
+	}
+	// Отрицательная память: ответ, совпавший с известным неверным, — один повтор запроса
+	// только для таких вопросов. Если и повтор даёт тот же ответ, отправляем его и пишем в журнал.
+	if conf := conflictingSlots(qs, final, wrongAll); len(conf) > 0 {
+		var again []moodle.QuizQuestion
+		for _, q := range qs {
+			for _, slot := range conf {
+				if q.Slot == slot {
+					again = append(again, q)
+					pc.feedback[slot] = "этот ответ уже проверен как НЕВЕРНЫЙ — дай другой вариант"
+				}
+			}
+		}
+		logx.Infof("uni", "quiz %s: слоты %v совпали с известными неверными ответами, повторяю запрос для них", tag, conf)
+		rn := rounds + 1
+		ans2, ask2, r2, err := s.askPage(ctx, tag, rn, chain, course, materials, again, pc)
+		pl.Attempts = append(pl.Attempts, r2.Attempts...)
+		s.noteConfidence(&pl, ask2)
+		if err != nil {
+			logx.Warnf("uni", "quiz %s: повтор для неверных ответов: %v", tag, err)
+		} else {
+			for slot, a := range ans2 {
+				final[slot] = a
+			}
+			if still := conflictingSlots(again, final, wrongAll); len(still) > 0 {
+				logx.Warnf("uni", "quiz %s: слоты %v снова дают известный неверный ответ, отправляю как есть", tag, still)
+			}
+		}
+		rounds = rn
 	}
 	for slot := range refined {
 		pl.Refined = append(pl.Refined, slot)
@@ -336,6 +404,8 @@ const quizSysPrompt = "Ты — отличник университета. Ре�
 	"- Отвечай на КАЖДЫЙ вопрос. Отказ, «невозможно решить», «нет данных» — запрещены: если данных мало, реши сам по своим знаниям и дай самый вероятный ответ с низкой confidence.\n" +
 	"- Задачи на коды (Шеннон-Фано, Хаффман, Элиас, декодирование) решай сам по шагам в уме и выдавай только результат.\n" +
 	"- Материалы лекций главнее интернета. В найденных банках ответов варианты бывают в другом порядке или от другого варианта теста — сверяй по тексту, а не по букве.\n" +
+	"- Если в условии есть раздел «Формат ответа» или «Пример» — ответ СТРОГО в этом формате, как в примере: те же разделители, та же запись, то же число элементов. Пример — образец формы, его числа не копируй.\n" +
+	"- Если в вопросе указано, что уже проверено и НЕВЕРНО, такой ответ не предлагай: дай другой.\n" +
 	"- Если ответ из прошлого раунда не принят, ниже указана причина — исправь."
 
 // askPage — один раунд: промпт со всем, что известно, ответ модели,
@@ -382,6 +452,7 @@ func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []ll
 	}
 	out := map[int]moodle.QuizAnswer{}
 	ask.search = map[int]string{}
+	ask.conf = map[int]float64{}
 	for _, a := range parsed.Answers {
 		q, ok := bySlot[a.Slot]
 		if !ok {
@@ -389,6 +460,9 @@ func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []ll
 			continue
 		}
 		out[a.Slot] = normalizeAnswer(q, a)
+		if a.Confidence != nil {
+			ask.conf[a.Slot] = *a.Confidence
+		}
 		logAnswer(tag, round, q, a, out[a.Slot])
 		if sq := strings.TrimSpace(a.Search); sq != "" {
 			ask.search[a.Slot] = sq
@@ -498,8 +572,14 @@ func buildQuizPrompt(course, materials string, qs []moodle.QuizQuestion, pc *pag
 				}
 			}
 		}
+		if fb := formatSection(q.Text); fb != "" {
+			fmt.Fprintf(&b, "ФОРМАТ ОТВЕТА из условия (ответ строго в этом формате, как в примере):\n%s\n", fb)
+		}
 		if pc != nil {
 			writeFindings(&b, pc.web[q.Slot])
+			if list := pc.wrong[q.Slot]; len(list) > 0 {
+				fmt.Fprintf(&b, "УЖЕ ПРОВЕРЕНО: неверно, такой ответ не предлагай: %s\n", strings.Join(list, " | "))
+			}
 			if why, ok := pc.feedback[q.Slot]; ok {
 				fmt.Fprintf(&b, "Прошлый ответ не принят: %s\n", why)
 			}
@@ -963,4 +1043,29 @@ func extractPageText(sel *goquery.Selection) (string, error) {
 		return strings.Join(strings.Fields(sel.Text()), " "), nil
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// noteConfidence переносит уверенность модели по слотам в отчёт страницы.
+func (s *Syncer) noteConfidence(pl *quizlog.Page, ask pageAsk) {
+	for slot, c := range ask.conf {
+		if pl.Confidence == nil {
+			pl.Confidence = map[int]float64{}
+		}
+		pl.Confidence[slot] = c
+	}
+}
+
+// formatMarkerRe — начало раздела «Формат ответа» или «Пример» в условии: слово в начале или
+// после разделителя и двоеточие/скобка/цифра/конец строки после него. «Например» и
+// «приведите пример кодирования» не совпадают.
+var formatMarkerRe = regexp.MustCompile(`(?i)(?:^|[\s.!?])(?:формат[а-я]*(?:\s+ответ[а-я]*)?|пример[а-я]*)\s*(?::|\(|\d|$)`)
+
+// formatSection — раздел условия от «Формат …»/«Пример …» до конца: его модель должна выполнить
+// буквально. Пустая строка, если раздела нет.
+func formatSection(text string) string {
+	loc := formatMarkerRe.FindStringIndex(text)
+	if loc == nil {
+		return ""
+	}
+	return strings.TrimSpace(text[loc[0]:])
 }

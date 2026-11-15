@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
@@ -156,7 +157,7 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 
 	if items, err := ReadSlideManifest(manifestJSONPath); err == nil {
 		for _, it := range items {
-			if !isSafeSlideFilename(it.File) {
+			if !archive.IsSafeSlideFilename(it.File) {
 				logx.Warnf("bbb", "GrabSlides: пропущена небезопасная запись в slides.json: file=%q", it.File)
 				continue
 			}
@@ -181,7 +182,7 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 		var mf map[string]string
 		if err := json.Unmarshal(data, &mf); err == nil {
 			for k, v := range mf {
-				if !isSafeSlideFilename(v) {
+				if !archive.IsSafeSlideFilename(v) {
 					logx.Warnf("bbb", "GrabSlides: пропущена небезопасная запись в .slides_meta.json: key=%q file=%q", k, v)
 					continue
 				}
@@ -237,7 +238,7 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 		}
 
 		file, alreadySaved := localSaved[slideKey]
-		if alreadySaved && !isSafeSlideFilename(file) {
+		if alreadySaved && !archive.IsSafeSlideFilename(file) {
 			alreadySaved = false
 		}
 		var fileExists bool
@@ -405,20 +406,6 @@ func (s *directSession) GrabSlides(ctx context.Context, dir string) (int, error)
 	return saved, nil
 }
 
-// isSafeSlideFilename проверяет, что имя файла слайда не содержит путей или обхода каталогов.
-func isSafeSlideFilename(name string) bool {
-	if name == "" || name == "." || name == ".." {
-		return false
-	}
-	if filepath.Base(name) != name || strings.Contains(name, "..") {
-		return false
-	}
-	if strings.ContainsAny(name, `/\`) {
-		return false
-	}
-	return true
-}
-
 // formatSlideShownTime форматирует время первого показа слайда и смещение относительно начала сессии.
 func formatSlideShownTime(firstShownAt, startedAt time.Time) (string, int, string) {
 	if firstShownAt.IsZero() {
@@ -554,10 +541,6 @@ func (s *directSession) describePresentations(slides []slideMeta) string {
 		parts = append(parts, fmt.Sprintf("%s: %d", s.presNameLocked(pid), counts[pid]))
 	}
 	return strings.Join(parts, "; ")
-}
-
-func (s *directSession) collectCurrentSlides() []slideMeta {
-	return s.collectAllSlides()
 }
 
 func (s *directSession) collectAllSlides() []slideMeta {

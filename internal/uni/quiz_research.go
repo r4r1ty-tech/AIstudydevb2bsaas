@@ -66,6 +66,11 @@ var quizNoise = regexp.MustCompile(`(?i)(выберите (один|одн?у|н
 func quizQuery(q moodle.QuizQuestion) string {
 	t := quizNoise.ReplaceAllString(q.Text, " ")
 	t = strings.Join(strings.Fields(t), " ")
+	// Раздел «Формат ответа» / «Пример» — форма ответа, не суть задачи: в поиск не идёт.
+	// Сам раздел модель получает целиком в промпте (formatSection).
+	if loc := formatMarkerRe.FindStringIndex(t); loc != nil {
+		t = strings.TrimSpace(t[:loc[0]])
+	}
 	r := []rune(t)
 	if len(r) > quizQueryRunes {
 		cut := string(r[:quizQueryRunes])

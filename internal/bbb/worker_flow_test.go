@@ -524,7 +524,7 @@ func TestAttachRecorderGuards(t *testing.T) {
 	}
 }
 
-// Пишущая вкладка заходит до звонка: тишина до начала пары — не повод для алерта.
+// Пишущая сессия заходит до звонка: тишина до начала пары — не повод для алерта.
 func TestOnLevelNoSilenceAlertBeforeLessonStarts(t *testing.T) {
 	h := newWorkerHarness(t)
 	early := model.Lesson{Discipline: "Сети", Begin: time.Now().Add(10 * time.Minute)}

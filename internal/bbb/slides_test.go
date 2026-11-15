@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 )
 
 // TestDDPCollectionSlideMergeAndFirstShownAt проверяет мерж полей DDP added/changed
@@ -647,7 +649,7 @@ func TestGrabSlidesUnsafeFilenamesIgnored(t *testing.T) {
 		t.Fatalf("manifest len = %d, want 3", len(manifest))
 	}
 	for _, it := range manifest {
-		if !isSafeSlideFilename(it.File) {
+		if !archive.IsSafeSlideFilename(it.File) {
 			t.Errorf("небезопасное имя файла в итоговом slides.json: %q", it.File)
 		}
 		if _, err := os.Stat(filepath.Join(slidesDir, it.File)); err != nil {
@@ -664,7 +666,7 @@ func TestGrabSlidesUnsafeFilenamesIgnored(t *testing.T) {
 		t.Fatalf("Unmarshal .slides_meta.json: %v", err)
 	}
 	for k, v := range savedMeta {
-		if !isSafeSlideFilename(v) {
+		if !archive.IsSafeSlideFilename(v) {
 			t.Errorf("небезопасное имя файла в итоговом .slides_meta.json[%q] = %q", k, v)
 		}
 	}

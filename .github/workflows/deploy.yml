@@ -18,6 +18,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # typst нужен тестам печати PDF конспектов; без него они пропускаются.
+      - name: Скачать typst v0.15.1 (sha256)
+        run: |
+          set -euo pipefail
+          TYPST_SHA256=a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c
+          mkdir -p "$RUNNER_TEMP/typst"
+          curl -fsSL -o "$RUNNER_TEMP/typst.tar.xz" https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz
+          echo "$TYPST_SHA256  $RUNNER_TEMP/typst.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP/typst" --strip-components=1
+          echo "$RUNNER_TEMP/typst" >> "$GITHUB_PATH"
+
       - name: Тесты
         run: CGO_ENABLED=0 go test ./...
 
@@ -63,8 +74,20 @@ jobs:
           mkdir -p bin
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/tg ./cmd/tg
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/rasp ./cmd/rasp
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/quiz ./cmd/quiz
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/panel ./cmd/panel
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o bin/bbb ./cmd/bbb
+
+      - name: Положить typst в артефакты (sha256 как в тестах)
+        run: |
+          set -euo pipefail
+          TYPST_SHA256=a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c
+          curl -fsSL -o "$RUNNER_TEMP/typst.tar.xz" https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz
+          echo "$TYPST_SHA256  $RUNNER_TEMP/typst.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/typst" bin
+          tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP/typst" --strip-components=1
+          install -m 755 "$RUNNER_TEMP/typst/typst" bin/typst
+          bin/typst --version
 
       - name: Залить на VDS
         uses: appleboy/scp-action@v0.1.7
@@ -73,7 +96,7 @@ jobs:
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
-          source: bin/tg,bin/rasp,bin/panel,bin/bbb,deploy/ssau-tg.service,deploy/ssau-rasp.service,deploy/ssau-panel.service,deploy/ssau-bbb.service,deploy/ssau-tunnel.service,deploy/ssau.target,deploy/remote.sh,deploy/tunnel.sh,deploy/wake.py
+          source: bin/tg,bin/rasp,bin/quiz,bin/panel,bin/bbb,bin/typst,deploy/ssau-tg.service,deploy/ssau-rasp.service,deploy/ssau-quiz.service,deploy/ssau-panel.service,deploy/ssau-bbb.service,deploy/ssau-tunnel.service,deploy/ssau.target,deploy/remote.sh,deploy/tunnel.sh,deploy/wake.py
           target: /tmp/ssau-deploy
           strip_components: 1
           overwrite: true
@@ -97,5 +120,5 @@ jobs:
           envs: LLM_API_KEY,LLM_API_URL,LLM_MODEL,LECTURES_TOKEN,LECTURES_OWNER,LECTURES_REPO,LECTURES_BRANCH
           script: |
             set -euo pipefail
-            chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/tg /tmp/ssau-deploy/rasp /tmp/ssau-deploy/panel /tmp/ssau-deploy/bbb /tmp/ssau-deploy/tunnel.sh /tmp/ssau-deploy/wake.py
+            chmod +x /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy/tg /tmp/ssau-deploy/rasp /tmp/ssau-deploy/quiz /tmp/ssau-deploy/panel /tmp/ssau-deploy/bbb /tmp/ssau-deploy/typst /tmp/ssau-deploy/tunnel.sh /tmp/ssau-deploy/wake.py
             bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy

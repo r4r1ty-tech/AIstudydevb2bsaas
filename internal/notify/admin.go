@@ -39,7 +39,7 @@ func botFor(token string) (*gotgbot.Bot, error) {
 		return nil, fmt.Errorf("botFor: NewBot: %w", err)
 	}
 	botInst, botTok = b, token
-	logx.Infof("notify", "botFor: created bot username=%s", b.User.Username)
+	logx.Infof("notify", "botFor: created bot username=%s", b.Username)
 	return b, nil
 }
 

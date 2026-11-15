@@ -140,7 +140,7 @@ func newFake(t *testing.T) *fakeUni {
 			return
 		}
 		if r.URL.Path == "/moodle/mod/quiz/view.php" {
-			w.Write([]byte(`<div class="quizinfo"><p>Разрешено попыток: 1</p></div><div class="quizstartbuttondiv"></div>`))
+			_, _ = w.Write([]byte(`<div class="quizinfo"><p>Разрешено попыток: 1</p></div><div class="quizstartbuttondiv"></div>`))
 			return
 		}
 		http.NotFound(w, r)

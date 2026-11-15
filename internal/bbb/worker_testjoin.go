@@ -116,7 +116,6 @@ func (w *Worker) ensureTestN(ctx context.Context, tj model.TestJoin, now time.Ti
 		if tj.Want != "" && tj.Mode != "" && tj.Mode != tj.Want {
 			logx.Debugf("bbb", "ensureTestN: mode switch %s -> %s", tj.Mode, tj.Want)
 			w.stopTest(ctx, "switch", false)
-			live = false
 		} else {
 			w.watchTest(ctx, sess, tj, now)
 			return
@@ -352,7 +351,7 @@ func (w *Worker) stopTest(ctx context.Context, reason string, ping bool) {
 		w.hogs().Release()
 	}
 	if !ok && reason != "off" {
-		// Нечего закрывать: не затираем статус (например, «идёт пара: Chrome занят»)
+		// Нечего закрывать: не затираем статус (например, «идёт пара: воркер занят лекцией»)
 		// и не пишем в БД каждый тик.
 		logx.Debugf("bbb", "stopTest: nothing live reason=%s", reason)
 		return

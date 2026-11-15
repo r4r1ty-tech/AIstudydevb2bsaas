@@ -43,9 +43,9 @@ type Worker struct {
 	recFailAt    map[string]time.Time // ключ встречи → когда не стартовала запись
 	recFailN     map[string]int       // ключ встречи → сколько раз подряд запись не стартовала
 	noBBBAdmin   map[int64]struct{}   // пара → админу про «нет ссылки» уже писали
-	audioMiss    map[string]int       // пишущая вкладка не в аудио, тиков подряд
+	audioMiss    map[string]int       // пишущая сессия не в аудио, тиков подряд
 	joining      map[string]struct{}
-	seatedAt     map[string]time.Time // когда вкладка села (лобби или комната) — для лога выхода
+	seatedAt     map[string]time.Time // когда сессия села (лобби или комната) — для лога выхода
 	testPaused   bool
 	lectureNow   bool      // этот тик решил сидеть на паре — тяжёлые задачи ждут
 	testFailN    int       // неудачные тест-заходы подряд
@@ -123,7 +123,7 @@ func packTag(p *model.LecturePack) string {
 	return fmt.Sprintf("pack=%s lesson=%d %s", p.Dir, p.LessonID, p.Discipline)
 }
 
-// loadProxies reads the SOCKS5 list; every browser tab then gets its own exit.
+// loadProxies reads the SOCKS5 list; every session then gets its own exit.
 func loadProxies(path string) *proxyrelay.Pool {
 	list, err := proxyrelay.ParseFile(path)
 	if err != nil {
@@ -228,7 +228,7 @@ func (w *Worker) tick(ctx context.Context) {
 				}
 				leave := w.ensureLeave(key, lesson.Finish)
 				if w.isRecorder(meetKey, key) {
-					// Пишущая вкладка сидит до звонка: хвост лекции не теряем.
+					// Пишущая сессия сидит до звонка: хвост лекции не теряем.
 					leave = lesson.Finish
 				}
 				if !ShouldBeInRoom(now, EnterAt(lesson.Begin, intent), leave) {
@@ -293,7 +293,7 @@ func (w *Worker) tick(ctx context.Context) {
 	w.lectureNow = needLecture
 	w.mu.Unlock()
 
-	// Тест — отдельная сущность (settings.test_join). Chrome один:
+	// Тест — отдельная сущность (settings.test_join). Пара важнее:
 	// если идёт пара — тест гасим; иначе крутим тест.
 	if needLecture {
 		w.pauseTest(ctx)
@@ -419,7 +419,7 @@ func (w *Worker) missingBBB(ctx context.Context, u model.User, lesson model.Less
 	))
 }
 
-// chooseRecorder: одна пишущая вкладка на встречу. Живой рекордер среди тех,
+// chooseRecorder: одна пишущая сессия на встречу. Живой рекордер среди тех,
 // кто сейчас должен быть в комнате, остаётся; иначе выбираем того, кто зашёл
 // раньше (сначала уже сидящих в комнате по seatedAt, затем по EnterAt),
 // при равенстве — детерминированный тай-брейк по TelegramID и lesson.ID.
@@ -458,7 +458,7 @@ func (w *Worker) chooseRecorder(meetKey string, here []pending, now time.Time) i
 		}
 		return -1
 	}
-	// Каждая новая попытка — перезаход вкладки на глазах у преподавателя.
+	// Каждая новая попытка — перезаход сессии на глазах у преподавателя.
 	// Запись не стартует раз за разом — сидим до конца пары просто присутствием.
 	if fails >= maxRecFails {
 		return -1
@@ -501,7 +501,7 @@ func (w *Worker) chooseRecorder(meetKey string, here []pending, now time.Time) i
 }
 
 // promoteRecorder: выбранный рекордер сидит без звука (presence) — переоткрываем
-// его вкладку с записью. Если он уже пишет, ничего не делаем.
+// его сессию с записью. Если он уже пишет, ничего не делаем.
 func (w *Worker) promoteRecorder(ctx context.Context, meetKey string, p pending) {
 	w.mu.Lock()
 	_, live := w.sessions[p.key]
@@ -924,10 +924,10 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 	}
 }
 
-// audioAlertAfter — сколько тиков подряд пишущая вкладка не в аудио до алерта.
+// audioAlertAfter — сколько тиков подряд пишущая сессия не в аудио до алерта.
 const audioAlertAfter = 4
 
-// checkAudio: пишущая вкладка в комнате должна быть в аудио — иначе пишем тишину.
+// checkAudio: пишущая сессия в комнате должна быть в аудио — иначе пишем тишину.
 // Каждый тик короткая попытка подключить, через ~минуту — одно сообщение админу.
 func (w *Worker) checkAudio(ctx context.Context, lesson model.Lesson, key string, sess Session) {
 	if !w.isRecorderSession(key) {
@@ -997,7 +997,7 @@ func (w *Worker) leave(ctx context.Context, telegramID, lessonID int64, key, rea
 	w.closeSession(ctx, telegramID, lessonID, key, reason, true)
 }
 
-// closeSession закрывает вкладку (с записью — склейка сегментов) и снимает
+// closeSession закрывает сессию (с записью — склейка сегментов) и снимает
 // presence этой пары. event=false — служебное закрытие (вылет, передача записи).
 func (w *Worker) closeSession(ctx context.Context, telegramID, lessonID int64, key, reason string, event bool) {
 	logx.Debugf("bbb", "closeSession: key=%s tg=%d lesson=%d reason=%q", key, telegramID, lessonID, reason)

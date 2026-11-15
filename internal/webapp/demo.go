@@ -73,7 +73,7 @@ func NewDemo(cfg *config.Config) *Server {
 	loc := loadLocation(c.Timezone)
 	clock := demoClock(loc, time.Now())
 	d := newDemoSource(loc, clock)
-	logx.Infof("webapp", "demo: панель на тестовых данных, часы сдвинуты на %s", clock().Sub(time.Now()).Round(time.Minute))
+	logx.Infof("webapp", "demo: панель на тестовых данных, часы сдвинуты на %s", time.Until(clock()).Round(time.Minute))
 	return buildServer(&c, d, d.moodle, d.refresh, "", clock, true)
 }
 

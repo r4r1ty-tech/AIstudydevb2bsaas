@@ -65,14 +65,6 @@ func (w *Worker) setStatus(p *model.LecturePack, to, reason string) {
 	logx.Infof("bbb", "pack: %s статус %s → %s, причина: %s", packTag(p), from, to, reason)
 }
 
-func statSize(path string) int64 {
-	st, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return st.Size()
-}
-
 // rtpOf — сколько RTP-пакетов принял WebRTC-сессия; false, если сессия не считает.
 func rtpOf(sess Session) (uint64, bool) {
 	if r, ok := sess.(interface{ RTPPackets() uint64 }); ok {
@@ -88,8 +80,8 @@ func rtpText(n uint64, ok bool) string {
 	return strconv.FormatUint(n, 10)
 }
 
-// attachRecorder вешает запись на вкладку; recording=false — запись не стартовала,
-// вкладка остаётся просто присутствием.
+// attachRecorder вешает запись на сессию; recording=false — запись не стартовала,
+// сессия остаётся просто присутствием.
 func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.Lesson, url string) (Session, bool) {
 	if w == nil || w.Store == nil || sess == nil {
 		return sess, false
@@ -197,7 +189,7 @@ func (w *Worker) attachRecorder(ctx context.Context, sess Session, lesson model.
 			logx.Warnf("bbb", "recording: склейка %s не удалась: %v — статус остаётся recording, разберёт promoteStuckRecording", packTag(pack), merr)
 		} else {
 			audio := archive.AudioFile(abs)
-			logx.Infof("bbb", "recording: %s файл=%s размер=%d байт сегментов=%d", packTag(pack), audio, statSize(audio), nSegs)
+			logx.Infof("bbb", "recording: %s файл=%s размер=%d байт сегментов=%d", packTag(pack), audio, archive.FileSize(audio), nSegs)
 		}
 		if merr != nil {
 			return
@@ -284,7 +276,7 @@ func (w *Worker) maybeHarvest(ctx context.Context, now time.Time) {
 		logx.Debugf("bbb", "maybeHarvest: already done day=%s", day)
 		return
 	}
-	// Слайды не поднимают третий Chromium, пока идёт пара/тест.
+	// Слайды (тихий режим) не стартуют, пока идёт пара или тест.
 	if !w.beginJob(true) {
 		logx.Debugf("bbb", "maybeHarvest: busy, skip day=%s", day)
 		return
@@ -657,7 +649,7 @@ func (w *Worker) harvestSlides(ctx context.Context, p *model.LecturePack) {
 }
 
 // buildNotes builds and publishes one pack; false means it failed.
-// notesBuild — сборка конспекта; в тестах подменяется заглушкой (PDF без Chromium не собрать).
+// notesBuild — сборка конспекта; в тестах подменяется заглушкой (PDF без typst не собрать).
 var notesBuild = notes.Build
 
 func (w *Worker) buildNotes(ctx context.Context, id int64) bool {

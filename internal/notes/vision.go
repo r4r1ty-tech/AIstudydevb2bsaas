@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
@@ -534,26 +535,13 @@ func readSlideManifest(slidesDir string) []slideManifestItem {
 	}
 	items := make([]slideManifestItem, 0, len(rawItems))
 	for _, it := range rawItems {
-		if it.File != "" && !isSafeSlideFilename(it.File) {
+		if it.File != "" && !archive.IsSafeSlideFilename(it.File) {
 			logx.Warnf("notes", "DescribeSlides: пропущена небезопасная запись в slides.json: file=%q", it.File)
 			continue
 		}
 		items = append(items, it)
 	}
 	return items
-}
-
-func isSafeSlideFilename(name string) bool {
-	if name == "" || name == "." || name == ".." {
-		return false
-	}
-	if filepath.Base(name) != name || strings.Contains(name, "..") {
-		return false
-	}
-	if strings.ContainsAny(name, `/\`) {
-		return false
-	}
-	return true
 }
 
 func isSlideImageName(name string) bool {

@@ -24,15 +24,18 @@
 | `RECORDINGS_DIR` | `recordings` | Корень записей, слайдов, конспектов |
 | `BBB_DRY_RUN` | `0` | `1` — не ходить в сеть BBB (заглушка `DryJoiner`) |
 | `LECTURE_PAUSE` | `1` | Замораживать сторонние «тяжёлые» процессы на время пары |
-| `CHROME_BIN` | — | Путь к Chromium (используется только в `notes/pdf.go` для печати PDF конспектов) |
+| `TYPST_BIN` | `typst` (из PATH) | Путь к бинарнику Typst (`notes/pdf.go`, печать PDF конспектов). На VDS: `/usr/local/bin/typst` |
 | `PROXY_FILE` | `/opt/ssau-bot/proxies.txt` | SOCKS5-список `login:password@ip:port`, по строке. Есть файл — каждая сессия `bbb` идёт через свой прокси |
 | `GEMINI_API_KEYS` | — | Ключи Google AI Studio через запятую (бесплатный тариф). Основная цепочка (`PoolChain`) для конспектов, STT, vision и пула: `gemini-4-hydrogen` → `gemini-3.6-flash` → `gemini-3.5-flash-lite`, внутри модели ключи (включая личные с `share_pool=1`) перемешиваются (`internal/llm`) |
 | `OPENCODE_API_KEYS` / `OPENCODE_API_KEY` | — | OpenCode Zen, бесплатная модель `glm-5.3-flash-free` — хвост цепочки. Ключи (и в `GEMINI_API_KEYS`) подписываются владельцем: `Зуев:oc_sk_…` — подпись видна в панели |
-| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | `cheaper` — **только админ**: его запасной вариант после своего выбора (`muse-spark-1.3-contributor` → `glm-5.3-flash`, `LLM_MODEL` в конце, если другой). В `PoolChain` конспектов не входит. Старые `DEEPSEEK_*` читаются как фолбэк |
-| `ADMIN_LOGIN_SUFFIX` | `123` | **Устарело:** оставлено в конфиге только для обратной совместимости, прав администратора больше **не** даёт (`access.IsAdmin` проверяет строго `ADMIN_TELEGRAM_ID`) |
-| `MOODLE_WORKERS` | `4` | Число параллельных воркеров в `uni.Syncer` (`MoodleWorkersLimit()`) для обхода и решения тестов Moodle |
-| `ASSEMBLYAI_API_KEY` | — | Платный фоллбэк STT для конспектов: используется, только если бесплатный пул Gemini (`transcribeGemini`) не сработал; дальше Fish, затем Groq |
-| `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Запасные платные ключи STT/vision (после бесплатного пула Gemini) |
+| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | `cheaper` — **только админ**: его запасной вариант после своего выбора (`muse-spark-1.3-contributor` → `glm-5.3-flash`, `LLM_MODEL` в конце, если другой). В `PoolChain` конспектов не входит. **Используется и для расшифровки аудио** (`LLM_API_KEY` + `LLM_API_URL`, второй провайдер STT после пула Gemini, модель — `CHEAPER_STT_MODEL`, см. раздел «Расшифровка лекций (STT)»). Старые `DEEPSEEK_*` читаются как фолбэк |
+| `MOODLE_WORKERS` | `4` | Число параллельных воркеров в `uni.Syncer` (`MoodleWorkersLimit()`) для обхода Moodle |
+| `QUIZ_MODE` | `service` | `service` — тест ставится в очередь в базе (`quiz_jobs`), решает сервис `ssau-quiz`; `inline` — решает пул в процессе `rasp`, как раньше (для локальной разработки и тестов). Подробно — раздел «Решение тестов (ssau-quiz)» |
+| `QUIZ_MAX_PARALLEL` | `50` | Сколько тестов `ssau-quiz` решает одновременно, у каждого свой ключ ИИ |
+| `QUIZ_MOODLE_RPS` | `3` | Входов и стартов попыток Moodle в секунду на весь процесс `ssau-quiz` (общий ограничитель). Плюс случайный разнос старта каждой задачи 0–5 с |
+| `MOODLE_QUIZ_WORKERS` | `4` | Только при `QUIZ_MODE=inline`: сколько тестов решает пул процесса `rasp` |
+| `ASSEMBLYAI_API_KEY` | — | Платный фоллбэк STT для конспектов: порядок STT — gemini → cheaper (`LLM_API_*`) → assemblyai → fish → groq; AssemblyAI идёт после Gemini и cheaper, если они не сработали |
+| `FISH_STUDIO_*`, `GROK_*`, `GROQ_*` | — | Запасные платные ключи STT/vision: Fish и Groq идут в STT после AssemblyAI (порядок — см. раздел «Расшифровка лекций (STT)») |
 | `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH` | `r4r1ty-tech` / `LectionsSSAU` / `main` | Выгрузка конспектов в GitHub. Токен `remote.sh` берёт из `LECTURES_TOKEN` или `gh auth token` на сервере |
 | `VOSK_MODEL` / `VOSK_SCRIPT` | `/opt/ssau-bot/vosk-model`, `/opt/ssau-bot/wake.py` | Вейкворды |
 | `WHITELIST_EXTRA` | — | Доп. Telegram id через запятую |
@@ -80,6 +83,16 @@
 - Бесплатный лимит OpenCode Zen общий на аккаунт (`glm-5.3-flash-free`), поэтому OpenCode — только хвост цепочки.
 - Повтор решения после неудачи не ограничен по числу попыток: пока тест открыт и не решён, каждые 30 мин тратится доступная квота (с учётом cooldown `KeyPool`).
 - Между тиками разных аккаунтов синк и решение тестов распараллелены (`MOODLE_WORKERS=4`, до 4 страниц и до 4 картинок за волну в `uni`, семафор 2 одновременных вызова на ключ в `KeyPool`).
+
+## Расшифровка лекций (STT)
+
+Порядок провайдеров в `notes.Transcribe` (`internal/notes/fish.go`); пропускается провайдер, у которого нет ключа:
+
+1. **gemini** — бесплатный пул `GEMINI_API_KEYS`. Запись режется на куски по 10 мин с перекрытием 8 с и идёт параллельно (`transcribeGemini`). Кусок, который Gemini не расшифровал после перебора всех ключей, уходит в **cheaper** — только этот кусок, остальные Gemini не пересчитывает. Если cheaper тоже не справился, вся расшифровка переходит к следующему провайдеру.
+2. **cheaper** (`internal/notes/cheaper_stt.go`) — админский `LLM_API_KEY` + `LLM_API_URL`, запрос `POST {LLM_API_URL}/audio/transcriptions` (multipart, `language=ru`, `response_format=verbose_json`). Адрес можно задавать с `/v1` и без него, как у чат-провайдера. Модель — `CHEAPER_STT_MODEL` (по умолчанию `whisper-large-v3-turbo`). Куски по 10 мин, mp3 mono 16 кГц 48 кбит/с, до 4 параллельно. Ответы 429 и 5xx повторяются дважды: пауза по `Retry-After` (не больше минуты), иначе 2 с и 4 с.
+3. **assemblyai** → 4. **fish** → 5. **groq** — платные запасные.
+
+Правило «cheaper в конспектах не используется» (`ValidateChain`, `ErrCheaperNotAllowed`) действует для текста конспектов, слайдов и вопросов `Ask`. Исключение только одно: расшифровка аудио через этот провайдер. Расход админского ключа cheaper растёт на каждую лекцию, которую не смог обработать пул Gemini.
 
 ## Кто есть кто
 
@@ -155,6 +168,41 @@ read -rp 'Логин: ' UNI_LOGIN; read -rsp 'Пароль: ' UNI_PASSWORD; echo
 
 Ничего не сохраняет, печатает только что удалось достать (пары по неделям, ссылки BBB, ИОТ, курсы и сроки Moodle).
 
+## Решение тестов (ssau-quiz)
+
+Синк Moodle в `rasp` только находит открытые тесты. Решение идёт в отдельном сервисе `ssau-quiz` (`cmd/quiz`), а связывает их очередь в таблице `quiz_jobs` общей базы:
+
+1. `rasp` видит открытый тест (или «Пройти» из панели) и ставит задачу `EnqueueQuizJob`. Пара (аккаунт, тест) одна: если задача уже `queued` или `running`, повтора не будет. «Пройти» поднимает приоритет (`forced`).
+2. `ssau-quiz` атомарно берёт задачу (`ClaimQuizJob`): сначала «Пройти», потом тесты с ближайшим сроком закрытия, потом по времени постановки. У одного аккаунта одновременно решается один тест.
+3. Пока тест решается, аренда задачи (10 минут) продлевается каждые 2 минуты. Если процесс умер, аренда истекает, и другой захват забирает задачу. Попытка Moodle при этом продолжается той же (старт не повторяется).
+4. Итог задачи: `done` — тест решён; `failed` — не решён, `last_error` говорит почему. Повтор идёт по прежним правилам: через `quiz_fail` на следующем синке, после 6 неудач подряд только по «Пройти».
+
+Остановка `ssau-quiz` (деплой, `systemctl stop`) не теряет тесты: незавершённые задачи возвращаются в `queued`, попытка Moodle продолжится. `TimeoutStopSec=60` даёт время на возврат. Деплой перезапускает `ssau-quiz` только если изменился бинарник (сравнивается sha256 в `remote.sh`); `rasp` и `tg` при деплое не трогают решение.
+
+Вход и старт попытки в Moodle идут через общий в процессе ограничитель `QUIZ_MOODLE_RPS`, чтобы сотни входов не пришли с одного IP разом. Остальное решение (страницы, ИИ, перелогин, журнал `quiz`) — то же, что и в `inline`.
+
+Если `ssau-quiz` не запущен, тесты копятся в очереди и не решаются, а `rasp` продолжает синк. Проверить очередь (sqlite3 на сервере, база `/opt/ssau-bot/data/bot.db`):
+
+```bash
+DB=/opt/ssau-bot/data/bot.db
+# сколько задач в каждом статусе
+sqlite3 -header -column "$DB" "SELECT status, COUNT(*) AS n FROM quiz_jobs GROUP BY status;"
+# активные задачи в порядке захвата
+sqlite3 -header -column "$DB" "SELECT id, telegram_id, cmid, title, forced, status, attempts, claimed_by, lease_until
+  FROM quiz_jobs WHERE status IN ('queued','running')
+  ORDER BY forced DESC, deadline IS NULL, deadline, created_at;"
+# задачи, которые держит умерший воркер (аренда истекла, но статус running)
+sqlite3 -header -column "$DB" "SELECT id, telegram_id, cmid, claimed_by, lease_until FROM quiz_jobs
+  WHERE status='running' AND lease_until < strftime('%Y-%m-%dT%H:%M:%SZ','now');"
+# последние неудачи с причиной
+sqlite3 -header -column "$DB" "SELECT id, telegram_id, cmid, last_error, updated_at FROM quiz_jobs
+  WHERE status='failed' ORDER BY updated_at DESC LIMIT 20;"
+```
+
+Задача с просроченной арендой уйдёт воркеру сама на следующем захвате, вручную ничего трогать не надо. Журналы — `journalctl -u ssau-quiz` и `logs/quiz.log` (строки `quiz-job <id>`, `quiz tg=… cmid=…`).
+
+Отключить очередь и решать тесты в `rasp`, как раньше: `QUIZ_MODE=inline` в `.env` и перезапуск `ssau-rasp`. В этом режиме `ssau-quiz` не нужен, а задачи в `quiz_jobs` не создаются.
+
 ## Логи
 
 Каждый процесс пишет `[LEVEL] component: message` в stderr (→ journald) и, если задан `LOG_FILE`, в тот же файл. Все четыре процесса могут писать в один `/opt/ssau-bot/ssau.log` — строки короткие и атомарные, префикс процесса различает источник.
@@ -211,6 +259,7 @@ systemctl restart ssau-bbb.service ssau-tg.service
 | `ssau.target` | Поднимает все сервисы |
 | `ssau-tg.service` | Telegram-бот |
 | `ssau-rasp.service` | Парсер + cron |
+| `ssau-quiz.service` | Решение тестов Moodle из очереди `quiz_jobs` (`cmd/quiz`), см. «Решение тестов (ssau-quiz)» |
 | `ssau-panel.service` | Mini App + API |
 | `ssau-bbb.service` | BBB-воркер на Go (`DirectJoiner`: DDP + Pion WebRTC + ffmpeg + Vosk) |
 | `ssau-tunnel.service` | HTTPS-туннель (cloudflared quick tunnel) — запасной, без своего домена. На проде выключен (`PANEL_TUNNEL=0`), в `ssau.target` не входит |
@@ -231,8 +280,8 @@ cat /etc/systemd/system/ssau-bbb.service
 Руками то же самое:
 
 ```bash
-for b in tg rasp panel bbb; do GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/$b ./cmd/$b; done
-scp -J jumphost bin/tg bin/rasp bin/panel bin/bbb deploy/ssau-*.service deploy/ssau.target deploy/remote.sh deploy/tunnel.sh deploy/wake.py root@203.0.113.20:/tmp/ssau-deploy/
+for b in tg rasp quiz panel bbb; do GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/$b ./cmd/$b; done
+scp -J jumphost bin/tg bin/rasp bin/quiz bin/panel bin/bbb deploy/ssau-*.service deploy/ssau.target deploy/remote.sh deploy/tunnel.sh deploy/wake.py root@203.0.113.20:/tmp/ssau-deploy/
 ssh -J jumphost root@203.0.113.20 'chmod +x /tmp/ssau-deploy/*; bash /tmp/ssau-deploy/remote.sh /tmp/ssau-deploy'
 ```
 
@@ -240,7 +289,8 @@ ssh -J jumphost root@203.0.113.20 'chmod +x /tmp/ssau-deploy/*; bash /tmp/ssau-d
 
 `remote.sh`:
 - доставляет бинарники, юниты, `tunnel.sh`, `wake.py` (и удаляет устаревший `audio.sh`);
-- через apt ставит недостающее: `chromium`, `ffmpeg`, `fonts-liberation`, `ca-certificates`, `python3`, `python3-pip`, `unzip`;
+- через apt ставит недостающее: `ffmpeg`, `ca-certificates`, `python3`, `python3-pip`, `unzip`;
+- кладёт `typst` в `/usr/local/bin/typst` из артефакта деплоя (бинарник v0.15.1, sha256 проверяет CI в `.github/workflows/deploy.yml`);
 - создаёт swap до 8 ГБ (оставляя ~10 ГБ резерва на диске), ставит `vosk` и модель (если нет), качает `cloudflared`;
 - при отсутствии `/opt/ssau-bot/.env` останавливается и просит скопировать его;
 - атомарно (через временный файл `0600` в Python) обновляет `LLM_*` и `GITHUB_*` в `/opt/ssau-bot/.env` (запрещая переводы строк в значениях) и дописывает дефолты (`LECTURE_PAUSE`, `VOSK_*`, `LOG_*`);
@@ -291,7 +341,7 @@ grep -aE 'audioOnce|audio joined|sfu|audio level|silent|ffmpeg|vosk' /opt/ssau-b
 
 - `dmesg -T | tail -50` — искать `oom-kill`;
 - `free -m`, `ps aux --sort=-%mem | head`;
-- `ffmpeg` + Vosk (и разовый `chromium` после пары для сборки PDF): смотри `free -m`, `ps aux --sort=-%mem | head`;
+- `ffmpeg` + Vosk (и разовый `typst` после пары для сборки PDF, пик около 60 МБ): смотри `free -m`, `ps aux --sort=-%mem | head`;
 - логи `bbb:`, `capture:`.
 
 **Парсер отдаёт 403/пусто**

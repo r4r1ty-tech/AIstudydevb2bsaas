@@ -116,7 +116,12 @@ func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Acc
 	for _, it := range forced {
 		// «Пройти» — ручная попытка: сбрасывает счётчик неудач.
 		s.resetQuizFailures(acc.TelegramID, it.CMID)
-		if !s.scheduleQuiz(ctx, acc, c, it, true) {
+		queued, err := s.dispatchQuiz(ctx, acc, c, it, true)
+		switch {
+		case err != nil:
+			s.notify(ctx, acc.TelegramID, "<b>Тест не поставлен в очередь решения</b>\n<b>Тест:</b> "+
+				html.EscapeString(it.Title)+"\nНажми «Пройти» ещё раз чуть позже.")
+		case !queued:
 			s.notify(ctx, acc.TelegramID, "<b>Тест уже решается или стоит в очереди</b>\n<b>Тест:</b> "+
 				html.EscapeString(it.Title)+"\nДождись отчёта.")
 		}
@@ -163,7 +168,8 @@ func (s *Syncer) detectAndHandleOpenedQuizzes(ctx context.Context, acc model.Acc
 			s.notify(ctx, acc.TelegramID, "<b>Открылся тест в Moodle!</b>\n"+FormatItem(it, now, s.loc()))
 		}
 		if wasClosed || wakeKicked || failedBefore {
-			s.scheduleQuiz(ctx, acc, c, it, false)
+			// Авто-постановка: в режиме service ошибку очереди уже записал dispatchQuiz в журнал.
+			_, _ = s.dispatchQuiz(ctx, acc, c, it, false)
 		}
 	}
 }
@@ -236,7 +242,12 @@ func (s *Syncer) solveQuiz(ctx context.Context, acc model.Account, it model.Mood
 		return
 	}
 	solved := false
-	err = s.withSession(ctx, acc, c, moodle.ErrBadLogin, moodle.ErrUnauthorized, func() error {
+	// Воркер очереди входит через общий ограничитель темпа; в inline-режиме клиент обычный.
+	var auth authClient = c
+	if s.quizPacer != nil {
+		auth = pacedMoodle{Client: c, pace: s.paceMoodle}
+	}
+	err = s.withSession(ctx, acc, auth, moodle.ErrBadLogin, moodle.ErrUnauthorized, func() error {
 		var authErr error
 		solved, authErr = s.processQuizErr(ctx, acc, c, it, forced)
 		return authErr
@@ -280,7 +291,7 @@ func (s *Syncer) quizFailCount(tg, cmid int64) int {
 // на следующем синке) и возвращает число неудач. На quizMaxAttempts шлёт пользователю одно сообщение.
 func (s *Syncer) markQuizRetry(ctx context.Context, tg int64, it model.MoodleItem) int {
 	n := s.quizFailCount(tg, it.CMID) + 1
-	_ = s.Store.SetSetting(quizFailKey(tg, it.CMID), fmt.Sprint(n))
+	_ = s.Store.SetSetting(quizFailKey(tg, it.CMID), strconv.Itoa(n))
 	if n == quizMaxAttempts {
 		title := it.Title
 		if title == "" {
@@ -386,6 +397,33 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 		return
 	}
 
+	// Ключ ИИ и открытая попытка решают, стартовать ли новую попытку: без ключа новую не начинаем.
+	cfg := s.getCfg()
+	var chain []llm.Target
+	if cfg != nil {
+		chain = access.QuizChainWithVault(cfg, s.Store, s.Vault, acc.TelegramID)
+	}
+	hasLLM := len(chain) > 0
+	open := info.InProgressAttemptID > 0
+	if !hasLLM && !open {
+		known := false
+		if forced {
+			n, nerr := s.Store.CountVerifiedForCMID(it.CMID)
+			known = nerr == nil && n > 0
+		}
+		if !forced || !known {
+			logx.Infof("uni", "quiz %s: выход: ключа ИИ нет и открытой попытки нет — новую не начинаю", tag)
+			s.noKeyNotice(ctx, acc.TelegramID, it, forced)
+			return
+		}
+		logx.Infof("uni", "quiz %s: ключа ИИ нет, но «Пройти» и в базе есть ответы по тесту — начинаю попытку", tag)
+	}
+
+	// Старт попытки — через общий ограничитель темпа (только у воркера очереди).
+	if perr := s.paceMoodle(ctx); perr != nil {
+		// Остановка на ограничителе: попытка не начата, это не неудача решения.
+		return false, nil
+	}
 	attempt, err := c.StartOrResumeAttempt(ctx, it.CMID)
 	if err != nil {
 		if errors.Is(err, moodle.ErrUnauthorized) {
@@ -420,12 +458,6 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 		cur = next
 	}
 
-	cfg := s.getCfg()
-	var chain []llm.Target
-	if cfg != nil {
-		chain = access.QuizChainWithVault(cfg, s.Store, s.Vault, acc.TelegramID)
-	}
-	hasLLM := len(chain) > 0
 	run := &quizlog.Run{At: s.now(), TelegramID: acc.TelegramID, CMID: it.CMID, Course: it.Course, Title: it.Title}
 	var chainNames []string
 	for _, t := range chain {
@@ -459,7 +491,12 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 		return
 	}
 
-	if !hasLLM {
+	// Ключа ИИ нет, но все вопросы теста найдены в базе проверенных ответов — решаем без ИИ.
+	baseOnly := !hasLLM && s.baseCoversPages(pages)
+	if baseOnly {
+		logx.Infof("uni", "quiz %s: ключа ИИ нет, все вопросы теста в базе проверенных ответов — решаю из базы", tag)
+	}
+	if !hasLLM && !baseOnly {
 		// Ключ ИИ не задан: отправляем полное содержание теста пользователю
 		parsedKey := fmt.Sprintf("quiz_parsed:%d:%d", acc.TelegramID, it.CMID)
 		if v, ok, err := s.Store.GetSetting(parsedKey); err == nil && ok && v != "" {
@@ -468,29 +505,33 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 		}
 
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("<b>Открыт тест: %s</b>\n", html.EscapeString(it.Title)))
-		b.WriteString(fmt.Sprintf("<b>Курс:</b> %s\n\n", html.EscapeString(it.Course)))
+		fmt.Fprintf(&b, "<b>Открыт тест: %s</b>\n", html.EscapeString(it.Title))
+		fmt.Fprintf(&b, "<b>Курс:</b> %s\n", html.EscapeString(it.Course))
+		if !open {
+			b.WriteString("<b>Внимание:</b> попытка уже открыта в Moodle, ответы не отправлены — закончи её сам.\n")
+		}
+		b.WriteString("\n")
 		b.WriteString("<b>Содержание теста:</b>\n")
 		for _, p := range pages {
 			for _, q := range p.Questions {
-				b.WriteString(fmt.Sprintf("\n<b>Вопрос %d</b> (%s):\n%s\n", q.Slot, q.QType, html.EscapeString(q.Text)))
+				fmt.Fprintf(&b, "\n<b>Вопрос %d</b> (%s):\n%s\n", q.Slot, q.QType, html.EscapeString(q.Text))
 				if q.Prompt != "" {
-					b.WriteString(fmt.Sprintf("<i>%s</i>\n", html.EscapeString(q.Prompt)))
+					fmt.Fprintf(&b, "<i>%s</i>\n", html.EscapeString(q.Prompt))
 				}
 				if len(q.Choices) > 0 {
 					for _, ch := range q.Choices {
-						b.WriteString(fmt.Sprintf("- [%s] %s\n", ch.Value, html.EscapeString(ch.Text)))
+						fmt.Fprintf(&b, "- [%s] %s\n", ch.Value, html.EscapeString(ch.Text))
 					}
 				}
 				if len(q.MatchOptions) > 0 {
 					for _, mo := range q.MatchOptions {
-						b.WriteString(fmt.Sprintf("- %s -> [выбор из вариантов]\n", html.EscapeString(mo.Question)))
+						fmt.Fprintf(&b, "- %s -> [выбор из вариантов]\n", html.EscapeString(mo.Question))
 					}
 				}
 			}
 		}
 		if it.URL != "" {
-			b.WriteString(fmt.Sprintf("\n<a href=\"%s\">Открыть тест в Moodle</a>", html.EscapeString(it.URL)))
+			fmt.Fprintf(&b, "\n<a href=\"%s\">Открыть тест в Moodle</a>", html.EscapeString(it.URL))
 		}
 		s.notify(ctx, acc.TelegramID, b.String())
 		if err := s.Store.SetSetting(parsedKey, s.now().Format(time.RFC3339)); err != nil {
@@ -557,6 +598,11 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 			s.markQuizPending(acc.TelegramID, it.CMID)
 			return false, nil
 		}
+		if sentCount > 0 {
+			// Часть страниц уже в Moodle, попытка не завершена: причину берёт runQuizJob для last_error задачи.
+			_ = s.Store.SetSetting(quizPartialKey(acc.TelegramID, it.CMID),
+				fmt.Sprintf("отправлено страниц %d из %d", sentCount, len(pages)))
+		}
 		s.reportQuizFailure(ctx, acc.TelegramID, it, runErr, sentCount > 0)
 		return
 	}
@@ -574,47 +620,60 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 		s.reportQuizFailure(ctx, acc.TelegramID, it, fmt.Errorf("ответы сохранены, но попытку не удалось завершить: %w", err), true)
 		return
 	}
-	_ = s.Store.SetSetting(quizFailKey(acc.TelegramID, it.CMID), "")
-	run.Status = quizlog.Solved
+	newRight, newWrong := recordVerifiedAnswers(ctx, s.Store, c, it.CMID, attempt.AttemptID, acc.TelegramID, it.Course)
+	learned := newRight+newWrong > 0
+	rin := newQuizReportInput(it, pages, allAnswers, run.Pages, result, usedModels, materials != "", !hasLLM)
+
+	// Полная оценка «X из Y» — тест решён. Оценка не разобрана — как раньше, решён.
+	n, d, graded := moodle.GradeFraction(result.Grade)
+	if !graded || n >= d {
+		_ = s.Store.SetSetting(quizFailKey(acc.TelegramID, it.CMID), "")
+		run.Status = quizlog.Solved
+		run.Grade, run.Feedback = result.Grade, result.Feedback
+		saveRun()
+		if err := s.Store.SetSetting(solvedKey, s.now().Format(time.RFC3339)); err != nil {
+			logx.Warnf("uni", "quiz %s: сохранить отметку «решён»: %v", tag, err)
+		}
+		logx.Infof("uni", "quiz %s: выход: успех — оценка=%q, модели=%v, за %s",
+			tag, result.Grade, usedModelList(usedModels), time.Since(started).Round(time.Millisecond))
+		rin.Solved = true
+		s.notify(ctx, acc.TelegramID, buildQuizReport(rin))
+		return true, nil
+	}
+
+	// Оценка неполная: попытка завершена, тест НЕ помечается решённым. Повтор новой попыткой —
+	// только если попытки остались и (метод «Высшая оценка» или ноль баллов). Иначе — «Пройти».
+	run.Status = quizlog.Partial
 	run.Grade, run.Feedback = result.Grade, result.Feedback
 	saveRun()
+	info, ierr := c.InspectQuiz(ctx, it.CMID)
+	if errors.Is(ierr, moodle.ErrUnauthorized) {
+		return false, err
+	}
+	if ierr != nil {
+		logx.Warnf("uni", "quiz %s: попытки и метод оценивания не прочитаны: %v", tag, ierr)
+		info = nil
+	}
+	fails := s.quizFailCount(acc.TelegramID, it.CMID)
+	retry, note := retryDecision(info, n, learned, fails)
+	if retry && fails >= quizMaxAttempts {
+		retry = false
+		note = fmt.Sprintf("автоповторов подряд уже было %d, дальше — по «Пройти»", quizMaxAttempts)
+	}
+	rin.Retry = retry
+	rin.Note = note
+	rin.setAttempts(info)
+	logx.Infof("uni", "quiz %s: выход: оценка неполная (%q), повтор=%t, попыток осталось=%d, метод=%q, причина=%q",
+		tag, result.Grade, retry, rin.AttemptsLeft, rin.Method, note)
 
-	if err := s.Store.SetSetting(solvedKey, s.now().Format(time.RFC3339)); err != nil {
-		logx.Warnf("uni", "quiz %s: сохранить отметку «решён»: %v", tag, err)
+	if retry {
+		s.markQuizRetry(ctx, acc.TelegramID, it)
+		s.notify(ctx, acc.TelegramID, buildQuizReport(rin))
+		return s.processQuizErr(ctx, acc, c, it, forced)
 	}
-	logx.Infof("uni", "quiz %s: выход: успех — оценка=%q, модели=%v, за %s",
-		tag, result.Grade, usedModelList(usedModels), time.Since(started).Round(time.Millisecond))
-
-	// Формируем отчёт пользователю
-	var b strings.Builder
-	b.WriteString("<b>Тест Moodle автоматически решён</b>\n")
-	b.WriteString(fmt.Sprintf("<b>Курс:</b> %s\n", html.EscapeString(it.Course)))
-	b.WriteString(fmt.Sprintf("<b>Тест:</b> %s\n", html.EscapeString(it.Title)))
-	if result.Grade != "" {
-		b.WriteString(fmt.Sprintf("<b>Оценка:</b> %s\n", html.EscapeString(result.Grade)))
-	}
-	if result.Feedback != "" {
-		b.WriteString(fmt.Sprintf("<b>Отзыв:</b> %s\n", html.EscapeString(result.Feedback)))
-	}
-	if len(usedModels) > 0 {
-		var ms []string
-		for m := range usedModels {
-			ms = append(ms, m)
-		}
-		b.WriteString(fmt.Sprintf("<b>Модель:</b> %s\n", html.EscapeString(strings.Join(ms, ", "))))
-	}
-	b.WriteString("\n<b>Выбранные ответы:</b>\n")
-	for _, p := range pages {
-		for _, q := range p.Questions {
-			ansStr := formatAnswerText(q, allAnswers[q.Slot])
-			b.WriteString(fmt.Sprintf("- <b>Вопрос %d:</b> %s\n", q.Slot, html.EscapeString(ansStr)))
-		}
-	}
-	if it.URL != "" {
-		b.WriteString(fmt.Sprintf("\n<a href=\"%s\">Открыть тест в Moodle</a>", html.EscapeString(it.URL)))
-	}
-	s.notify(ctx, acc.TelegramID, b.String())
-	return true, nil
+	_ = s.Store.SetSetting(quizFailKey(acc.TelegramID, it.CMID), "")
+	s.notify(ctx, acc.TelegramID, buildQuizReport(rin))
+	return false, nil
 }
 
 // processQuiz — processQuizErr без ошибки сессии: для вызовов, которые не перезапускают вход (тесты).
@@ -951,7 +1010,7 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 			}
 			notesPath := filepath.Join(packDir, "notes.md")
 			if data, err := os.ReadFile(notesPath); err == nil && len(data) > 0 {
-				b.WriteString(fmt.Sprintf("\n--- Конспект лекции %s №%d ---\n", p.Discipline, p.Number))
+				fmt.Fprintf(&b, "\n--- Конспект лекции %s №%d ---\n", p.Discipline, p.Number)
 				b.Write(data)
 				b.WriteString("\n")
 				notesRunes = utf8.RuneCount(data)
@@ -959,7 +1018,7 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 			if utf8.RuneCountInString(b.String()) < maxTotalChars {
 				transPath := filepath.Join(packDir, "transcript.txt")
 				if data, err := os.ReadFile(transPath); err == nil && len(data) > 0 {
-					b.WriteString(fmt.Sprintf("\n--- Транскрипт лекции %s №%d ---\n", p.Discipline, p.Number))
+					fmt.Fprintf(&b, "\n--- Транскрипт лекции %s №%d ---\n", p.Discipline, p.Number)
 					b.Write(data)
 					b.WriteString("\n")
 					transRunes = utf8.RuneCount(data)
@@ -1078,15 +1137,299 @@ func (s *Syncer) reportQuizFailure(ctx context.Context, id int64, it model.Moodl
 	}
 	var b strings.Builder
 	b.WriteString("<b>⚠️ Проблема с тестом</b>\n")
-	b.WriteString(fmt.Sprintf("<b>Тест:</b> %s (%s)\n", html.EscapeString(it.Title), html.EscapeString(it.Course)))
-	b.WriteString(fmt.Sprintf("<b>Что случилось:</b> %s\n", html.EscapeString(shortErr(err))))
+	fmt.Fprintf(&b, "<b>Тест:</b> %s (%s)\n", html.EscapeString(it.Title), html.EscapeString(it.Course))
+	fmt.Fprintf(&b, "<b>Что случилось:</b> %s\n", html.EscapeString(shortErr(err)))
 	if sent {
 		b.WriteString("Часть ответов уже сохранена в Moodle, попытку не завершал. Попробую ещё раз при следующем обновлении Moodle.")
 	} else {
 		b.WriteString("Попытку не завершал, пустые ответы не отправлял. Попробую ещё раз при следующем обновлении Moodle.")
 	}
 	if it.URL != "" {
-		b.WriteString(fmt.Sprintf("\n<a href=\"%s\">Открыть тест в Moodle</a>", html.EscapeString(it.URL)))
+		fmt.Fprintf(&b, "\n<a href=\"%s\">Открыть тест в Moodle</a>", html.EscapeString(it.URL))
 	}
 	s.notify(ctx, id, b.String())
+}
+
+// quizUnlimitedRetries — сколько автоповторов подряд допускается, если попыток не ограничено.
+const quizUnlimitedRetries = 3
+
+// retryDecision решает, запускать ли новую попытку после неполной оценки n баллов (n — числитель).
+// Повтор — только если появилось новое знание в базе (learned), попытки остались и:
+//   - ноль баллов: метод «Высшая оценка» или «Последняя попытка»;
+//   - ненулевая оценка: только «Высшая оценка» (при «Последней» и «Первой»/«Средней»
+//     новая попытка может понизить оценку).
+//
+// При неограниченном числе попыток автоповторов не больше quizUnlimitedRetries подряд (fails —
+// текущий счётчик quiz_fail). info == nil — попытки не прочитаны, повтора нет.
+func retryDecision(info *moodle.QuizInfo, n float64, learned bool, fails int) (bool, string) {
+	if info == nil {
+		return false, "не удалось прочитать попытки на странице теста — проверь в Moodle"
+	}
+	if info.AttemptsLeft() == 0 {
+		return false, "попыток не осталось"
+	}
+	if !learned {
+		return false, "в базе нет нового знания по этому тесту — повтор бессмысленен"
+	}
+	if info.Allowed == 0 && fails >= quizUnlimitedRetries {
+		return false, fmt.Sprintf("попытки не ограничены, автоповторов %d подряд уже было", quizUnlimitedRetries)
+	}
+	method := strings.ToLower(info.GradingMethod)
+	highest := strings.Contains(method, "высш")
+	last := strings.Contains(method, "последн")
+	if n == 0 {
+		if highest || last {
+			return true, ""
+		}
+		return false, fmt.Sprintf("метод оценивания «%s»: при нуле баллов повтор не запускаю", info.GradingMethod)
+	}
+	if highest {
+		return true, ""
+	}
+	return false, fmt.Sprintf("метод оценивания «%s»: повтор не запускаю, новая попытка может понизить оценку", info.GradingMethod)
+}
+
+// noKeyNotice — тест открыт, а решать некому: нет ключа ИИ и студент не начал попытку сам.
+// Без «Пройти» пишем один раз по тесту, чтобы синк не спамил.
+func (s *Syncer) noKeyNotice(ctx context.Context, tg int64, it model.MoodleItem, forced bool) {
+	key := fmt.Sprintf("quiz_nokey:%d:%d", tg, it.CMID)
+	if !forced {
+		if v, ok, _ := s.Store.GetSetting(key); ok && v != "" {
+			return
+		}
+		_ = s.Store.SetSetting(key, s.now().Format(time.RFC3339))
+	}
+	title := it.Title
+	if title == "" {
+		title = fmt.Sprintf("тест %d", it.CMID)
+	}
+	s.notify(ctx, tg, fmt.Sprintf("<b>Открыт тест, решать некому</b>\n<b>Тест:</b> %s\nНужен ключ ИИ в панели или пройди тест сам.",
+		html.EscapeString(title)))
+}
+
+// quizReportQuestion — строка отчёта по вопросу.
+type quizReportQuestion struct {
+	Slot   int
+	Kind   string
+	Text   string
+	Answer string
+	Mark   string // «верно», «неверно», пусто — отметки нет
+}
+
+// quizReportInput — всё, что показывает отчёт о попытке решения.
+type quizReportInput struct {
+	Title, Course, URL string
+	Grade              string
+	Method             string
+	Solved             bool
+	Retry              bool
+	Note               string
+	// AttemptsLeft: -1 — без ограничений, -2 — не прочитано, иначе сколько осталось.
+	AttemptsLeft  int
+	Models        []string
+	FromBaseNoKey bool
+	Confidence    []float64
+	Materials     bool
+	Search        string
+	FromBase      int
+	ByAI          int
+	Questions     []quizReportQuestion
+}
+
+// quizReportMaxRunes — предел текста отчёта; длинный список вопросов обрезается с пометкой.
+const quizReportMaxRunes = 3500
+
+// newQuizReportInput собирает отчёт из результатов попытки и страниц журнала.
+func newQuizReportInput(it model.MoodleItem, pages []*moodle.AttemptPage, answers map[int]moodle.QuizAnswer,
+	runPages []quizlog.Page, result *moodle.QuizResult, usedModels map[string]bool, materials, noKey bool) quizReportInput {
+	in := quizReportInput{
+		Title:         it.Title,
+		Course:        it.Course,
+		URL:           it.URL,
+		AttemptsLeft:  -2,
+		FromBaseNoKey: noKey,
+		Materials:     materials,
+	}
+	if result != nil {
+		in.Grade = result.Grade
+	}
+	for m := range usedModels {
+		in.Models = append(in.Models, m)
+	}
+	sort.Strings(in.Models)
+
+	searchState := "нет"
+	for _, rp := range runPages {
+		in.FromBase += len(rp.FromBase)
+		for _, c := range rp.Confidence {
+			in.Confidence = append(in.Confidence, c)
+		}
+		for _, sr := range rp.Search {
+			switch {
+			case strings.Contains(sr.Error, "капча"):
+				searchState = "капча"
+			case sr.Hits > 0 && searchState != "капча":
+				searchState = "работал"
+			}
+		}
+	}
+	in.Search = searchState
+
+	marks := map[int]string{}
+	if result != nil {
+		for _, qr := range result.Questions {
+			st := strings.ToLower(qr.Status)
+			switch {
+			case strings.Contains(st, "неверн"), strings.Contains(st, "частично"):
+				marks[qr.Slot] = "неверно"
+			case strings.Contains(st, "верн"):
+				marks[qr.Slot] = "верно"
+			}
+		}
+	}
+	total := 0
+	for _, p := range pages {
+		for _, q := range p.Questions {
+			total++
+			in.Questions = append(in.Questions, quizReportQuestion{
+				Slot:   q.Slot,
+				Kind:   quizKindLabel(q),
+				Text:   q.Text,
+				Answer: formatAnswerText(q, answers[q.Slot]),
+				Mark:   marks[q.Slot],
+			})
+		}
+	}
+	in.ByAI = total - in.FromBase
+	if in.ByAI < 0 {
+		in.ByAI = 0
+	}
+	return in
+}
+
+// setAttempts переносит число оставшихся попыток и метод из разбора view.php.
+func (in *quizReportInput) setAttempts(info *moodle.QuizInfo) {
+	if info == nil {
+		in.AttemptsLeft = -2
+		return
+	}
+	in.AttemptsLeft = info.AttemptsLeft()
+	in.Method = info.GradingMethod
+}
+
+// quizKindLabel — тип вопроса по-русски для отчёта.
+func quizKindLabel(q moodle.QuizQuestion) string {
+	switch {
+	case q.QType == "shortanswer" || q.QType == "numerical":
+		return "короткий ответ"
+	case len(q.MatchOptions) > 0:
+		return "соответствие"
+	case len(q.Choices) > 0 && q.Choices[0].IsMulti:
+		return "несколько вариантов"
+	case q.QType == "truefalse":
+		return "верно/неверно"
+	case len(q.Choices) > 0:
+		return "один вариант"
+	}
+	return q.QType
+}
+
+// clipRunes обрезает строку до n рун (с многоточием), переводы строк сводятся к пробелам.
+func clipRunes(s string, n int) string {
+	return truncRunes(cleanStr(s), n)
+}
+
+// nextStep — что делать дальше, одной строкой для отчёта.
+func (in quizReportInput) nextStep() string {
+	left := ""
+	if in.AttemptsLeft > 0 {
+		left = fmt.Sprintf(", осталось попыток %d", in.AttemptsLeft)
+	}
+	switch {
+	case in.Retry:
+		return "повтор будет автоматически" + left + "."
+	case in.AttemptsLeft == 0:
+		return "попыток не осталось."
+	}
+	s := "нажми „Пройти“" + left + "."
+	if in.Note != "" {
+		s += " " + in.Note + "."
+	}
+	return s
+}
+
+// buildQuizReport — текст отчёта в Telegram (HTML). Все подстановки экранируются.
+func buildQuizReport(in quizReportInput) string {
+	esc := html.EscapeString
+	var b strings.Builder
+	grade := in.Grade
+	if grade == "" {
+		grade = "—"
+	}
+	switch {
+	case in.Solved && in.Grade != "":
+		fmt.Fprintf(&b, "<b>✅ Тест решён: %s</b>\n", esc(in.Grade))
+	case in.Solved:
+		b.WriteString("<b>✅ Тест решён</b>\n")
+	default:
+		fmt.Fprintf(&b, "<b>Тест Moodle: оценка %s</b>\n", esc(grade))
+	}
+	fmt.Fprintf(&b, "<b>Курс:</b> %s\n", esc(in.Course))
+	fmt.Fprintf(&b, "<b>Тест:</b> %s\n", esc(in.Title))
+	if in.Method != "" {
+		fmt.Fprintf(&b, "<b>Оценка:</b> %s (метод: %s)\n", esc(grade), esc(in.Method))
+	} else {
+		fmt.Fprintf(&b, "<b>Оценка:</b> %s\n", esc(grade))
+	}
+	if !in.Solved {
+		fmt.Fprintf(&b, "<b>Дальше:</b> %s\n", esc(in.nextStep()))
+	}
+
+	model := "—"
+	switch {
+	case in.FromBaseNoKey:
+		model = "нет ключа ИИ, все ответы из базы"
+	case len(in.Models) > 0:
+		model = strings.Join(in.Models, ", ")
+	}
+	fmt.Fprintf(&b, "<b>Модель:</b> %s\n", esc(model))
+	conf := "—"
+	if len(in.Confidence) > 0 {
+		sum := 0.0
+		for _, c := range in.Confidence {
+			sum += c
+		}
+		conf = fmt.Sprintf("%.2f", sum/float64(len(in.Confidence)))
+	}
+	fmt.Fprintf(&b, "<b>Уверенность модели:</b> %s\n", conf)
+	materials := "нет"
+	if in.Materials {
+		materials = "есть"
+	}
+	fmt.Fprintf(&b, "<b>Материалы курса:</b> %s\n", materials)
+	fmt.Fprintf(&b, "<b>Веб-поиск:</b> %s\n", esc(in.Search))
+	fmt.Fprintf(&b, "<b>Ответы:</b> из базы %d, через ИИ %d\n", in.FromBase, in.ByAI)
+	if len(in.Questions) > 0 {
+		b.WriteString("\n<b>Вопросы:</b>\n")
+	}
+
+	footer := ""
+	if in.URL != "" {
+		footer = fmt.Sprintf("\n<a href=\"%s\">Открыть тест в Moodle</a>", esc(in.URL))
+	}
+	for i, q := range in.Questions {
+		mark := ""
+		if q.Mark != "" {
+			mark = " — " + q.Mark
+		}
+		entry := fmt.Sprintf("<b>Вопрос %d</b> (%s)%s: «%s»\n<pre>%s</pre>\n",
+			q.Slot, esc(q.Kind), esc(mark), esc(clipRunes(q.Text, 120)), esc(q.Answer))
+		if utf8.RuneCountInString(b.String()+entry+footer) > quizReportMaxRunes {
+			fmt.Fprintf(&b, "… и ещё %d вопросов\n", len(in.Questions)-i)
+			break
+		}
+		b.WriteString(entry)
+	}
+	b.WriteString(footer)
+	return b.String()
 }

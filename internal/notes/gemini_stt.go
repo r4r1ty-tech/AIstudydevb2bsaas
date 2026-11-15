@@ -2,6 +2,7 @@ package notes
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -75,6 +76,7 @@ func geminiKeyMarker(cfg *config.Config) string {
 
 // transcribeGemini расшифровывает аудиозапись лекции через бесплатный пул ключей Gemini,
 // нарезая длинные записи на фрагменты с перекрытием и обрабатывая их параллельно.
+// Фрагмент, который Gemini не расшифровал после перебора ключей, отдаётся cheaper (если ключ задан).
 func transcribeGemini(ctx context.Context, cfg *config.Config, audioPath string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -149,77 +151,98 @@ func transcribeGemini(ctx context.Context, cfg *config.Config, audioPath string)
 	workers := min(len(chunks), max(2, numKeys*llm.MaxConcurrentPerKey))
 	logx.Infof("notes", "transcribeGemini: %s chunks=%d keys=%d workers=%d dur=%s", tag, len(chunks), numKeys, workers, dur.Round(time.Second))
 
-	workerCtx, cancel := context.WithCancel(ctx)
+	results := make([]string, len(chunks))
+	err = runChunks(ctx, len(chunks), workers, func(wctx context.Context, idx int) error {
+		data, err := os.ReadFile(chunkPaths[idx])
+		if err != nil {
+			return fmt.Errorf("gemini stt: чтение фрагмента %d: %w", idx+1, err)
+		}
+		fresh := llm.MediaTargets(llm.PoolChain(cfg), true, false)
+		if err := ValidateChain(fresh); err != nil {
+			return err
+		}
+		chunkChain := rotateTargetsByChunk(fresh, idx)
+		if len(chunkChain) == 0 {
+			return errors.New("нет ключей Gemini в пуле")
+		}
+		res, err := llm.AskAudio(wctx, chunkChain, geminiSTTSysPrompt, geminiSTTUserPrompt, data, "mp3")
+		if err == nil {
+			if text := strings.TrimSpace(res.Text); text != "" {
+				results[idx] = shiftTimestamps(text, chunks[idx].Start)
+				return nil
+			}
+			err = errors.New("вернул пустой текст")
+		}
+		// Gemini не справился с фрагментом (после перебора всех ключей): только этот кусок
+		// уходит в cheaper, остальные фрагменты Gemini не пересчитываются. Если cheaper тоже
+		// не смог, ошибка уходит наверх и вся расшифровка переходит к следующему провайдеру.
+		if wctx.Err() != nil || cheaperKeyMarker(cfg) == "" {
+			return fmt.Errorf("gemini stt: фрагмент %d: %v", idx+1, err)
+		}
+		logx.Warnf("notes", "transcribeGemini: %s фрагмент %d не расшифрован Gemini (%v), пробую cheaper", tag, idx+1, err)
+		text, cErr := cheaperRecognize(wctx, cfg, chunkPaths[idx], chunks[idx].Start)
+		if cErr != nil {
+			return fmt.Errorf("gemini stt: фрагмент %d: %v; cheaper: %v", idx+1, err, cErr)
+		}
+		results[idx] = text
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	stitched := stitchTranscripts(results)
+	if strings.TrimSpace(stitched) == "" {
+		return "", errors.New("gemini stt: пустой результат расшифровки")
+	}
+	return stitched, nil
+}
+
+// runChunks выполняет do(ctx, idx) для кусков 0..n-1 в workers параллельных горутинах.
+// Первая ошибка отменяет контекст оставшихся кусков и возвращается. Если отменён
+// родительский контекст, возвращается его ошибка. Общая часть для Gemini и cheaper.
+func runChunks(ctx context.Context, n, workers int, do func(ctx context.Context, idx int) error) error {
+	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	jobs := make(chan int, len(chunks))
-	for i := range chunks {
+	jobs := make(chan int, n)
+	for i := range n {
 		jobs <- i
 	}
 	close(jobs)
 
-	results := make([]string, len(chunks))
 	var (
 		wg       sync.WaitGroup
 		errMu    sync.Mutex
 		firstErr error
 	)
-	recordErr := func(err error) {
-		errMu.Lock()
-		if firstErr == nil {
-			firstErr = err
-			cancel()
-		}
-		errMu.Unlock()
-	}
-
-	for w := 0; w < workers; w++ {
+	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for idx := range jobs {
-				if workerCtx.Err() != nil {
+				if wctx.Err() != nil {
 					return
 				}
-				data, err := os.ReadFile(chunkPaths[idx])
-				if err != nil {
-					recordErr(fmt.Errorf("gemini stt: чтение фрагмента %d: %w", idx+1, err))
+				if err := do(wctx, idx); err != nil {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = err
+						cancel()
+					}
+					errMu.Unlock()
 					return
 				}
-				fresh := llm.MediaTargets(llm.PoolChain(cfg), true, false)
-				if err := ValidateChain(fresh); err != nil {
-					recordErr(err)
-					return
-				}
-				chunkChain := rotateTargetsByChunk(fresh, idx)
-				if len(chunkChain) == 0 {
-					recordErr(fmt.Errorf("нет ключей Gemini в пуле"))
-					return
-				}
-				res, err := llm.AskAudio(workerCtx, chunkChain, geminiSTTSysPrompt, geminiSTTUserPrompt, data, "mp3")
-				if err != nil {
-					recordErr(fmt.Errorf("gemini stt: фрагмент %d: %w", idx+1, err))
-					return
-				}
-				text := strings.TrimSpace(res.Text)
-				if text == "" {
-					recordErr(fmt.Errorf("gemini stt: фрагмент %d вернул пустой текст", idx+1))
-					return
-				}
-				results[idx] = shiftTimestamps(text, chunks[idx].Start)
 			}
 		}()
 	}
 	wg.Wait()
 
+	errMu.Lock()
+	defer errMu.Unlock()
 	if firstErr != nil {
-		return "", firstErr
+		return firstErr
 	}
-	stitched := stitchTranscripts(results)
-	if strings.TrimSpace(stitched) == "" {
-		return "", fmt.Errorf("gemini stt: пустой результат расшифровки")
-	}
-	return stitched, nil
+	return ctx.Err()
 }
 
 // planAudioChunks строит план нарезки аудио длительностью dur на фрагменты длиной chunkDur
@@ -260,7 +283,14 @@ func planAudioChunks(dur, chunkDur, overlap time.Duration) []audioChunk {
 	return chunks
 }
 
+// sliceAudioFFmpeg режет фрагмент для Gemini: mp3 mono 16 кГц, 64 кбит/с.
 func sliceAudioFFmpeg(ctx context.Context, audioPath string, start, length time.Duration, outMP3 string) error {
+	return sliceAudioFFmpegBitrate(ctx, audioPath, start, length, "64k", outMP3)
+}
+
+// sliceAudioFFmpegBitrate вырезает фрагмент [start, start+length) в mp3 mono 16 кГц с заданным
+// битрейтом. Общая нарезка для Gemini и cheaper.
+func sliceAudioFFmpegBitrate(ctx context.Context, audioPath string, start, length time.Duration, bitrate, outMP3 string) error {
 	fctx, cancel := context.WithTimeout(ctx, geminiFFmpegTimeout)
 	defer cancel()
 
@@ -271,7 +301,7 @@ func sliceAudioFFmpeg(ctx context.Context, audioPath string, start, length time.
 	if length > 0 {
 		args = append(args, "-t", formatFFmpegSeconds(length))
 	}
-	args = append(args, "-i", audioPath, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", "-f", "mp3", outMP3)
+	args = append(args, "-i", audioPath, "-vn", "-ac", "1", "-ar", "16000", "-b:a", bitrate, "-f", "mp3", outMP3)
 
 	cmd := exec.CommandContext(fctx, "ffmpeg", args...)
 	out, err := cmd.CombinedOutput()

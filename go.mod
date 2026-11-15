@@ -7,7 +7,6 @@ require (
 	github.com/PuerkitoBio/goquery v1.13.0
 	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.26
-	github.com/yuin/goldmark v1.8.6
 	golang.org/x/net v0.62.0
 	modernc.org/sqlite v1.38.2
 )

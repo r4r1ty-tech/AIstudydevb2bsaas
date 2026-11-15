@@ -142,7 +142,7 @@ func (b *Bot) NotifyAdmin(ctx context.Context, text string) error {
 
 func (b *Bot) now() time.Time { return time.Now().In(b.loc) }
 
-// allowed — вайтлист или админ (строго по ADMIN_TELEGRAM_ID; ADMIN_LOGIN_SUFFIX оставлен только для обратной совместимости конфига и больше не предоставляет прав администратора); чужим бот молчит.
+// allowed — вайтлист или админ (строго по ADMIN_TELEGRAM_ID); чужим бот молчит.
 func (b *Bot) allowed(ctx *ext.Context) *gotgbot.User {
 	if ctx == nil || ctx.EffectiveUser == nil {
 		return nil
