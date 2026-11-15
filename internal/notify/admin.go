@@ -39,7 +39,7 @@ func botFor(token string) (*gotgbot.Bot, error) {
 		return nil, fmt.Errorf("botFor: NewBot: %w", err)
 	}
 	botInst, botTok = b, token
-	logx.Infof("notify", "botFor: created bot username=%s", b.User.Username)
+	logx.Infof("notify", "botFor: created bot username=%s", b.Username)
 	return b, nil
 }
 
@@ -183,4 +183,26 @@ func Document(ctx context.Context, cfg *config.Config, telegramID int64, path, c
 	}
 	logx.Debugf("notify", "Document: sent id=%d", telegramID)
 	return nil
+}
+
+// HTML шлёт сообщение с parse_mode=HTML без превью ссылок (динамика уже экранирована вызывающим).
+func HTML(ctx context.Context, cfg *config.Config, telegramID int64, text string) {
+	if cfg == nil || cfg.BotToken == "" || telegramID == 0 || strings.TrimSpace(text) == "" {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	bot, err := botFor(cfg.BotToken)
+	if err != nil {
+		logx.Errorf("notify", "HTML: botFor id=%d: %v", telegramID, err)
+		return
+	}
+	opts := &gotgbot.SendMessageOpts{
+		ParseMode:          "HTML",
+		LinkPreviewOptions: &gotgbot.LinkPreviewOptions{IsDisabled: true},
+	}
+	if _, err := bot.SendMessageWithContext(ctx, telegramID, text, opts); err != nil {
+		logx.Errorf("notify", "HTML: send id=%d: %v", telegramID, err)
+	}
 }

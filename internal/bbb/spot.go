@@ -27,7 +27,7 @@ func (w *Worker) lectureUsers(lesson model.Lesson, now time.Time) []model.User {
 	}
 	out := make([]model.User, 0, len(users))
 	for _, u := range users {
-		if !u.Active(now) || !lesson.MatchesSubgroup(u.Subgroup) {
+		if !u.Active(now) || !lesson.For(u) {
 			continue
 		}
 		intent, err := w.Store.GetIntent(u.TelegramID, lesson.ID)
@@ -56,7 +56,7 @@ func (w *Worker) subgroupUsers(lesson model.Lesson, now time.Time) []model.User 
 	}
 	out := make([]model.User, 0, len(users))
 	for _, u := range users {
-		if u.Active(now) && lesson.MatchesSubgroup(u.Subgroup) {
+		if u.Active(now) && lesson.For(u) {
 			out = append(out, u)
 		}
 	}
@@ -69,18 +69,21 @@ type recorder interface {
 	Stop() error
 }
 
-// startRecorder starts ffmpeg on ssau_rec.monitor; tests swap it so they
-// never touch the PulseAudio of the machine they run on.
-var startRecorder = func(ctx context.Context, path string) (recorder, error) {
-	r, err := capture.Start(ctx, path)
-	if err != nil {
-		return nil, err
+// startRecorder остаётся точкой подмены для юнит-тестов воркера; в бою
+// запись запускается через StreamRecorder самой прямой WebRTC-сессии.
+var startRecorder = func(_ context.Context, _ string) (recorder, error) {
+	return nil, fmt.Errorf("запись доступна только для StreamRecorder-сессии")
+}
+
+func startSessionRecorder(ctx context.Context, sess Session, path string) (recorder, error) {
+	if sr, ok := sess.(StreamRecorder); ok {
+		return sr.StartRecording(ctx, path)
 	}
-	return r, nil
+	return startRecorder(ctx, path)
 }
 
 // restartRec — запись, которая переживает смерть ffmpeg посреди лекции
-// (рестарт PulseAudio, OOM): Read при неожиданном конце потока поднимает новый
+// (сбой декодера, OOM): Read при неожиданном конце потока поднимает новый
 // сегмент (MergeSegments потом склеит все), Stop — останавливает насовсем.
 type restartRec struct {
 	mu      sync.Mutex
@@ -224,8 +227,8 @@ func (w *Worker) startSpotter(ctx context.Context, rec recorder, lesson model.Le
 	}
 }
 
-// silenceAlertMinutes of silence in a row mean the recording tab most likely
-// never got audio (listen-only not joined, stream not routed to ssau_rec).
+// silenceAlertMinutes of silence in a row mean the recording session most likely
+// never got audio (listen-only SFU not joined or stream has no incoming RTP).
 const silenceAlertMinutes = 5
 
 func (w *Worker) onLevel(ctx context.Context, lesson model.Lesson, ev capture.LevelEvent, peak, silent, windows int) {
@@ -233,20 +236,16 @@ func (w *Worker) onLevel(ctx context.Context, lesson model.Lesson, ev capture.Le
 		return
 	}
 	logx.Infof("capture", "audio level %q min=%d peak=%d (%.1f dBFS) silent_streak=%d", lesson.Discipline, windows, peak, capture.DBFS(peak), silent)
-	if windows == 1 {
-		capture.LogRoute("capture", "first-minute")
-	}
-	// Пишущая вкладка заходит за 5–15 минут до начала и может ждать в лобби:
+	// Пишущая сессия заходит за 5–15 минут до начала и может ждать в лобби:
 	// тишина до звонка — норма, алерт на каждой паре никому не нужен.
 	if !lesson.Begin.IsZero() && time.Now().Before(lesson.Begin.Add(silenceAlertMinutes*time.Minute)) {
 		return
 	}
 	switch ev {
 	case capture.LevelSilent:
-		logx.Warnf("capture", "recording %q silent for %d min — аудио, похоже, не подключилось", lesson.Discipline, silent)
-		capture.LogRoute("capture", "silent")
+		logx.Warnf("capture", "recording %q silent for %d min — входящего аудио нет", lesson.Discipline, silent)
 		if w != nil {
-			notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s»: %d мин тишины. Либо лектор молчит, либо вкладка не подключила звук — глянь журнал (audio route silent).", lesson.Discipline, silent))
+			notify.Admin(ctx, w.Cfg, fmt.Sprintf("запись «%s»: %d мин тишины. Либо лектор молчит, либо listen-only поток пуст.", lesson.Discipline, silent))
 		}
 	case capture.LevelBack:
 		logx.Infof("capture", "recording %q: sound is back, peak=%d", lesson.Discipline, peak)
@@ -269,6 +268,16 @@ func (w *Worker) onWake(ctx context.Context, lesson model.Lesson, users []model.
 		}); err != nil {
 			logx.Debugf("bbb", "onWake: add event: %v", err)
 		}
+		_ = w.Store.SetSetting("moodle_wake_kick", fmt.Sprintf("%d:%s", lesson.ID, word))
+		if w.Cfg != nil && w.Cfg.AdminID > 0 {
+			_ = w.Store.SetSetting(fmt.Sprintf("moodle_kick:%d", w.Cfg.AdminID), "1")
+		}
+		for _, u := range users {
+			if u.TelegramID > 0 {
+				_ = w.Store.SetSetting(fmt.Sprintf("moodle_kick:%d", u.TelegramID), "1")
+			}
+		}
+		logx.Infof("bbb", "wake %q on %q -> triggered moodle kick", word, lesson.Discipline)
 	}
 	if lesson.Discipline == "тест" {
 		notify.Admin(ctx, w.Cfg, "тест услышал: «"+word+"»")

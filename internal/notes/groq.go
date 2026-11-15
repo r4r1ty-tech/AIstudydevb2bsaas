@@ -18,20 +18,20 @@ import (
 )
 
 func transcribeGroq(ctx context.Context, cfg *config.Config, audioPath string) (string, error) {
-	logx.Debugf("notes", "transcribeGroq: start audio=%s url=%s key_len=%d", audioPath, cfg.GroqAPIURL, len(cfg.GroqAPIKey))
+	tag := lectureOf(ctx).tag()
 	st, err := os.Stat(audioPath)
 	if err != nil {
-		logx.Errorf("notes", "transcribeGroq: stat %s: %v", audioPath, err)
+		logx.Errorf("notes", "transcribeGroq: %s stat %s: %v", tag, audioPath, err)
 		return "", err
 	}
-	logx.Debugf("notes", "transcribeGroq: audio size=%d bytes", st.Size())
+	logx.Debugf("notes", "transcribeGroq: %s start size=%d bytes url=%s key=%s", tag, st.Size(), cfg.GroqAPIURL, keyState(cfg.GroqAPIKey))
 	if st.Size() < 2048 {
-		logx.Errorf("notes", "transcribeGroq: аудио слишком короткое (%d байт)", st.Size())
+		logx.Errorf("notes", "transcribeGroq: %s аудио слишком короткое (%d байт)", tag, st.Size())
 		return "", fmt.Errorf("аудио слишком короткое (%d байт)", st.Size())
 	}
 	f, err := os.Open(audioPath)
 	if err != nil {
-		logx.Errorf("notes", "transcribeGroq: open %s: %v", audioPath, err)
+		logx.Errorf("notes", "transcribeGroq: %s open %s: %v", tag, audioPath, err)
 		return "", err
 	}
 	defer f.Close()
@@ -40,11 +40,11 @@ func transcribeGroq(ctx context.Context, cfg *config.Config, audioPath string) (
 	w := multipart.NewWriter(&body)
 	part, err := w.CreateFormFile("file", filepath.Base(audioPath))
 	if err != nil {
-		logx.Errorf("notes", "transcribeGroq: create form file: %v", err)
+		logx.Errorf("notes", "transcribeGroq: %s create form file: %v", tag, err)
 		return "", err
 	}
 	if _, err := io.Copy(part, f); err != nil {
-		logx.Errorf("notes", "transcribeGroq: copy audio: %v", err)
+		logx.Errorf("notes", "transcribeGroq: %s copy audio: %v", tag, err)
 		return "", err
 	}
 	model := cfg.GroqSTTModel
@@ -52,29 +52,29 @@ func transcribeGroq(ctx context.Context, cfg *config.Config, audioPath string) (
 		model = "whisper-large-v3"
 	}
 	if err := w.WriteField("model", model); err != nil {
-		logx.Warnf("notes", "transcribeGroq: write model field: %v", err)
+		logx.Warnf("notes", "transcribeGroq: %s write model field: %v", tag, err)
 	}
 	if err := w.WriteField("language", "ru"); err != nil {
-		logx.Warnf("notes", "transcribeGroq: write language field: %v", err)
+		logx.Warnf("notes", "transcribeGroq: %s write language field: %v", tag, err)
 	}
 	if err := w.WriteField("response_format", "json"); err != nil {
-		logx.Warnf("notes", "transcribeGroq: write response_format field: %v", err)
+		logx.Warnf("notes", "transcribeGroq: %s write response_format field: %v", tag, err)
 	}
 	if err := w.Close(); err != nil {
-		logx.Errorf("notes", "transcribeGroq: close multipart: %v", err)
+		logx.Errorf("notes", "transcribeGroq: %s close multipart: %v", tag, err)
 		return "", err
 	}
-	logx.Debugf("notes", "transcribeGroq: model=%s", model)
+	logx.Debugf("notes", "transcribeGroq: %s model=%s", tag, model)
 
 	base := strings.TrimRight(cfg.GroqAPIURL, "/")
 	if base == "" {
 		base = "https://api.groq.com/openai/v1"
 	}
 	endpoint := base + "/audio/transcriptions"
-	logx.Debugf("notes", "transcribeGroq: POST %s body=%d bytes", endpoint, body.Len())
+	logx.Debugf("notes", "transcribeGroq: %s POST %s body=%d bytes", tag, endpoint, body.Len())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
 	if err != nil {
-		logx.Errorf("notes", "transcribeGroq: new request: %v", err)
+		logx.Errorf("notes", "transcribeGroq: %s new request: %v", tag, err)
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.GroqAPIKey)
@@ -84,30 +84,30 @@ func transcribeGroq(ctx context.Context, cfg *config.Config, audioPath string) (
 	cli := &http.Client{Timeout: 15 * time.Minute}
 	res, err := cli.Do(req)
 	if err != nil {
-		logx.Errorf("notes", "transcribeGroq: request failed after %s: %v", time.Since(start), err)
+		logx.Errorf("notes", "transcribeGroq: %s request failed after %s: %v", tag, time.Since(start).Round(time.Second), err)
 		return "", err
 	}
 	defer res.Body.Close()
-	logx.Debugf("notes", "transcribeGroq: HTTP %d in %s", res.StatusCode, time.Since(start))
+	logx.Debugf("notes", "transcribeGroq: %s HTTP %d in %s", tag, res.StatusCode, time.Since(start).Round(time.Millisecond))
 	b, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	if err != nil {
-		logx.Errorf("notes", "transcribeGroq: read body: %v", err)
+		logx.Errorf("notes", "transcribeGroq: %s read body: %v", tag, err)
 		return "", fmt.Errorf("groq stt: ответ оборвался: %w", err)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		logx.Errorf("notes", "transcribeGroq: HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
+		logx.Errorf("notes", "transcribeGroq: %s HTTP %d: %s", tag, res.StatusCode, truncate(string(b), 400))
 		return "", fmt.Errorf("groq whisper HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
 	}
 	var out asrResp
 	if err := json.Unmarshal(b, &out); err != nil {
-		logx.Errorf("notes", "transcribeGroq: json unmarshal (%d bytes): %v", len(b), err)
+		logx.Errorf("notes", "transcribeGroq: %s json unmarshal (%d bytes): %v", tag, len(b), err)
 		return "", fmt.Errorf("groq whisper json: %w", err)
 	}
 	text := strings.TrimSpace(out.Text)
 	if text == "" {
-		logx.Errorf("notes", "transcribeGroq: пустой текст")
+		logx.Errorf("notes", "transcribeGroq: %s пустой текст", tag)
 		return "", fmt.Errorf("groq whisper: пустой текст")
 	}
-	logx.Debugf("notes", "transcribeGroq: ok chars=%d", len(text))
+	logx.Debugf("notes", "transcribeGroq: %s ok chars=%d", tag, len([]rune(text)))
 	return text, nil
 }

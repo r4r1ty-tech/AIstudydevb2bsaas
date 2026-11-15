@@ -1,0 +1,124 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  background: var(--bg);
+  /* Нативные контролы и полосы прокрутки в цвет темы. --acc-text в светлой
+     теме тёмно-оливковый, поэтому заливка чекбокса не теряется на белом;
+     бегунок --text-4 отличим от фона (контраст около 3:1 в обеих темах). */
+  accent-color: var(--acc-text);
+  scrollbar-color: var(--text-4) transparent;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-text); font-size-adjust: var(--fsa-text);
+  font-size: 16px;
+  line-height: 1.45;
+  font-feature-settings: "tnum" 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Фон не плоский: сетка расписания, свечение сверху и зерно. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-image:
+    radial-gradient(900px 520px at 85% -12%, var(--glow-top), transparent 62%),
+    radial-gradient(700px 420px at -10% 110%, var(--glow-top), transparent 65%),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to right, var(--grid-line-2) 1px, transparent 1px);
+  background-size: auto, auto, 100% 48px, 96px 100%;
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: var(--grain-opacity);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 .5 0 0 0 0 .5 0 0 0 0 .5 0 0 0 1 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+h1, h2, h3, h4, p, ul, ol, dl, dd, figure { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+img, svg { display: block; }
+a { color: inherit; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+[hidden] { display: none !important; }
+
+.icon {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-sm { width: 16px; height: 16px; }
+.icon-lg { width: 24px; height: 24px; }
+
+.mono {
+  font-family: var(--font-mono); font-size-adjust: var(--fsa-mono);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.display { font-family: var(--font-display); font-size-adjust: var(--fsa-display); letter-spacing: -0.02em; }
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}
+
+.skip {
+  position: fixed;
+  left: 12px;
+  top: -60px;
+  z-index: 100;
+  background: var(--acc);
+  color: var(--acc-ink);
+  padding: 10px 14px;
+  border-radius: var(--r-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+.skip:focus { top: calc(12px + env(safe-area-inset-top)); }
+
+:focus { outline: none; }
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.main:focus-visible { outline: none; }
+
+::selection { background: var(--acc); color: var(--acc-ink); }
+
+.noscript { padding: 24px; text-align: center; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

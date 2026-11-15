@@ -63,7 +63,7 @@ func (s *Store) Close() error {
 		return nil
 	}
 	// db не зануляем: после Close sql.DB отвечает «database is closed», а
-	// nil-указатель ронял бы паникой запоздалый тик T-15/лобби при остановке.
+	// nil-указатель ронял бы паникой запоздалый тик лобби/воркера при остановке.
 	err := s.db.Close()
 	if err != nil {
 		logx.Errorf("store", "Close: close db: %v", err)
@@ -153,6 +153,7 @@ func (s *Store) migrate() error {
 			date TEXT,
 			dir TEXT,
 			bbb_url TEXT,
+			meeting_key TEXT DEFAULT '',
 			status TEXT,
 			audio TEXT,
 			transcript TEXT,
@@ -161,9 +162,120 @@ func (s *Store) migrate() error {
 			publish_status TEXT,
 			published_at TEXT,
 			cleaned_at TEXT,
+			claimed_at TEXT DEFAULT '',
 			created_at TEXT,
 			updated_at TEXT
 		)`,
+		`CREATE TABLE IF NOT EXISTS pack_lessons (
+			lesson_id INTEGER PRIMARY KEY,
+			pack_id INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pack_lessons_pack_id ON pack_lessons(pack_id)`,
+		`CREATE TABLE IF NOT EXISTS accounts (
+			telegram_id INTEGER,
+			kind TEXT,
+			login TEXT,
+			secret TEXT,
+			session TEXT,
+			status TEXT,
+			message TEXT,
+			synced_at TEXT NULL,
+			updated_at TEXT,
+			PRIMARY KEY (telegram_id, kind)
+		)`,
+		`CREATE TABLE IF NOT EXISTS moodle_items (
+			telegram_id INTEGER,
+			cmid INTEGER,
+			course_id INTEGER,
+			course TEXT,
+			section TEXT,
+			kind TEXT,
+			title TEXT,
+			url TEXT,
+			opens TEXT NULL,
+			due TEXT NULL,
+			status TEXT,
+			todo TEXT,
+			updated_at TEXT,
+			PRIMARY KEY (telegram_id, cmid)
+		)`,
+		// Входы в панель по куке: токен хранится только как sha256, сроки — unix-секунды.
+		`CREATE TABLE IF NOT EXISTS web_sessions (
+			token_hash TEXT PRIMARY KEY,
+			telegram_id INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions(telegram_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_web_sessions_exp ON web_sessions(expires_at)`,
+		// Личные API-ключи пользователей (шифрованный секрет и маска) и учёт расхода/cooldown по дням.
+		`CREATE TABLE IF NOT EXISTS llm_keys (
+			telegram_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			secret_enc TEXT NOT NULL,
+			mask TEXT NOT NULL,
+			share_pool INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (telegram_id, provider)
+		)`,
+		`CREATE TABLE IF NOT EXISTS llm_usage (
+			telegram_id INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			day TEXT NOT NULL,
+			requests INTEGER NOT NULL DEFAULT 0,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			cooldown_until TEXT DEFAULT '',
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (telegram_id, provider, day)
+		)`,
+		// Очередь решения тестов для сервиса ssau-quiz (quiz_jobs.go): одна активная задача
+		// на пару (аккаунт, тест) — частичный уникальный индекс по queued/running.
+		`CREATE TABLE IF NOT EXISTS quiz_jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			telegram_id INTEGER NOT NULL,
+			cmid INTEGER NOT NULL,
+			course TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			forced INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'done', 'failed')),
+			deadline TEXT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			claimed_by TEXT NOT NULL DEFAULT '',
+			lease_until TEXT NULL,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_quiz_jobs_active ON quiz_jobs(telegram_id, cmid) WHERE status IN ('queued', 'running')`,
+		`CREATE INDEX IF NOT EXISTS idx_quiz_jobs_claim ON quiz_jobs(status, forced, deadline, created_at)`,
+		// База проверенных ответов решателя (quiz_answers.go): ключ — хэш условия и вариантов
+		// (qhash, глобален для банка вопросов), ответ — текст вариантов, подтверждённый Moodle.
+		`CREATE TABLE IF NOT EXISTS quiz_answers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			course TEXT NOT NULL DEFAULT '',
+			cmid INTEGER NOT NULL DEFAULT 0,
+			qhash TEXT NOT NULL,
+			qtype TEXT NOT NULL DEFAULT '',
+			question_text TEXT NOT NULL DEFAULT '',
+			answer_json TEXT NOT NULL,
+			verified_at TEXT NOT NULL,
+			source_tg INTEGER NOT NULL DEFAULT 0,
+			hits INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			UNIQUE(qhash)
+		)`,
+		// Отрицательная память решателя: ответы, которые Moodle отметил как неверные (quiz_answers.go).
+		`CREATE TABLE IF NOT EXISTS quiz_wrong_answers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			qhash TEXT NOT NULL,
+			answer_json TEXT NOT NULL,
+			cmid INTEGER NOT NULL DEFAULT 0,
+			source_tg INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			UNIQUE(qhash, answer_json)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_quiz_wrong_answers_qhash ON quiz_wrong_answers(qhash)`,
 	}
 	logx.Debugf("store", "migrate: statements=%d", len(stmts))
 	tx, err := s.db.Begin()
@@ -191,11 +303,27 @@ func (s *Store) migrate() error {
 		logx.Errorf("store", "migrate: ensure user columns: %v", err)
 		return err
 	}
+	if err := s.ensureLessonColumns(); err != nil {
+		return err
+	}
 	if err := s.ensurePackColumns(); err != nil {
 		logx.Errorf("store", "migrate: ensure pack columns: %v", err)
 		return err
 	}
 	logx.Debugf("store", "migrate: done")
+	return nil
+}
+
+func (s *Store) ensureLessonColumns() error {
+	for i, q := range []string{
+		`ALTER TABLE lessons ADD COLUMN bbb_url TEXT`,
+		`ALTER TABLE lessons ADD COLUMN owner INTEGER DEFAULT 0`,
+	} {
+		if _, err := s.db.Exec(q); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			logx.Errorf("store", "ensureLessonColumns: alter %d: %v", i, err)
+			return fmt.Errorf("store: migrate lessons: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -205,6 +333,8 @@ func (s *Store) ensurePackColumns() error {
 		`ALTER TABLE lecture_packs ADD COLUMN publish_status TEXT`,
 		`ALTER TABLE lecture_packs ADD COLUMN published_at TEXT`,
 		`ALTER TABLE lecture_packs ADD COLUMN cleaned_at TEXT`,
+		`ALTER TABLE lecture_packs ADD COLUMN meeting_key TEXT DEFAULT ''`,
+		`ALTER TABLE lecture_packs ADD COLUMN claimed_at TEXT DEFAULT ''`,
 	}
 	for i, q := range alters {
 		if _, err := s.db.Exec(q); err != nil {
@@ -217,6 +347,26 @@ func (s *Store) ensurePackColumns() error {
 		}
 		logx.Debugf("store", "ensurePackColumns: alter %d applied", i)
 	}
+
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS pack_lessons (lesson_id INTEGER PRIMARY KEY, pack_id INTEGER NOT NULL)`); err != nil {
+		logx.Errorf("store", "ensurePackColumns: create pack_lessons: %v", err)
+		return fmt.Errorf("store: create pack_lessons: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_pack_lessons_pack_id ON pack_lessons(pack_id)`); err != nil {
+		logx.Errorf("store", "ensurePackColumns: create idx_pack_lessons_pack_id: %v", err)
+		return fmt.Errorf("store: create idx_pack_lessons_pack_id: %w", err)
+	}
+
+	if err := s.migrateDeduplicatePacks(); err != nil {
+		logx.Errorf("store", "ensurePackColumns: deduplicate packs: %v", err)
+		return err
+	}
+
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lecture_packs_meeting_key ON lecture_packs(meeting_key) WHERE meeting_key != ''`); err != nil {
+		logx.Errorf("store", "ensurePackColumns: create idx_lecture_packs_meeting_key: %v", err)
+		return fmt.Errorf("store: create idx_lecture_packs_meeting_key: %w", err)
+	}
+
 	logx.Debugf("store", "ensurePackColumns: done")
 	return nil
 }
@@ -275,9 +425,7 @@ func nullTimeArg(t *time.Time) any {
 }
 
 func parseTime(s string) (time.Time, error) {
-	logx.Debugf("store", "parseTime: enter s=%q", s)
 	if s == "" {
-		logx.Debugf("store", "parseTime: empty")
 		return time.Time{}, nil
 	}
 	t, err := time.Parse(time.RFC3339, s)
@@ -289,7 +437,6 @@ func parseTime(s string) (time.Time, error) {
 		}
 	}
 	out := t.UTC()
-	logx.Debugf("store", "parseTime: out=%s", out.Format(time.RFC3339Nano))
 	return out, nil
 }
 
@@ -310,10 +457,8 @@ func parseNullTime(ns sql.NullString) (*time.Time, error) {
 
 func nullStr(ns sql.NullString) string {
 	if !ns.Valid {
-		logx.Debugf("store", "nullStr: invalid")
 		return ""
 	}
-	logx.Debugf("store", "nullStr: value=%q", ns.String)
 	return ns.String
 }
 
@@ -327,7 +472,6 @@ func btoi(b bool) int {
 }
 
 func scanUser(sc scanner) (*model.User, error) {
-	logx.Debugf("store", "scanUser: enter")
 	var u model.User
 	var username, firstName, lastName, fio, createdAt, wakeWords sql.NullString
 	var disabledUntil sql.NullString
@@ -376,15 +520,14 @@ func scanUser(sc scanner) (*model.User, error) {
 		}
 		u.CreatedAt = t
 	}
-	logx.Debugf("store", "scanUser: out telegram_id=%d", u.TelegramID)
 	return &u, nil
 }
 
 func scanLesson(sc scanner) (*model.Lesson, error) {
-	logx.Debugf("store", "scanLesson: enter")
 	var l model.Lesson
 	var date, start, end, begin, finish, discipline, teacher, place, typ sql.NullString
-	var subgroup, online sql.NullInt64
+	var subgroup, online, owner sql.NullInt64
+	var bbbURL sql.NullString
 	if err := sc.Scan(
 		&l.ID,
 		&date,
@@ -398,6 +541,8 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 		&subgroup,
 		&typ,
 		&online,
+		&bbbURL,
+		&owner,
 	); err != nil {
 		logScanErr("scanLesson", err)
 		return nil, err
@@ -413,6 +558,10 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 		l.Subgroup = int(subgroup.Int64)
 	}
 	l.Online = online.Valid && online.Int64 != 0
+	l.BBBURL = nullStr(bbbURL)
+	if owner.Valid {
+		l.Owner = owner.Int64
+	}
 	if begin.Valid && begin.String != "" {
 		t, err := parseTime(begin.String)
 		if err != nil {
@@ -429,7 +578,6 @@ func scanLesson(sc scanner) (*model.Lesson, error) {
 		}
 		l.Finish = t
 	}
-	logx.Debugf("store", "scanLesson: out id=%d online=%v", l.ID, l.Online)
 	return &l, nil
 }
 
@@ -464,7 +612,6 @@ func scanParseRun(sc scanner) (*model.ParseRun, error) {
 }
 
 func scanBBB(sc scanner) (*model.BBBLink, error) {
-	logx.Debugf("store", "scanBBB: enter")
 	var b model.BBBLink
 	var key, url, updated sql.NullString
 	if err := sc.Scan(&key, &url, &updated); err != nil {
@@ -481,7 +628,6 @@ func scanBBB(sc scanner) (*model.BBBLink, error) {
 		}
 		b.UpdatedAt = t
 	}
-	logx.Debugf("store", "scanBBB: out key=%s", b.Key)
 	return &b, nil
 }
 

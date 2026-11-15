@@ -185,7 +185,7 @@ func TestEnsureInSingleFlight(t *testing.T) {
 		t.Fatal("first join never started")
 	}
 
-	// Второй тик по тому же ключу не должен поднимать вторую вкладку.
+	// Второй тик по тому же ключу не должен поднимать вторую сессию.
 	w.ensureIn(context.Background(), u, lesson, "https://bbb.ssau.ru/b/x", key, begin, false)
 
 	close(j.release)

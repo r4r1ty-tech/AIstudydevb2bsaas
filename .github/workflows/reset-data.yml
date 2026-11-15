@@ -12,7 +12,7 @@ jobs:
       - name: Залить reset-data.sh
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.VDS_HOST || '203.0.113.30' }}
+          host: ${{ secrets.VDS_HOST || '203.0.113.20' }}
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}
@@ -21,10 +21,10 @@ jobs:
           strip_components: 1
           overwrite: true
 
-      - name: Сбросить БД, конспекты и chrome
+      - name: Сбросить БД и конспекты
         uses: appleboy/ssh-action@v1.2.2
         with:
-          host: ${{ secrets.VDS_HOST || '203.0.113.30' }}
+          host: ${{ secrets.VDS_HOST || '203.0.113.20' }}
           username: ${{ secrets.VDS_USER || 'root' }}
           port: ${{ secrets.VDS_PORT || 22 }}
           key: ${{ secrets.VDS_SSH_KEY }}

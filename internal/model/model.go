@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -59,12 +60,8 @@ func (u User) Surname() string {
 	return out
 }
 
-const (
-	StageFIO   = 0
-	StageSub   = 1
-	StageWords = 2
-	StageDone  = 3
-)
+// StageDone — онбординг пройден (остальные стадии в коде не используются).
+const StageDone = 3
 
 var CommonWakeWords = []string{"тест", "контрольная", "мудл", "moodle"}
 
@@ -148,6 +145,13 @@ type Lesson struct {
 	Subgroup   int       `json:"subgroup"` // 0 = вся группа
 	Type       string    `json:"type"`
 	Online     bool      `json:"online"`
+	BBBURL     string    `json:"bbb_url,omitempty"` // комната из ЛК (conference.url)
+	Owner      int64     `json:"owner,omitempty"`   // 0 — пара группы; иначе telegram_id: личная пара ИОТ
+}
+
+// For — пара видна пользователю: своя подгруппа и не чужая пара ИОТ.
+func (l Lesson) For(u User) bool {
+	return (l.Owner == 0 || l.Owner == u.TelegramID) && l.MatchesSubgroup(u.Subgroup)
 }
 
 func (l Lesson) MatchesSubgroup(n int) bool {
@@ -165,16 +169,76 @@ func (l Lesson) SlotLabel() string {
 }
 
 // Identity — «та же пара» между прогонами парсера: день, начало, предмет,
-// подгруппа. Смена аудитории, препода, типа или online обновляет строку на месте,
+// тип, преподаватель, подгруппа. Смена аудитории или online обновляет строку на месте,
 // id не меняется — согласие, presence, пак и ссылка остаются при паре.
 func (l Lesson) Identity() string {
 	out := strings.Join([]string{
 		l.Date,
 		l.Start,
 		strings.TrimSpace(l.Discipline),
+		strings.TrimSpace(l.Type),
+		strings.TrimSpace(l.Teacher),
 		fmt.Sprintf("%d", l.Subgroup),
 	}, "|")
+	if l.Owner != 0 {
+		out += fmt.Sprintf("|o%d", l.Owner)
+	}
 	logx.Debugf("model", "Lesson.Identity: lesson=%d -> %q", l.ID, out)
+	return out
+}
+
+// MeetingKey формирует уникальный ключ встречи BBB для дедупликации паков лекций.
+// Ключ связывает разные подгруппы и личные пары ИОТ в одну лекцию.
+// Формат: bbb:<normURL>|<date>|<start>. При отсутствии URL, даты или времени начала возвращает "".
+func MeetingKey(lesson Lesson, rawURL string) string {
+	date := strings.TrimSpace(lesson.Date)
+	start := strings.TrimSpace(lesson.Start)
+	if date == "" || start == "" {
+		logx.Debugf("model", "MeetingKey: empty date or start lesson=%d -> empty", lesson.ID)
+		return ""
+	}
+	raw := strings.TrimSpace(rawURL)
+	if raw == "" {
+		raw = strings.TrimSpace(lesson.BBBURL)
+	}
+	if raw == "" {
+		logx.Debugf("model", "MeetingKey: empty url lesson=%d -> empty", lesson.ID)
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
+		logx.Debugf("model", "MeetingKey: parse err=%v lesson=%d -> empty", err, lesson.ID)
+		return ""
+	}
+	if u.Scheme == "" {
+		if u2, err2 := url.Parse("https://" + raw); err2 == nil && u2 != nil && u2.Host != "" {
+			u = u2
+		}
+	}
+	u.Scheme = strings.ToLower(strings.TrimSpace(u.Scheme))
+	u.Host = strings.ToLower(strings.TrimSpace(u.Host))
+	if u.Scheme != "http" && u.Scheme != "https" {
+		logx.Debugf("model", "MeetingKey: unsupported scheme %q lesson=%d -> empty", u.Scheme, lesson.ID)
+		return ""
+	}
+	hostname := u.Hostname()
+	if hostname == "" || strings.Trim(hostname, ":.") == "" || strings.Contains(hostname, ":") {
+		logx.Debugf("model", "MeetingKey: invalid host %q lesson=%d -> empty", u.Host, lesson.ID)
+		return ""
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	u.Path = strings.TrimRight(u.Path, "/")
+
+	normURL := strings.TrimRight(u.String(), "/")
+	if normURL == "" {
+		logx.Debugf("model", "MeetingKey: normalized empty lesson=%d -> empty", lesson.ID)
+		return ""
+	}
+
+	out := "bbb:" + normURL + "|" + date + "|" + start
+	logx.Debugf("model", "MeetingKey: lesson=%d -> %q", lesson.ID, out)
 	return out
 }
 
@@ -184,7 +248,7 @@ func (l Lesson) DetailKey() string {
 	if l.Online {
 		on = "1"
 	}
-	return strings.Join([]string{l.Identity(), strings.TrimSpace(l.Teacher), strings.TrimSpace(l.Place), strings.TrimSpace(l.Type), on}, "|")
+	return strings.Join([]string{l.Identity(), strings.TrimSpace(l.Teacher), strings.TrimSpace(l.Place), strings.TrimSpace(l.Type), on, strings.TrimSpace(l.BBBURL)}, "|")
 }
 
 type BBBLink struct {
@@ -207,7 +271,7 @@ func BBBRoomKey(discipline, teacher, typ string) string {
 }
 
 // ResolveBBB выбирает ссылку пары: своя lesson:<id> (пустая — снята явно, без
-// подстановки), иначе комната room|предмет|препод|тип, иначе самый свежий ключ
+// подстановки), иначе комната из ЛК у самой пары, иначе комната room|предмет|препод|тип, иначе самый свежий ключ
 // панели <group>|предмет|препод. own=true — ссылка привязана именно к этой паре.
 func ResolveBBB(l Lesson, links []BBBLink) (url string, own bool) {
 	byKey := make(map[string]BBBLink, len(links))
@@ -216,6 +280,9 @@ func ResolveBBB(l Lesson, links []BBBLink) (url string, own bool) {
 	}
 	if b, ok := byKey[BBBLessonKey(l.ID)]; ok && l.ID > 0 {
 		return strings.TrimSpace(b.URL), true
+	}
+	if u := strings.TrimSpace(l.BBBURL); u != "" {
+		return u, true
 	}
 	if b, ok := byKey[BBBRoomKey(l.Discipline, l.Teacher, l.Type)]; ok && strings.TrimSpace(b.URL) != "" {
 		return strings.TrimSpace(b.URL), false
@@ -387,10 +454,8 @@ const (
 )
 
 func IsLecture(typ string) bool {
-	logx.Debugf("model", "IsLecture: type=%q", typ)
 	t := strings.ToLower(strings.TrimSpace(typ))
 	res := strings.Contains(t, "лекц") || strings.Contains(t, "lecture")
-	logx.Debugf("model", "IsLecture: type=%q -> %v", typ, res)
 	return res
 }
 
@@ -413,6 +478,7 @@ type LecturePack struct {
 	Date          string     `json:"date"`
 	Dir           string     `json:"dir"`
 	BBBURL        string     `json:"bbb_url"`
+	MeetingKey    string     `json:"meeting_key,omitempty"`
 	Status        string     `json:"status"`
 	Audio         string     `json:"audio"`
 	Transcript    string     `json:"transcript"`
@@ -421,6 +487,7 @@ type LecturePack struct {
 	PublishStatus string     `json:"publish_status,omitempty"`
 	PublishedAt   *time.Time `json:"published_at,omitempty"`
 	CleanedAt     *time.Time `json:"cleaned_at,omitempty"`
+	ClaimedAt     *time.Time `json:"claimed_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`
 }

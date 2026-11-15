@@ -30,7 +30,6 @@ func TestIsHogCmdline(t *testing.T) {
 		{"/opt/ssau-bot/bbb", false},
 		{"/opt/ssau-bot/tg", false},
 		{"/usr/local/bin/cloudflared tunnel --url http://127.0.0.1:8080", false},
-		{"/usr/bin/chromium --headless=new", false},
 	}
 	for _, c := range cases {
 		got := isHogCmdline([]byte(c.in))

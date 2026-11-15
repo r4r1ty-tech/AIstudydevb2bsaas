@@ -1,0 +1,34 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  # standard (errcheck, govet, ineffassign, staticcheck, unused) + безопасность и производительность
+  default: standard
+  enable:
+    - gosec        # уязвимости: SQL-инъекции, слабые права файлов, небезопасный TLS и т.д.
+    - bodyclose    # незакрытые HTTP-тела
+    - noctx        # HTTP-запросы без контекста
+    - prealloc     # срезы, которые можно выделить заранее
+    - perfsprint   # fmt.Sprintf там, где хватает конкатенации/strconv
+  settings:
+    gosec:
+      excludes:
+        - G104 # ошибки игнорируются намеренно в нескольких местах (cleanup, Close)
+  exclusions:
+    presets:
+      - comments
+    rules:
+      # В тестах допускаем небезопасные вещи вроде фиксированных путей и временных файлов.
+      - path: _test\.go
+        linters: [gosec, noctx]
+      # noctx включён ради HTTP; SQL в store по принятому стилю идёт без контекста.
+      - path: internal/store/
+        text: "database/sql"
+        linters: [noctx]
+
+formatters:
+  enable:
+    - gofmt

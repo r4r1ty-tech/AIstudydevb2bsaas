@@ -85,10 +85,3 @@ func TestVisionProvidersGroqFirst(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 }
-
-func TestMarkdownHTML(t *testing.T) {
-	h := markdownHTML("Тема", "раз & два")
-	if !strings.Contains(h, "Тема") || !strings.Contains(h, "раз &amp; два") {
-		t.Fatalf("html=%s", h)
-	}
-}

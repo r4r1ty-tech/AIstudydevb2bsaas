@@ -13,10 +13,12 @@ func clearEnv(t *testing.T) {
 	for _, k := range []string{
 		"TELEGRAM_BOT_TOKEN", "ADMIN_TELEGRAM_ID", "WEBAPP_PUBLIC_URL",
 		"DATABASE_PATH", "GROUP_ID", "GROUP_CODE", "LISTEN_ADDR", "TZ",
-		"RECORDINGS_DIR", "CHROME_BIN", "CHROME_USER_DATA_DIR", "BBB_DRY_RUN",
+		"RECORDINGS_DIR", "TYPST_BIN", "BBB_DRY_RUN",
 		"LECTURE_PAUSE", "PANEL_PASSWORD", "WHITELIST_EXTRA",
+		"PANEL_ALLOW_IPS", "PANEL_TRUST_PROXY", "PANEL_DEMO",
 		"LLM_API_KEY", "LLM_API_URL", "LLM_MODEL",
 		"DEEPSEEK_API_KEY", "DEEPSEEK_API_URL", "DEEPSEEK_MODEL",
+		"DEEPGRAM_API_KEY", "DEEPGRAM_API_URL", "DEEPGRAM_MODEL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -78,6 +80,28 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if !c.BBBDryRun || c.LecturePause {
 		t.Errorf("flags = dry:%v pause:%v", c.BBBDryRun, c.LecturePause)
+	}
+}
+
+func TestDeepgramFromEnv(t *testing.T) {
+	clearEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DeepgramAPIKey != "" || c.DeepgramAPIURL != "https://api.deepgram.com" || c.DeepgramModel != "nova-3" {
+		t.Fatalf("Deepgram по умолчанию: key=%q url=%q model=%q", c.DeepgramAPIKey, c.DeepgramAPIURL, c.DeepgramModel)
+	}
+
+	t.Setenv("DEEPGRAM_API_KEY", "dg-test")
+	t.Setenv("DEEPGRAM_API_URL", "https://dg.example/")
+	t.Setenv("DEEPGRAM_MODEL", "nova-2")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DeepgramAPIKey != "dg-test" || c.DeepgramAPIURL != "https://dg.example" || c.DeepgramModel != "nova-2" {
+		t.Fatalf("Deepgram из env: key=%q url=%q model=%q", c.DeepgramAPIKey, c.DeepgramAPIURL, c.DeepgramModel)
 	}
 }
 
@@ -245,5 +269,26 @@ func TestLLMFallsBackToDeepSeekNames(t *testing.T) {
 	}
 	if c.LLMAPIKey != "sk-new" || c.LLMModel != "new-model" || c.LLMAPIURL != "https://api.deepseek.com" {
 		t.Fatalf("new names must win: key=%q model=%q url=%q", c.LLMAPIKey, c.LLMModel, c.LLMAPIURL)
+	}
+}
+
+func TestPanelAccessEnv(t *testing.T) {
+	clearEnv(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PanelAllowIPs != "" || c.PanelTrustProxy || c.PanelDemo {
+		t.Fatalf("defaults: allow=%q trust=%v demo=%v", c.PanelAllowIPs, c.PanelTrustProxy, c.PanelDemo)
+	}
+	t.Setenv("PANEL_ALLOW_IPS", " 10.0.0.0/8, 192.168.1.5 ")
+	t.Setenv("PANEL_TRUST_PROXY", "1")
+	t.Setenv("PANEL_DEMO", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PanelAllowIPs != "10.0.0.0/8, 192.168.1.5" || !c.PanelTrustProxy || !c.PanelDemo {
+		t.Fatalf("env: allow=%q trust=%v demo=%v", c.PanelAllowIPs, c.PanelTrustProxy, c.PanelDemo)
 	}
 }

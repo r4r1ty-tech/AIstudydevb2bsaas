@@ -7,31 +7,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/archive"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/model"
 )
 
-func chromeForPDF(t *testing.T) string {
-	t.Helper()
-	for _, c := range []string{"chromium", "chromium-browser", "google-chrome"} {
-		if p, err := exec.LookPath(c); err == nil {
-			return p
-		}
-	}
-	t.Skip("no chromium for print-to-pdf")
-	return ""
-}
-
 // Build end to end: audio → STT (fake Fish) → LLM (fake) → notes.md → PDF.
 func TestBuildWritesTranscriptNotesAndPDF(t *testing.T) {
-	bin := chromeForPDF(t)
+	typstForPDF(t)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
@@ -46,6 +34,10 @@ func TestBuildWritesTranscriptNotesAndPDF(t *testing.T) {
 	}))
 	t.Cleanup(api.Close)
 
+	oldURL := llm.OpenCodeURL
+	llm.OpenCodeURL = api.URL
+	t.Cleanup(func() { llm.OpenCodeURL = oldURL })
+
 	root := t.TempDir()
 	p := model.LecturePack{Discipline: "Сети", Number: 3, Dir: "Сети/лекция-3"}
 	dir := filepath.Join(root, p.Dir)
@@ -57,8 +49,7 @@ func TestBuildWritesTranscriptNotesAndPDF(t *testing.T) {
 	}
 	cfg := &config.Config{
 		FishStudioAPIKey: "k", FishStudioAPIURL: api.URL,
-		LLMAPIKey: "k", LLMAPIURL: api.URL + "/v1", LLMModel: "m",
-		ChromeBin: bin,
+		OpenCodeAPIKey: "k",
 	}
 	if err := Build(context.Background(), cfg, root, p); err != nil {
 		t.Fatal(err)
@@ -98,77 +89,7 @@ func TestBuildLLMFailureSurfaces(t *testing.T) {
 	_ = os.MkdirAll(dir, 0o755)
 	_ = os.WriteFile(archive.AudioFile(dir), []byte(strings.Repeat("x", 8192)), 0o600)
 	cfg := &config.Config{FishStudioAPIKey: "k", FishStudioAPIURL: api.URL}
-	if err := Build(context.Background(), cfg, root, p); err == nil || !strings.Contains(err.Error(), "LLM_API_KEY") {
+	if err := Build(context.Background(), cfg, root, p); err == nil || !strings.Contains(err.Error(), "нет ключей ИИ") {
 		t.Fatalf("missing LLM key must surface: %v", err)
-	}
-}
-
-func TestWritePDFErrors(t *testing.T) {
-	dir := t.TempDir()
-	cfg := &config.Config{ChromeBin: filepath.Join(dir, "no-such-chromium")}
-	if err := WritePDF(cfg, "t", "md", filepath.Join(dir, "a.pdf")); err == nil {
-		t.Fatal("missing browser must fail")
-	}
-	if err := WritePDF(cfg, "t", "md", filepath.Join(dir, "missing", "a.pdf")); err == nil {
-		t.Fatal("unwritable html must fail")
-	}
-	fake := filepath.Join(dir, "fake-chrome")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := WritePDF(&config.Config{ChromeBin: fake}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "не записался") {
-		t.Fatalf("browser that writes nothing: %v", err)
-	}
-}
-
-// RECORDINGS_DIR на VDS относительный: file://recordings/... Chromium не открывал.
-func TestWritePDFRelativePath(t *testing.T) {
-	bin := chromeForPDF(t)
-	t.Chdir(t.TempDir())
-	if err := os.MkdirAll("recordings/x", 0o755); err != nil {
-		t.Fatal(err)
-	}
-	pdf := filepath.Join("recordings", "x", "notes.pdf")
-	if err := WritePDF(&config.Config{ChromeBin: bin}, "Тема", "## Раздел\n\nтекст", pdf); err != nil {
-		t.Fatal(err)
-	}
-	if st, err := os.Stat(pdf); err != nil || st.Size() < 100 {
-		t.Fatalf("pdf: %v", err)
-	}
-}
-
-func TestMarkdownHTMLRenders(t *testing.T) {
-	h := markdownHTML("Тема", "## Раздел\n\n**важно** и <script>x</script>\n\n| а | б |\n|---|---|\n| 1 | 2 |\n")
-	for _, want := range []string{"<h2", "<strong>важно</strong>", "<table>", "<td>1</td>"} {
-		if !strings.Contains(h, want) {
-			t.Errorf("нет %q в html", want)
-		}
-	}
-	if strings.Contains(h, "<script>") || strings.Contains(h, "##") || strings.Contains(h, "**") {
-		t.Errorf("сырой markdown/html просочился: %s", h)
-	}
-}
-
-// Chrome на CI печатал PDF и не завершался: готовый файл важнее кода возврата.
-func TestWritePDFHungBrowserWithFile(t *testing.T) {
-	old := pdfTimeout
-	pdfTimeout = time.Second
-	t.Cleanup(func() { pdfTimeout = old })
-	dir := t.TempDir()
-	pdf := filepath.Join(dir, "a.pdf")
-	fake := filepath.Join(dir, "fake-chrome")
-	script := "#!/bin/sh\nhead -c 200 /dev/zero > '" + pdf + "'\nexec sleep 60\n"
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := WritePDF(&config.Config{ChromeBin: fake}, "t", "md", pdf); err != nil {
-		t.Fatalf("записанный pdf должен приниматься: %v", err)
-	}
-	hung := filepath.Join(dir, "hung-chrome")
-	if err := os.WriteFile(hung, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := WritePDF(&config.Config{ChromeBin: hung}, "t", "md", filepath.Join(dir, "b.pdf")); err == nil || !strings.Contains(err.Error(), "таймаут") {
-		t.Fatalf("зависший браузер без файла: %v", err)
 	}
 }

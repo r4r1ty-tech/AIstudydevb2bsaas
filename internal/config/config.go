@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -30,25 +31,41 @@ const (
 )
 
 type Config struct {
-	BotToken         string
-	AdminID          int64
-	WebAppURL        string
-	WebAppURLFile    string
-	DBPath           string
-	GroupID          int64
-	GroupCode        string
-	ListenAddr       string
-	Timezone         string
-	RecordingsDir    string
-	ChromeBin        string
-	ChromeUserDir    string
-	ProxyFile        string
-	BBBDryRun        bool
-	LecturePause     bool
-	PanelPassword    string
-	LLMAPIKey        string
-	LLMAPIURL        string
-	LLMModel         string
+	BotToken        string
+	AdminID         int64
+	WebAppURL       string
+	WebAppURLFile   string
+	DBPath          string
+	GroupID         int64
+	GroupCode       string
+	ListenAddr      string
+	Timezone        string
+	RecordingsDir   string
+	ProxyFile       string
+	BBBDryRun       bool
+	LecturePause    bool
+	PanelPassword   string
+	PanelAllowIPs   string // PANEL_ALLOW_IPS: IP и CIDR через запятую; пусто — без фильтра
+	PanelTrustProxy bool   // PANEL_TRUST_PROXY: брать клиента из X-Forwarded-For, если запрос пришёл с loopback
+	PanelDemo       bool   // PANEL_DEMO: панель на тестовых данных из памяти, без бота и базы
+	LLMAPIKey       string
+	LLMAPIURL       string
+	LLMModel        string
+	// CheaperSTTModel — модель расшифровки аудио у cheaper (CHEAPER_STT_MODEL), POST {LLM_API_URL}/audio/transcriptions.
+	CheaperSTTModel string
+	// DeepgramAPIKey / DeepgramAPIURL / DeepgramModel — расшифровка аудио у Deepgram (DEEPGRAM_API_KEY,
+	// DEEPGRAM_API_URL, DEEPGRAM_MODEL): второй провайдер STT после пула Gemini. Без ключа пропускается.
+	DeepgramAPIKey string
+	DeepgramAPIURL string
+	DeepgramModel  string
+	// GeminiAPIKeys — ключи Google AI Studio (GEMINI_API_KEYS через запятую):
+	// бесплатная цепочка для тестов и конспектов всех.
+	GeminiAPIKeys []string
+	// OpenCodeAPIKey / OpenCodeAPIKeys — ключи OpenCode Zen (OPENCODE_API_KEY,
+	// OPENCODE_API_KEYS через запятую), запасной провайдер. Ключ можно подписать
+	// владельцем: «Зуев:oc_sk_…» (то же для GEMINI_API_KEYS).
+	OpenCodeAPIKey   string
+	OpenCodeAPIKeys  []string
 	AssemblyAPIKey   string
 	AssemblyAPIURL   string
 	FishStudioAPIKey string
@@ -67,6 +84,17 @@ type Config struct {
 	GitHubRepo       string
 	GitHubBranch     string
 	Whitelist        []int64
+	SecretKey        string // SECRET_KEY: base64 32 байта для шифрования паролей универа
+	SecretKeyFile    string // SECRET_KEY_FILE: иначе ключ в файле (создаётся сам, 0600)
+	LKBaseURL        string // LK_BASE_URL: https://lk.ssau.ru
+	MoodleBaseURL    string // MOODLE_BASE_URL: https://do.ssau.ru/moodle
+	// Веб-поиск для решателя тестов (internal/websearch). Ключи/адрес
+	// включают поставщика; без них работает только DuckDuckGo lite.
+	TavilyAPIKey string // TAVILY_API_KEY
+	ExaAPIKey    string // EXA_API_KEY
+	SearXNGURL   string // SEARXNG_URL: свой SearXNG с format=json
+	WebSearch    bool   // WEBSEARCH: 0 — решатель не ищет в интернете (по умолчанию 1)
+	WebSearchDDG bool   // WEBSEARCH_DDG: 0 — без запасного DuckDuckGo (по умолчанию 1)
 }
 
 func Load() (*Config, error) {
@@ -84,15 +112,23 @@ func Load() (*Config, error) {
 		ListenAddr:       strEnv("LISTEN_ADDR", DefaultListen),
 		Timezone:         strEnv("TZ", DefaultTimezone),
 		RecordingsDir:    strEnv("RECORDINGS_DIR", DefaultRecordings),
-		ChromeBin:        strEnv("CHROME_BIN", ""),
-		ChromeUserDir:    strEnv("CHROME_USER_DATA_DIR", ""),
 		ProxyFile:        strEnv("PROXY_FILE", "/opt/ssau-bot/proxies.txt"),
 		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
 		LecturePause:     boolEnv("LECTURE_PAUSE", true),
 		PanelPassword:    strEnv("PANEL_PASSWORD", ""),
+		PanelAllowIPs:    strEnv("PANEL_ALLOW_IPS", ""),
+		PanelTrustProxy:  boolEnv("PANEL_TRUST_PROXY", false),
+		PanelDemo:        boolEnv("PANEL_DEMO", false),
 		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
 		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
 		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
+		CheaperSTTModel:  strEnv("CHEAPER_STT_MODEL", "whisper-large-v3-turbo"),
+		DeepgramAPIKey:   strEnv("DEEPGRAM_API_KEY", ""),
+		DeepgramAPIURL:   strings.TrimRight(strEnv("DEEPGRAM_API_URL", "https://api.deepgram.com"), "/"),
+		DeepgramModel:    strEnv("DEEPGRAM_MODEL", "nova-3"),
+		GeminiAPIKeys:    listEnv("GEMINI_API_KEYS"),
+		OpenCodeAPIKey:   strEnv("OPENCODE_API_KEY", ""),
+		OpenCodeAPIKeys:  listEnv("OPENCODE_API_KEYS"),
 		AssemblyAPIKey:   strEnv("ASSEMBLYAI_API_KEY", ""),
 		AssemblyAPIURL:   strEnv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com"),
 		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),
@@ -101,6 +137,11 @@ func Load() (*Config, error) {
 		GrokAPIURL:       strEnv("GROK_API_URL", "https://api.x.ai/v1"),
 		GrokModel:        strEnv("GROK_MODEL", "grok-2-vision-1212"),
 		GroqAPIKey:       strEnv("GROQ_API_KEY", ""),
+		TavilyAPIKey:     strEnv("TAVILY_API_KEY", ""),
+		ExaAPIKey:        strEnv("EXA_API_KEY", ""),
+		SearXNGURL:       strings.TrimRight(strEnv("SEARXNG_URL", ""), "/"),
+		WebSearch:        boolEnv("WEBSEARCH", true),
+		WebSearchDDG:     boolEnv("WEBSEARCH_DDG", true),
 		GroqAPIURL:       strEnv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
 		GroqVisionModel:  strEnv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
 		GroqSTTModel:     strEnv("GROQ_STT_MODEL", "whisper-large-v3"),
@@ -111,7 +152,11 @@ func Load() (*Config, error) {
 		GitHubRepo:       strEnv("GITHUB_REPO", "LectionsSSAU"),
 		GitHubBranch:     strEnv("GITHUB_BRANCH", "main"),
 		Whitelist:        append([]int64(nil), DefaultWhitelist...),
+		SecretKey:        strings.TrimSpace(os.Getenv("SECRET_KEY")),
+		LKBaseURL:        strings.TrimRight(strEnv("LK_BASE_URL", "https://lk.ssau.ru"), "/"),
+		MoodleBaseURL:    strings.TrimRight(strEnv("MOODLE_BASE_URL", "https://do.ssau.ru/moodle"), "/"),
 	}
+	c.SecretKeyFile = strEnv("SECRET_KEY_FILE", filepath.Join(filepath.Dir(c.DBPath), "secret.key"))
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {
 		for _, p := range strings.Split(extra, ",") {
 			p = strings.TrimSpace(p)
@@ -129,8 +174,9 @@ func Load() (*Config, error) {
 	logx.Debugf("config", "Load: whitelist=%d bot_token_present=%v admin=%d group=%d db=%s webapp_url=%q webapp_url_file=%q listen=%s tz=%s recordings=%s",
 		len(c.Whitelist), strings.TrimSpace(c.BotToken) != "", c.AdminID, c.GroupID,
 		c.DBPath, c.WebAppURL, c.WebAppURLFile, c.ListenAddr, c.Timezone, c.RecordingsDir)
-	logx.Debugf("config", "Load: key_lengths llm=%d grok=%d groq=%d fish=%d assembly=%d github=%d panel=%d",
-		len(c.LLMAPIKey), len(c.GrokAPIKey), len(c.GroqAPIKey), len(c.FishStudioAPIKey), len(c.AssemblyAPIKey), len(c.GitHubToken), len(c.PanelPassword))
+	logx.Debugf("config", "Load: key_lengths llm=%d grok=%d groq=%d fish=%d assembly=%d deepgram=%d github=%d panel=%d",
+		len(c.LLMAPIKey), len(c.GrokAPIKey), len(c.GroqAPIKey), len(c.FishStudioAPIKey), len(c.AssemblyAPIKey), len(c.DeepgramAPIKey), len(c.GitHubToken), len(c.PanelPassword))
+	logx.Debugf("config", "Load: panel allow_ips=%q trust_proxy=%v demo=%v", c.PanelAllowIPs, c.PanelTrustProxy, c.PanelDemo)
 	logx.Infof("config", "Load: ok whitelist=%d group=%d db=%s", len(c.Whitelist), c.GroupID, c.DBPath)
 	return c, nil
 }
@@ -198,6 +244,17 @@ func legacyEnv(key, old string) string {
 		logx.Warnf("config", "%s не задан, беру старое %s — переименуй в .env", key, old)
 	}
 	return v
+}
+
+// listEnv — значения через запятую, пустые выкинуты.
+func listEnv(key string) []string {
+	var out []string
+	for _, v := range strings.Split(os.Getenv(key), ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func strEnv(key, fallback string) string {

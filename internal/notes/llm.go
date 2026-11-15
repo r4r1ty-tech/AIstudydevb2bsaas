@@ -1,29 +1,35 @@
 package notes
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/logx"
 )
 
-type chatReq struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
+// ErrCheaperNotAllowed возвращается при обнаружении админского провайдера cheaper или таргетов AdminOnly в пути конспектов.
+var ErrCheaperNotAllowed = errors.New("для конспектов запрещено использовать админский ключ (cheaper)")
+
+// ValidateChain проверяет цепочку на отсутствие cheaper и таргетов AdminOnly.
+// Если найден хотя бы один запрещённый таргет, немедленно возвращает ErrCheaperNotAllowed без сетевых вызовов.
+// Правило действует для текста конспектов, слайдов и Ask. Единственное исключение — расшифровка аудио
+// через cheaper (transcribeCheaper в cheaper_stt.go, LLM_API_* и CHEAPER_STT_MODEL): она идёт мимо
+// этой проверки и не использует цепочку llm, поэтому здесь ничего не меняется.
+func ValidateChain(chain []llm.Target) error {
+	for _, t := range chain {
+		if t.Provider == llm.Cheaper || t.AdminOnly {
+			return ErrCheaperNotAllowed
+		}
+	}
+	return nil
 }
 
-type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
+// chatResp — ответ OpenAI-совместимого chat/completions (нужен vision.go).
 type chatResp struct {
 	Choices []struct {
 		Message struct {
@@ -33,21 +39,27 @@ type chatResp struct {
 }
 
 func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int, transcript, slides string) (string, error) {
-	logx.Debugf("notes", "Summarize: start discipline=%q lecture=%d transcript_chars=%d slides_chars=%d cfg_nil=%t", discipline, n, len(transcript), len(slides), cfg == nil)
-	if cfg == nil || strings.TrimSpace(cfg.LLMAPIKey) == "" {
-		logx.Errorf("notes", "Summarize: нет LLM_API_KEY")
-		return "", fmt.Errorf("нет LLM_API_KEY")
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	if strings.TrimSpace(cfg.LLMAPIURL) == "" {
-		logx.Errorf("notes", "Summarize: нет LLM_API_URL")
-		return "", fmt.Errorf("нет LLM_API_URL")
+	li := lectureOf(ctx)
+	tag := li.tag()
+	started := time.Now()
+	logx.Infof("notes", "Summarize: старт %s discipline=%q lecture=%d transcript_chars=%d slides_chars=%d", tag, discipline, n, len([]rune(transcript)), len([]rune(slides)))
+	chain := llm.PoolChain(cfg)
+	if err := ValidateChain(chain); err != nil {
+		logx.Errorf("notes", "Summarize: %s запрещённый провайдер: %v", tag, err)
+		return "", err
 	}
-	model := strings.TrimSpace(cfg.LLMModel)
-	if model == "" {
-		logx.Errorf("notes", "Summarize: нет LLM_MODEL")
-		return "", fmt.Errorf("нет LLM_MODEL")
+	if len(chain) == 0 {
+		logx.Errorf("notes", "Summarize: %s нет ключей ИИ (GEMINI_API_KEYS / OPENCODE_API_KEY)", tag)
+		return "", fmt.Errorf("нет ключей ИИ")
 	}
-	logx.Debugf("notes", "Summarize: model=%s url=%s key_len=%d", model, cfg.LLMAPIURL, len(cfg.LLMAPIKey))
+	chainNames := make([]string, 0, len(chain))
+	for _, t := range chain {
+		chainNames = append(chainNames, t.Provider+"/"+t.Model)
+	}
+	logx.Debugf("notes", "Summarize: %s цепочка ИИ: %s", tag, strings.Join(chainNames, " -> "))
 	sys := "Ты составляешь подробный конспект университетской лекции на русском, Markdown. " +
 		"В САМОМ НАЧАЛЕ — отдельный блок «## Организационное»: что и к какому сроку сдавать, дедлайны, " +
 		"требования по лабам/курсовым/контрольным, тесты, Moodle, форма отчётности, переносы пар — " +
@@ -61,58 +73,49 @@ func Summarize(ctx context.Context, cfg *config.Config, discipline string, n int
 	user := fmt.Sprintf("Предмет: %s\nЛекция №%d\n\n--- Слайды ---\n%s\n\n--- Расшифровка ---\n%s\n",
 		discipline, n, emptyDash(slides), emptyDash(transcript))
 
-	payload, err := json.Marshal(chatReq{
-		Model: model,
-		Messages: []chatMessage{
-			{Role: "system", Content: sys},
-			{Role: "user", Content: user},
-		},
-	})
+	if logx.Verbose() {
+		logx.Dump("notes-llm", li.dumpName()+"-prompt", []byte("=== system ===\n"+sys+"\n\n=== user ===\n"+user))
+	}
+	res, err := llm.Ask(ctx, chain, sys, user)
+	for i, a := range res.Attempts {
+		if a.Err != "" {
+			logx.Warnf("notes", "Summarize: %s попытка %d/%d %s/%s за %s: %s", tag, i+1, len(res.Attempts), a.Target.Provider, a.Target.Model, a.Took.Round(time.Millisecond), a.Err)
+		} else {
+			logx.Debugf("notes", "Summarize: %s попытка %d/%d %s/%s за %s ok", tag, i+1, len(res.Attempts), a.Target.Provider, a.Target.Model, a.Took.Round(time.Millisecond))
+		}
+	}
 	if err != nil {
-		logx.Errorf("notes", "Summarize: marshal payload: %v", err)
+		logx.Errorf("notes", "Summarize: %s за %s: %v", tag, time.Since(started).Round(time.Second), err)
 		return "", err
 	}
-	endpoint := chatEndpoint(cfg.LLMAPIURL)
-	logx.Debugf("notes", "Summarize: POST %s payload=%d bytes", endpoint, len(payload))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		logx.Errorf("notes", "Summarize: new request %s: %v", endpoint, err)
-		return "", err
+	content := res.Text
+	used := "?"
+	if res.Used != nil {
+		used = res.Used.Provider + "/" + res.Used.Model
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.LLMAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	start := time.Now()
-	// 25 минут пары дают ответ за ~80 с; на полную пару 4 минут впритык.
-	cli := &http.Client{Timeout: 15 * time.Minute}
-	res, err := cli.Do(req)
-	if err != nil {
-		logx.Errorf("notes", "Summarize: request failed after %s: %v", time.Since(start), err)
-		return "", err
+	if logx.Verbose() {
+		logx.Dump("notes-llm", li.dumpName()+"-reply", []byte(content))
 	}
-	defer res.Body.Close()
-	logx.Debugf("notes", "Summarize: HTTP %d in %s", res.StatusCode, time.Since(start))
-	b, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
-	if err != nil {
-		logx.Errorf("notes", "Summarize: read body after %s: %v", time.Since(start), err)
-		return "", fmt.Errorf("llm: ответ оборвался: %w", err)
-	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		logx.Errorf("notes", "Summarize: HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
-		return "", fmt.Errorf("llm HTTP %d: %s", res.StatusCode, truncate(string(b), 400))
-	}
-	var out chatResp
-	if err := json.Unmarshal(b, &out); err != nil {
-		logx.Errorf("notes", "Summarize: json unmarshal (%d bytes): %v", len(b), err)
-		return "", err
-	}
-	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
-		logx.Errorf("notes", "Summarize: пустой ответ (choices=%d)", len(out.Choices))
-		return "", fmt.Errorf("llm: пустой ответ")
-	}
-	content := strings.TrimSpace(out.Choices[0].Message.Content)
-	logx.Infof("notes", "Summarize: notes generated discipline=%q lecture=%d chars=%d", discipline, n, len(content))
+	logx.Infof("notes", "Summarize: %s конспект готов модель=%s символов=%d за %s", tag, used, len([]rune(content)), time.Since(started).Round(time.Second))
 	return content, nil
+}
+
+// AskChain выполняет запрос по заданной цепочке после обязательной валидации на отсутствие cheaper/AdminOnly.
+func AskChain(ctx context.Context, chain []llm.Target, sysPrompt, userPrompt string) (string, error) {
+	if err := ValidateChain(chain); err != nil {
+		return "", err
+	}
+	res, err := llm.Ask(ctx, chain, sysPrompt, userPrompt)
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
+}
+
+// Ask — общая бесплатная цепочка провайдеров из пула (Gemini и OpenCode).
+// Ключ cheaper (AdminOnly) для конспектов строго запрещён.
+func Ask(ctx context.Context, cfg *config.Config, sysPrompt, userPrompt string) (string, error) {
+	return AskChain(ctx, llm.PoolChain(cfg), sysPrompt, userPrompt)
 }
 
 // chatEndpoint принимает любой OpenAI-совместимый base URL: и с /v1, и без.

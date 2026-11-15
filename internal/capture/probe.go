@@ -20,6 +20,9 @@ var (
 // (dBFS, -inf reported as -120). It tells a real lecture from an empty file
 // before the audio is sent to speech-to-text.
 func Probe(ctx context.Context, path string) (time.Duration, float64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-nostdin", "-i", path,

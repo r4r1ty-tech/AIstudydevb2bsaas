@@ -33,11 +33,30 @@ func (g *GitHub) Enabled() bool {
 	ok := g != nil && strings.TrimSpace(g.Token) != "" &&
 		g.Owner != "" && g.Repo != "" && g.Branch != ""
 	if g != nil {
-		logx.Debugf("publish", "Enabled: token=%t owner=%q repo=%q branch=%q -> %t", strings.TrimSpace(g.Token) != "", g.Owner, g.Repo, g.Branch, ok)
+		logx.Debugf("publish", "Enabled: token=%s owner=%q repo=%q branch=%q -> %t", tokenState(g.Token), g.Owner, g.Repo, g.Branch, ok)
 	} else {
 		logx.Debugf("publish", "Enabled: github=nil -> false")
 	}
 	return ok
+}
+
+// tokenState — вместо токена в логе: «***» или «нет».
+func tokenState(tok string) string {
+	if strings.TrimSpace(tok) == "" {
+		return "нет"
+	}
+	return "***"
+}
+
+// shortSHA — первые 12 знаков blob-sha для лога: по ним видно, менялся ли файл.
+func shortSHA(s string) string {
+	if s == "" {
+		return "нет"
+	}
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 func (g *GitHub) api() string {
@@ -81,7 +100,17 @@ func contentPath(repoPath string) string {
 
 // Upsert creates or updates a file at repoPath. Returns true when the remote
 // content changed. A no-op (same blob sha) returns false without a commit.
-func (g *GitHub) Upsert(ctx context.Context, repoPath string, content []byte, message string) (bool, error) {
+// Каждый вызов логируется одной строкой итога: путь, размер, sha до/после,
+// статус (created/updated/unchanged/error) и длительность; токен в лог не попадает.
+func (g *GitHub) Upsert(ctx context.Context, repoPath string, content []byte, message string) (changed bool, err error) {
+	started := time.Now()
+	var sha string // sha файла на GitHub до записи; пусто — файла ещё нет
+	defer func() {
+		if err != nil {
+			logx.Errorf("publish", "Upsert: ERROR path=%q bytes=%d sha_before=%s статус=error за %s: %v",
+				repoPath, len(content), shortSHA(sha), time.Since(started).Round(time.Millisecond), err)
+		}
+	}()
 	logx.Debugf("publish", "Upsert: start path=%q bytes=%d message=%q", repoPath, len(content), message)
 	if ctx == nil {
 		ctx = context.Background()
@@ -96,9 +125,8 @@ func (g *GitHub) Upsert(ctx context.Context, repoPath string, content []byte, me
 	}
 	sum := BlobSHA(content)
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/contents/%s", g.api(), g.Owner, g.Repo, contentPath(repoPath))
-	logx.Debugf("publish", "Upsert: endpoint=%s branch=%s token_len=%d", endpoint, g.Branch, len(g.Token))
+	logx.Debugf("publish", "Upsert: endpoint=%s branch=%s token=%s", endpoint, g.Branch, tokenState(g.Token))
 
-	var sha string
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?ref="+url.QueryEscape(g.Branch), nil)
 	if err != nil {
 		logx.Errorf("publish", "Upsert: new GET request %s: %v", endpoint, err)
@@ -108,15 +136,15 @@ func (g *GitHub) Upsert(ctx context.Context, repoPath string, content []byte, me
 	start := time.Now()
 	res, err := g.client().Do(req)
 	if err != nil {
-		logx.Errorf("publish", "Upsert: GET request failed after %s: %v", time.Since(start), err)
+		logx.Errorf("publish", "Upsert: GET request failed path=%q after %s: %v", repoPath, time.Since(start), err)
 		return false, err
 	}
 	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
 	if err != nil {
-		logx.Errorf("publish", "Upsert: read GET body: %v", err)
+		logx.Errorf("publish", "Upsert: read GET body path=%q: %v", repoPath, err)
 	}
 	res.Body.Close()
-	logx.Debugf("publish", "Upsert: GET HTTP %d in %s body=%d bytes", res.StatusCode, time.Since(start), len(body))
+	logx.Debugf("publish", "Upsert: GET path=%q HTTP %d in %s body=%d bytes", repoPath, res.StatusCode, time.Since(start), len(body))
 	switch res.StatusCode {
 	case http.StatusOK:
 		var meta struct {
@@ -127,18 +155,23 @@ func (g *GitHub) Upsert(ctx context.Context, repoPath string, content []byte, me
 			return false, err
 		}
 		sha = meta.SHA
-		logx.Debugf("publish", "Upsert: remote sha=%s local sha=%s", sha, sum)
+		logx.Debugf("publish", "Upsert: path=%q sha_before=%s sha_local=%s", repoPath, shortSHA(sha), shortSHA(sum))
 		if sha == sum {
-			logx.Infof("publish", "Upsert: skip unchanged path=%q", repoPath)
+			logx.Infof("publish", "Upsert: skip path=%q bytes=%d sha=%s статус=unchanged за %s",
+				repoPath, len(content), shortSHA(sum), time.Since(started).Round(time.Millisecond))
 			return false, nil
 		}
 	case http.StatusNotFound:
-		logx.Debugf("publish", "Upsert: remote path not found, will create path=%q", repoPath)
+		logx.Debugf("publish", "Upsert: path=%q на GitHub нет, создам", repoPath)
 	default:
 		logx.Errorf("publish", "Upsert: get %s: HTTP %d: %s", repoPath, res.StatusCode, truncate(string(body), 300))
 		return false, fmt.Errorf("publish: get %s: HTTP %d: %s", repoPath, res.StatusCode, truncate(string(body), 300))
 	}
 
+	status := "updated"
+	if sha == "" {
+		status = "created"
+	}
 	payload := map[string]string{
 		"message": message,
 		"content": base64.StdEncoding.EncodeToString(content),
@@ -159,24 +192,36 @@ func (g *GitHub) Upsert(ctx context.Context, repoPath string, content []byte, me
 	}
 	g.auth(put)
 	put.Header.Set("Content-Type", "application/json")
-	logx.Debugf("publish", "Upsert: PUT %s payload=%d bytes new_sha=%t", endpoint, len(buf), sha != "")
+	logx.Debugf("publish", "Upsert: PUT path=%q bytes=%d статус=%s payload=%d", repoPath, len(content), status, len(buf))
 	start = time.Now()
 	res2, err := g.client().Do(put)
 	if err != nil {
-		logx.Errorf("publish", "Upsert: PUT request failed after %s: %v", time.Since(start), err)
+		logx.Errorf("publish", "Upsert: PUT request failed path=%q after %s: %v", repoPath, time.Since(start), err)
 		return false, err
 	}
 	out, err := io.ReadAll(io.LimitReader(res2.Body, 1<<20))
 	if err != nil {
-		logx.Errorf("publish", "Upsert: read PUT body: %v", err)
+		logx.Errorf("publish", "Upsert: read PUT body path=%q: %v", repoPath, err)
 	}
 	res2.Body.Close()
-	logx.Debugf("publish", "Upsert: PUT HTTP %d in %s body=%d bytes", res2.StatusCode, time.Since(start), len(out))
+	logx.Debugf("publish", "Upsert: PUT path=%q HTTP %d in %s body=%d bytes", repoPath, res2.StatusCode, time.Since(start), len(out))
 	if res2.StatusCode != http.StatusOK && res2.StatusCode != http.StatusCreated {
 		logx.Errorf("publish", "Upsert: put %s: HTTP %d: %s", repoPath, res2.StatusCode, truncate(string(out), 300))
 		return false, fmt.Errorf("publish: put %s: HTTP %d: %s", repoPath, res2.StatusCode, truncate(string(out), 300))
 	}
-	logx.Infof("publish", "Upsert: push ok path=%q message=%q", repoPath, message)
+	var after struct {
+		Content struct {
+			SHA string `json:"sha"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(out, &after); err != nil {
+		logx.Debugf("publish", "Upsert: path=%q ответ PUT не разобран: %v", repoPath, err)
+	}
+	if after.Content.SHA != "" && after.Content.SHA != sum {
+		logx.Warnf("publish", "Upsert: path=%q sha после записи %s не совпал с локальным %s", repoPath, shortSHA(after.Content.SHA), shortSHA(sum))
+	}
+	logx.Infof("publish", "Upsert: ok path=%q bytes=%d sha %s→%s статус=%s за %s message=%q",
+		repoPath, len(content), shortSHA(sha), shortSHA(after.Content.SHA), status, time.Since(started).Round(time.Millisecond), message)
 	return true, nil
 }
 
@@ -185,7 +230,7 @@ func (g *GitHub) auth(req *http.Request) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("User-Agent", "ssau-lecture-bot")
-	logx.Debugf("publish", "auth: headers set token_len=%d", len(g.Token))
+	logx.Debugf("publish", "auth: headers set token=%s", tokenState(g.Token))
 }
 
 func truncate(s string, n int) string {

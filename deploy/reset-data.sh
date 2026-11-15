@@ -1,5 +1,5 @@
 #!/bin/bash
-# Полный сброс данных бота на VDS: БД, конспекты, chrome-профили.
+# Полный сброс данных бота на VDS: БД и конспекты.
 # .env, бинарники и vosk не трогаем.
 set -euo pipefail
 
@@ -9,20 +9,17 @@ echo "stop services"
 systemctl stop ssau-tg.service ssau-bbb.service ssau-panel.service ssau-rasp.service 2>/dev/null || true
 
 echo "wipe sqlite"
-rm -f "$APP/data/bot.db" "$APP/data/bot.db-wal" "$APP/data/bot.db-shm" "$APP/data/"*.db 2>/dev/null || true
+rm -f "$APP/data/"*.db "$APP/data/"*.db-wal "$APP/data/"*.db-shm "$APP/data/"*.db-journal 2>/dev/null || true
 
 echo "wipe recordings / lecture packs"
 if [[ -d "$APP/recordings" ]]; then
   find "$APP/recordings" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 fi
 
-echo "wipe chrome profiles"
-rm -rf "$APP/chrome" "$APP/chrome-rec"
-mkdir -p "$APP/data" "$APP/recordings" "$APP/chrome" "$APP/chrome-rec"
-rm -rf /tmp/ssau-bbb-chrome* /tmp/rod* 2>/dev/null || true
+mkdir -p "$APP/data" "$APP/recordings"
 
 echo "start services"
 systemctl start ssau-rasp.service ssau-tg.service ssau-panel.service ssau-bbb.service
 systemctl is-active ssau-tg ssau-bbb ssau-panel ssau-rasp || true
 
-echo "reset done: users/fio/links/lessons/intents/packs/events cleared; re-onboard after /start"
+echo "reset done: users/fio/links/lessons/intents/packs/events cleared; заново: «Первый вход» в панели (имя для BBB и подгруппа), пароль — кнопкой в боте"

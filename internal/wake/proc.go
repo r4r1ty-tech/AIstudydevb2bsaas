@@ -58,7 +58,7 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 	if cmd == nil {
 		return nil, fmt.Errorf("nil cmd")
 	}
-	cmd.Stderr = logx.LineWriter(logx.LevelWarn, "wake", "wake.py: ", nil)
+	cmd.Stderr = logx.LineWriter(logx.LevelWarn, "wake", "wake.py: ")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -70,6 +70,7 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		_ = stdout.Close()
 		_ = stdin.Close()
 		return nil, err
 	}
@@ -77,8 +78,7 @@ func startCmd(cmd *exec.Cmd) (*ProcRecognizer, error) {
 	go scanLines(stdout, ch)
 	if cmd.Process != nil {
 		logx.Infof("wake", "vosk pid=%d", cmd.Process.Pid)
-		// Свободное распознавание ест около половины ядра: запись (ffmpeg) и
-		// Chromium важнее, вейкворды подождут.
+		// Свободное распознавание ест около половины ядра: запись (ffmpeg) важнее, вейкворды подождут.
 		if err := syscall.Setpriority(syscall.PRIO_PROCESS, cmd.Process.Pid, 10); err != nil {
 			logx.Debugf("wake", "startCmd: nice pid=%d: %v", cmd.Process.Pid, err)
 		}
@@ -209,11 +209,5 @@ func drain(ch <-chan string) []string {
 		default:
 			return out
 		}
-	}
-}
-
-func closeRecognizer(rec Recognizer) {
-	if c, ok := rec.(io.Closer); ok {
-		_ = c.Close()
 	}
 }
