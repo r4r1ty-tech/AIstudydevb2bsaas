@@ -42,6 +42,10 @@ type Config struct {
 	LLMAPIKey       string
 	LLMAPIURL       string
 	LLMModel        string
+	// RouterHub — отдельный платный ключ админа (OpenAI-совместимый API).
+	RouterHubAPIKey string // ROUTERHUB_API_KEY
+	RouterHubAPIURL string // ROUTERHUB_API_URL, по умолчанию https://routerhub.si/v1
+	RouterHubModel  string // ROUTERHUB_MODEL, по умолчанию glm-5.3
 	// CheaperSTTModel — модель расшифровки аудио у cheaper (CHEAPER_STT_MODEL), POST {LLM_API_URL}/audio/transcriptions.
 	CheaperSTTModel string
 	// DeepgramAPIKey / DeepgramAPIURL / DeepgramModel — расшифровка аудио у Deepgram (DEEPGRAM_API_KEY,
@@ -86,6 +90,11 @@ type Config struct {
 	SearXNGURL   string // SEARXNG_URL: свой SearXNG с format=json
 	WebSearch    bool   // WEBSEARCH: 0 — решатель не ищет в интернете (по умолчанию 1)
 	WebSearchDDG bool   // WEBSEARCH_DDG: 0 — без запасного DuckDuckGo (по умолчанию 1)
+	// QuizConsensus — сколько разных API-ключей должны ответить на вопрос,
+	// прежде чем ответ выбирается большинством. 0 — выключить консенсус.
+	QuizConsensus int // QUIZ_CONSENSUS (по умолчанию 3)
+	// QuizConsensusMax — максимум ключей, которые перебираем, если консенсуса нет.
+	QuizConsensusMax int // QUIZ_CONSENSUS_MAX (по умолчанию 9)
 }
 
 func Load() (*Config, error) {
@@ -114,6 +123,9 @@ func Load() (*Config, error) {
 		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
 		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
 		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
+		RouterHubAPIKey:  strings.TrimSpace(os.Getenv("ROUTERHUB_API_KEY")),
+		RouterHubAPIURL:  strings.TrimRight(strEnv("ROUTERHUB_API_URL", "https://routerhub.si/v1"), "/"),
+		RouterHubModel:   strEnv("ROUTERHUB_MODEL", "glm-5.3"),
 		CheaperSTTModel:  strEnv("CHEAPER_STT_MODEL", "whisper-large-v3-turbo"),
 		DeepgramAPIKey:   strEnv("DEEPGRAM_API_KEY", ""),
 		DeepgramAPIURL:   strings.TrimRight(strEnv("DEEPGRAM_API_URL", "https://api.deepgram.com"), "/"),
@@ -134,6 +146,8 @@ func Load() (*Config, error) {
 		SearXNGURL:       strings.TrimRight(strEnv("SEARXNG_URL", ""), "/"),
 		WebSearch:        boolEnv("WEBSEARCH", true),
 		WebSearchDDG:     boolEnv("WEBSEARCH_DDG", true),
+		QuizConsensus:    int(int64Env("QUIZ_CONSENSUS", 3)),
+		QuizConsensusMax: int(int64Env("QUIZ_CONSENSUS_MAX", 9)),
 		GroqAPIURL:       strEnv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
 		GroqVisionModel:  strEnv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
 		GroqSTTModel:     strEnv("GROQ_STT_MODEL", "whisper-large-v3"),
@@ -149,6 +163,14 @@ func Load() (*Config, error) {
 		MoodleBaseURL:    strings.TrimRight(strEnv("MOODLE_BASE_URL", "https://do.ssau.ru/moodle"), "/"),
 	}
 	c.SecretKeyFile = strEnv("SECRET_KEY_FILE", filepath.Join(filepath.Dir(c.DBPath), "secret.key"))
+	if c.QuizConsensus > 0 && c.QuizConsensus < 3 {
+		logx.Warnf("config", "QUIZ_CONSENSUS=%d меньше минимума 3 — поднимаю до 3", c.QuizConsensus)
+		c.QuizConsensus = 3
+	}
+	if c.QuizConsensus > 0 && c.QuizConsensusMax < c.QuizConsensus {
+		logx.Warnf("config", "QUIZ_CONSENSUS_MAX=%d меньше QUIZ_CONSENSUS=%d — поднимаю до минимума", c.QuizConsensusMax, c.QuizConsensus)
+		c.QuizConsensusMax = c.QuizConsensus
+	}
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {
 		for _, p := range strings.Split(extra, ",") {
 			p = strings.TrimSpace(p)

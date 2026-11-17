@@ -1,6 +1,7 @@
 package bbb
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -636,6 +638,128 @@ func (s *directSession) cookieHeaderFor(u *url.URL) string {
 	return strings.Join(parts, "; ")
 }
 
+// handshakeTap запоминает HTTP-ответ рукопожатия WebSocket, чтобы в лог попал
+// реальный статус (403/429/...), а не только «bad status» от x/net/websocket.
+type handshakeTap struct {
+	net.Conn
+
+	mu     sync.Mutex
+	head   []byte
+	status int
+	line   string
+	done   bool
+}
+
+func (t *handshakeTap) Read(p []byte) (int, error) {
+	n, err := t.Conn.Read(p)
+	if n > 0 {
+		t.mu.Lock()
+		if !t.done {
+			const maxHead = 8192
+			if room := maxHead - len(t.head); room > 0 {
+				if n < room {
+					t.head = append(t.head, p[:n]...)
+				} else {
+					t.head = append(t.head, p[:room]...)
+				}
+			}
+			if i := bytes.Index(t.head, []byte("\r\n\r\n")); i >= 0 {
+				t.finishLocked(t.head[:i+4])
+			} else if len(t.head) >= maxHead {
+				t.done = true
+			}
+		}
+		t.mu.Unlock()
+	}
+	return n, err
+}
+
+func (t *handshakeTap) finishLocked(head []byte) {
+	t.done = true
+	lines := strings.Split(string(head), "\r\n")
+	if len(lines) == 0 {
+		return
+	}
+	t.line = strings.TrimSpace(lines[0])
+	fields := strings.Fields(t.line)
+	if len(fields) >= 2 {
+		t.status, _ = strconv.Atoi(fields[1])
+	}
+}
+
+// Status возвращает код ответа и первую строку ответа.
+func (t *handshakeTap) Status() (int, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.status, t.line
+}
+
+// Header возвращает значение заголовка из ответа рукопожатия (без Set-Cookie).
+func (t *handshakeTap) Header(name string) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return headerValue(t.head, name)
+}
+
+func headerValue(head []byte, name string) string {
+	lines := strings.Split(string(head), "\r\n")
+	for _, line := range lines[1:] {
+		k, v, ok := strings.Cut(line, ":")
+		if ok && strings.EqualFold(strings.TrimSpace(k), name) {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// handshakeError — рукопожатие WebSocket не дало 101. Код нужен выше, чтобы
+// включить защиту от шквала 403/429 с одного IP.
+type handshakeError struct {
+	URL        string
+	Status     int
+	StatusLine string
+	RetryAfter string
+	Err        error
+}
+
+func (e *handshakeError) Error() string {
+	if e == nil {
+		return "ddp handshake"
+	}
+	if e.Status > 0 {
+		msg := fmt.Sprintf("bad status HTTP %d", e.Status)
+		if e.RetryAfter != "" {
+			msg += " (Retry-After " + e.RetryAfter + ")"
+		}
+		return msg
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "bad status"
+}
+
+func (e *handshakeError) Unwrap() error { return e.Err }
+
+func handshakeLogFields(tap *handshakeTap) string {
+	var parts []string
+	if st, line := tap.Status(); st > 0 {
+		parts = append(parts, fmt.Sprintf("status=%d", st))
+		if line != "" {
+			parts = append(parts, "line="+strconv.Quote(line))
+		}
+	}
+	for _, h := range []string{"Retry-After", "Server", "Content-Type", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"} {
+		if v := tap.Header(h); v != "" {
+			parts = append(parts, h+"="+strconv.Quote(v))
+		}
+	}
+	if len(parts) == 0 {
+		return "status=unknown"
+	}
+	return strings.Join(parts, " ")
+}
+
 func (s *directSession) dialWebSocket(ctx context.Context, wsURL, origin, cookie string) (*websocket.Conn, error) {
 	cfg, err := websocket.NewConfig(wsURL, origin)
 	if err != nil {
@@ -660,23 +784,33 @@ func (s *directSession) dialWebSocket(ctx context.Context, wsURL, origin, cookie
 		}
 	}
 	addr := net.JoinHostPort(host, port)
+	logx.Debugf("bbb", "ddp handshake: ws=%s origin=%s host=%s cookie_len=%d", wsURL, origin, host, len(cookie))
 	rawConn, err := s.dialFn(ctx, "tcp", addr)
 	if err != nil {
+		logx.Warnf("bbb", "ddp handshake: TCP %s не открылся: %v", addr, err)
 		return nil, err
 	}
 	if u.Scheme == "wss" {
 		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: host})
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = rawConn.Close()
+			logx.Warnf("bbb", "ddp handshake: TLS %s не прошёл: %v", host, err)
 			return nil, err
 		}
 		rawConn = tlsConn
 	}
-	wsConn, err := websocket.NewClient(cfg, rawConn)
+	tap := &handshakeTap{Conn: rawConn}
+	started := time.Now()
+	wsConn, err := websocket.NewClient(cfg, tap)
 	if err != nil {
 		_ = rawConn.Close()
-		return nil, err
+		status, line := tap.Status()
+		retry := tap.Header("Retry-After")
+		logx.Warnf("bbb", "ddp handshake: ws=%s НЕ открылся за %s: %s err=%v",
+			wsURL, time.Since(started).Round(time.Millisecond), handshakeLogFields(tap), err)
+		return nil, &handshakeError{URL: wsURL, Status: status, StatusLine: line, RetryAfter: retry, Err: err}
 	}
+	logx.Debugf("bbb", "ddp handshake: ws=%s открыт за %s: %s", wsURL, time.Since(started).Round(time.Millisecond), handshakeLogFields(tap))
 	return wsConn, nil
 }
 
@@ -693,10 +827,12 @@ func (s *directSession) connectDDP(ctx context.Context) error {
 	s.mu.Unlock()
 
 	wsURL := fmt.Sprintf("%s://%s/html5client/sockjs/123/abcdefgh/websocket", scheme, host)
+	cookie := s.cookieHeaderFor(finalURL)
+	logx.Debugf("bbb", "connectDDP: гость=%q роль=%s host=%s base=%s cookie_len=%d", s.req.FIO, s.req.Role, host, base, len(cookie))
 	dialStart := time.Now()
-	ws, err := s.dialWebSocket(ctx, wsURL, base, s.cookieHeaderFor(finalURL))
+	ws, err := s.dialWebSocket(ctx, wsURL, base, cookie)
 	if err != nil {
-		logx.Warnf("bbb", "ddp: WebSocket %s не открылся за %s: %v", scheme+"://"+host, time.Since(dialStart).Round(time.Millisecond), err)
+		logx.Warnf("bbb", "connectDDP: гость=%q роль=%s WebSocket %s не открылся за %s: %v", s.req.FIO, s.req.Role, scheme+"://"+host, time.Since(dialStart).Round(time.Millisecond), err)
 		return fmt.Errorf("ddp dial: %w", err)
 	}
 	s.mu.Lock()

@@ -28,9 +28,10 @@ import (
 )
 
 const (
-	Gemini   = "gemini"
-	OpenCode = "opencode"
-	Cheaper  = "cheaper"
+	Gemini    = "gemini"
+	OpenCode  = "opencode"
+	Cheaper   = "cheaper"
+	RouterHub = "routerhub"
 
 	// userAgent: Zen за Cloudflare режет пустой/скриптовый UA (ошибка 1010).
 	userAgent = "ssau-bot/1.0 (+https://github.com/r4r1ty-tech/AIstudydevb2bsaas)"
@@ -39,8 +40,9 @@ const (
 var (
 	// GeminiURL и OpenCodeURL — базовые адреса API провайдеров пула.
 	// Переменные пакета позволяют перенаправлять запросы на тестовый сервер в тестах.
-	GeminiURL   = "https://generativelanguage.googleapis.com/v1beta/openai"
-	OpenCodeURL = "https://opencode.ai/zen/v1"
+	GeminiURL    = "https://generativelanguage.googleapis.com/v1beta/openai"
+	OpenCodeURL  = "https://opencode.ai/zen/v1"
+	RouterHubURL = "https://routerhub.si/v1"
 )
 
 // Модели по умолчанию, от лучшей к самой быстрой. Проверено 2026-11-14 на
@@ -57,6 +59,9 @@ var (
 	// картинки — обе верно. muse-spark-1.3-contributor ($0.085/$0.17 за 1M)
 	// — первая, glm-5.3-flash ($0.03/$0.053) — следом.
 	CheaperModels = []string{"muse-spark-1.3-contributor", "glm-5.3-flash"}
+	// RouterHub — платный ключ админа. GLM 5.3 ($0.15/$0.47 за 1M) — средний
+	// баланс цена/качество; Qwen 3.8 Max ($0.20/$0.60) — запасной вариант.
+	RouterHubModels = []string{"glm-5.3", "qwen3.8-max"}
 )
 
 // cheaperModels — для cheaperinference CheaperModels и LLM_MODEL в конце,
@@ -196,6 +201,31 @@ func Providers(cfg *config.Config) []Provider {
 		models := cheaperModels(cfg.LLMModel, cfg.LLMAPIURL)
 		out = append(out, Provider{ID: Cheaper, Name: "Ключ админа LLM_API_* (только админ)", URL: cfg.LLMAPIURL,
 			Keys: []Key{{Label: "админ", Secret: k}}, Models: models, AdminOnly: true})
+	}
+	if k := strings.TrimSpace(cfg.RouterHubAPIKey); k != "" {
+		url := strings.TrimRight(strings.TrimSpace(cfg.RouterHubAPIURL), "/")
+		if url == "" {
+			url = RouterHubURL
+		}
+		out = append(out, Provider{ID: RouterHub, Name: "RouterHub (ключ админа)", URL: url,
+			Keys: []Key{{Label: "админ RouterHub", Secret: k}}, Models: routerHubModels(cfg.RouterHubModel), AdminOnly: true})
+	}
+	return out
+}
+
+// routerHubModels ставит выбранную в env модель первой, затем запасные.
+func routerHubModels(model string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(m string) {
+		if m = strings.TrimSpace(m); m != "" && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	add(model)
+	for _, m := range RouterHubModels {
+		add(m)
 	}
 	return out
 }

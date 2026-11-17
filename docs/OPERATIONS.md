@@ -29,11 +29,14 @@
 | `PROXY_FILE` | `/opt/ssau-bot/proxies.txt` | SOCKS5-список `login:password@ip:port`, по строке. Есть файл — каждая сессия `bbb` идёт через свой прокси |
 | `GEMINI_API_KEYS` | — | Ключи Google AI Studio через запятую (бесплатный тариф). Основная цепочка (`PoolChain`) для конспектов, STT, vision и пула: `gemini-4-hydrogen` → `gemini-3.6-flash` → `gemini-3.5-flash-lite`, внутри модели ключи (включая личные с `share_pool=1`) перемешиваются (`internal/llm`) |
 | `OPENCODE_API_KEYS` / `OPENCODE_API_KEY` | — | OpenCode Zen, бесплатная модель `glm-5.3-flash-free` — хвост цепочки. Ключи (и в `GEMINI_API_KEYS`) подписываются владельцем: `Зуев:oc_sk_…` — подпись видна в панели |
-| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | `cheaper` — **только админ**: его запасной вариант после своего выбора (`muse-spark-1.3-contributor` → `glm-5.3-flash`, `LLM_MODEL` в конце, если другой). В `PoolChain` конспектов не входит. **Используется и для расшифровки аудио** (`LLM_API_KEY` + `LLM_API_URL`, первый провайдер STT, до пула Gemini, модель — `CHEAPER_STT_MODEL`, см. раздел «Расшифровка лекций (STT)»). Старые `DEEPSEEK_*` читаются как фолбэк |
+| `LLM_API_KEY` / `LLM_API_URL` / `LLM_MODEL` | — | `cheaper` — ключ админа (`muse-spark-1.3-contributor` → `glm-5.3-flash`, `LLM_MODEL` в конце, если другой). В `PoolChain` конспектов не входит, но **входит в общий консенсус-пул тестов** (`QuizPoolChain`). **Используется и для расшифровки аудио** (`LLM_API_KEY` + `LLM_API_URL`, первый провайдер STT, до пула Gemini, модель — `CHEAPER_STT_MODEL`, см. раздел «Расшифровка лекций (STT)»). Старые `DEEPSEEK_*` читаются как фолбэк |
+| `ROUTERHUB_API_KEY` / `ROUTERHUB_API_URL` / `ROUTERHUB_MODEL` | `https://routerhub.si/v1` / `glm-5.3` | Отдельный платный ключ админа RouterHub (OpenAI-совместимый Chat Completions). Участвует в общем консенсус-пуле тестов, но не в конспектах/STT. `glm-5.3` — $0.15/$0.47 за 1M, `qwen3.8-max` — запасной ($0.20/$0.60) |
 | `MOODLE_WORKERS` | `4` | Число параллельных воркеров в `uni.Syncer` (`MoodleWorkersLimit()`) для обхода Moodle |
 | `QUIZ_MODE` | `service` | `service` — тест ставится в очередь в базе (`quiz_jobs`), решает сервис `ssau-quiz`; `inline` — решает пул в процессе `rasp`, как раньше (для локальной разработки и тестов). Подробно — раздел «Решение тестов (ssau-quiz)» |
 | `QUIZ_MAX_PARALLEL` | `50` | Сколько тестов `ssau-quiz` решает одновременно, у каждого свой ключ ИИ |
 | `QUIZ_MOODLE_RPS` | `3` | Входов и стартов попыток Moodle в секунду на весь процесс `ssau-quiz` (общий ограничитель). Плюс случайный разнос старта каждой задачи 0–5 с |
+| `QUIZ_CONSENSUS` | `3` | Сколько **разных API-ключей** из общего пула должны ответить на каждый вопрос. Побеждает ответ с >= 50% голосов и строгим лидерством; нет консенсуса — добавляется следующий ключ. `0` — выключить |
+| `QUIZ_CONSENSUS_MAX` | `9` | Максимум ключей, которые перебираем, если консенсуса всё нет |
 | `MOODLE_QUIZ_WORKERS` | `4` | Только при `QUIZ_MODE=inline`: сколько тестов решает пул процесса `rasp` |
 | `DEEPGRAM_API_KEY` / `DEEPGRAM_MODEL` | — | Расшифровка аудио у Deepgram, второй провайдер STT после пула Gemini (модель по умолчанию `nova-3`, адрес — `DEEPGRAM_API_URL`, по умолчанию `https://api.deepgram.com`). Без ключа пропускается |
 | `ASSEMBLYAI_API_KEY` | — | Платный фоллбэк STT для конспектов: порядок STT — deepgram → gemini → cheaper (`LLM_API_*`) → assemblyai → fish → groq; AssemblyAI идёт после Deepgram, Gemini и cheaper, если они не сработали |
@@ -49,6 +52,10 @@
 | `LOG_DEBUG` / `LOG_DIR` | `1` / `logs` | Подробный лог: каждый процесс пишет всё, включая debug, в `LOG_DIR/<процесс>.log` независимо от `LOG_LEVEL` |
 | `LOG_DEBUG_MAX_MB` / `LOG_DEBUG_KEEP` | `50` / `20` | Ротация подробного лога: размер куска и сколько сжатых кусков хранить (`<процесс>.log.N.gz`) |
 | `LOG_DUMP_MAX_MB` | `500` | Потолок снимков `LOG_DIR/dumps` (HTML страниц тестов, промпты и ответы ИИ, ответы с ошибкой), старые удаляются |
+
+Заходы в BBB дополнительно защищены от шквала `403` с одного IP: не больше двух одновременных рукопожатий на хост, разнос стартов ~1.5 с и общий cooldown хоста после `403`/`429` (15 с → 30 с → до 2 мин). В логе `ddp handshake` виден точный HTTP-статус и `Retry-After`.
+
+Тайминги консенсуса: из лимита Moodle вычитается 75 с на сдачу. Для 3-минутного теста остаётся ~1м45 — берутся быстрые модели (flash-lite/flash), 4-й ключ не добирается; при остатке <45 с — одна быстрая цепочка. Для 5-минутного (~3м45) — те же 3 быстрых ключа. Последовательная навигация — не больше 90 с на страницу.
 
 Шаблон — [../env.example](../env.example). `deploy/remote.sh` при первом деплое дописывает недостающие `LECTURE_PAUSE`, `VOSK_*`, `LOG_LEVEL`, `LOG_FILE` и — только при включённом туннеле — `WEBAPP_URL_FILE`.
 
@@ -309,7 +316,7 @@ ssh -J jumphost root@203.0.113.20 'chmod +x /tmp/ssau-deploy/*; bash /tmp/ssau-d
 - атомарно (через временный файл `0600` в Python) обновляет `LLM_*` и `GITHUB_*` в `/opt/ssau-bot/.env` (запрещая переводы строк в значениях) и дописывает дефолты (`LECTURE_PAUSE`, `VOSK_*`, `LOG_*`);
 - при `PANEL_TUNNEL=0` отключает `ssau-tunnel.service`, иначе поднимает `tunnel.sh` (который пишет свежий URL туннеля в `webapp_url` и атомарно обновляет `WEBAPP_PUBLIC_URL` в `.env`).
 
-Секреты Actions: `VDS_SSH_KEY` и `VDS_HOST` (обязательны, без дефолта), `VDS_USER`, `VDS_PORT`; для админского `cheaper` `LLM_API_KEY/URL/MODEL` или `DEEPSEEK_API_KEY`, для выгрузки `LECTURES_TOKEN`. Деплой срабатывает на пуш в `main`, с другой ветки — `gh workflow run deploy.yml --ref <ветка>`.
+Секреты Actions: `VDS_SSH_KEY` и `VDS_HOST` (обязательны, без дефолта), `VDS_USER`, `VDS_PORT`; для админского `cheaper` `LLM_API_KEY/URL/MODEL` или `DEEPSEEK_API_KEY`, для RouterHub — `ROUTERHUB_API_KEY` (опционально `ROUTERHUB_API_URL`, `ROUTERHUB_MODEL`), для выгрузки `LECTURES_TOKEN`. Деплой срабатывает на пуш в `main`, с другой ветки — `gh workflow run deploy.yml --ref <ветка>`.
 
 ## Сброс данных и миграция дубликатов
 

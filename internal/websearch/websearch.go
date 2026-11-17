@@ -248,26 +248,68 @@ type DuckDuckGo struct {
 func (d *DuckDuckGo) Name() string { return "duckduckgo" }
 
 func (d *DuckDuckGo) Search(ctx context.Context, q string, n int) ([]Hit, error) {
-	base := d.Base
-	if base == "" {
-		base = "https://lite.duckduckgo.com"
+	// DDG с серверов быстро отдаёт капчу. Пробуем три точки входа и разные
+	// заголовки: lite → html → основной html. Первая непустая выдача побеждает.
+	type endpoint struct {
+		base string
+		path string
+		html bool
 	}
-	u := base + "/lite/?" + url.Values{"q": {q}, "kl": {"ru-ru"}}.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
+	var endpoints []endpoint
+	if d.Base != "" {
+		base := strings.TrimRight(d.Base, "/")
+		if strings.Contains(base, "html.duckduckgo.com") {
+			endpoints = []endpoint{{base: base, path: "/html/", html: true}}
+		} else {
+			endpoints = []endpoint{{base: base, path: "/lite/"}}
+		}
+	} else {
+		endpoints = []endpoint{
+			{base: "https://lite.duckduckgo.com", path: "/lite/"},
+			{base: "https://html.duckduckgo.com", path: "/html/", html: true},
+			{base: "https://duckduckgo.com", path: "/html/", html: true},
+		}
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.6")
-	resp, err := d.HTTP.Do(req)
-	if err != nil {
-		return nil, err
+	var errs []string
+	for _, ep := range endpoints {
+		u := ep.base + ep.path + "?" + url.Values{"q": {q}, "kl": {"ru-ru"}}.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+		req.Header.Set("Accept-Language", "ru-RU,ru;q=0.9,en;q=0.6")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml")
+		req.Header.Set("Referer", "https://duckduckgo.com/")
+		resp, err := d.HTTP.Do(req)
+		if err != nil {
+			errs = append(errs, ep.base+": "+err.Error())
+			continue
+		}
+		if resp.StatusCode/100 != 2 {
+			_ = resp.Body.Close()
+			errs = append(errs, fmt.Sprintf("%s: status %d", ep.base, resp.StatusCode))
+			continue
+		}
+		var hits []Hit
+		if ep.html {
+			hits, err = parseDDGHTML(io.LimitReader(resp.Body, 2<<20), n)
+		} else {
+			hits, err = parseDDGLite(io.LimitReader(resp.Body, 2<<20), n)
+		}
+		_ = resp.Body.Close()
+		if err == nil && len(hits) > 0 {
+			return hits, nil
+		}
+		if err == nil {
+			err = errors.New("пусто")
+		}
+		errs = append(errs, ep.base+": "+err.Error())
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
-	}
-	return parseDDGLite(io.LimitReader(resp.Body, 2<<20), n)
+	return nil, fmt.Errorf("duckduckgo: %s", strings.Join(errs, "; "))
 }
 
 func parseDDGLite(r io.Reader, n int) ([]Hit, error) {
@@ -280,6 +322,32 @@ func parseDDGLite(r io.Reader, n int) ([]Hit, error) {
 	}
 	links := doc.Find("a.result-link")
 	snips := doc.Find("td.result-snippet")
+	var hits []Hit
+	links.Each(func(i int, a *goquery.Selection) {
+		if len(hits) >= n {
+			return
+		}
+		h := Hit{Title: clean(a.Text()), URL: ddgTarget(a.AttrOr("href", ""))}
+		if i < snips.Length() {
+			h.Snippet = clean(snips.Eq(i).Text())
+		}
+		if h.URL != "" && !strings.Contains(h.URL, "duckduckgo.com/y.js") {
+			hits = append(hits, h)
+		}
+	})
+	return hits, nil
+}
+
+func parseDDGHTML(r io.Reader, n int) ([]Hit, error) {
+	doc, err := goquery.NewDocumentFromReader(r)
+	if err != nil {
+		return nil, err
+	}
+	if doc.Find("form#challenge-form, .anomaly-modal, #challenge-form").Length() > 0 {
+		return nil, errors.New("капча")
+	}
+	links := doc.Find("a.result__a")
+	snips := doc.Find(".result__snippet")
 	var hits []Hit
 	links.Each(func(i int, a *goquery.Selection) {
 		if len(hits) >= n {

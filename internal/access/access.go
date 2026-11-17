@@ -117,6 +117,13 @@ func QuizChainWithVault(cfg *config.Config, st Store, v *vault.Vault, id int64) 
 	return llm.ChainForWithUserKeys(cfg, GetChoice(st, id), IsAdmin(cfg, st, id), KeyOwner(st, id), userKeys)
 }
 
+// QuizPoolChain — общий пул ключей для консенсус-решения тестов: ключи .env,
+// расшаренные личные ключи из БД и ключ админа cheaper. Не привязан к
+// пользователю: по требованию владельца все тесты решаются из одного пула.
+func QuizPoolChain(cfg *config.Config) []llm.Target {
+	return llm.GlobalPoolChain(cfg)
+}
+
 const ownerCacheTTL = 5 * time.Minute
 
 type providerOwners struct {
