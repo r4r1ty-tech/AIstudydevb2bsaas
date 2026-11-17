@@ -45,12 +45,24 @@ const (
 	quizTextAnsRune       = 200
 	quizFastModeRemaining = 60 * time.Second
 	quizMaxRedirects      = 5
+
+	// Консенсус — это 3 параллельных запроса, а не один. На коротких тестах
+	// (3–5 минут) он может не успеть: ниже порога решаем обычной цепочкой.
+	quizConsensusMinBudget   = 45 * time.Second
+	quizConsensusFastBudget  = 4 * time.Minute
+	quizConsensusEscalateMin = 45 * time.Second
+	quizConsensusCallCap     = 2 * time.Minute
+	quizConsensusShortCall   = 30 * time.Second
+	quizSeqPageBudget        = 90 * time.Second
 )
 
 // solvePageOpts управляет бюджетом времени и режимом решения одной страницы.
 type solvePageOpts struct {
 	FastMode bool
 	Deadline time.Time
+	// Budget — сколько времени разумно потратить на эту страницу/волну.
+	// 0 — без отдельного ограничения (только общий solveCtx).
+	Budget time.Duration
 }
 
 type llmAnswerItem struct {
@@ -205,7 +217,7 @@ func (s *Syncer) solvePageAI(ctx context.Context, tag quizTag, c *moodle.Client,
 	for round := 0; ; round++ {
 		rn := round + 1
 		rounds = rn
-		ans, ask, r, err := s.askPage(ctx, tag, rn, chain, course, materials, qs, pc)
+		ans, ask, r, err := s.askPage(ctx, tag, rn, chain, course, materials, qs, pc, opts)
 		pl.Attempts = append(pl.Attempts, r.Attempts...)
 		s.noteConfidence(&pl, ask)
 		if r.Text != "" {
@@ -274,7 +286,7 @@ func (s *Syncer) solvePageAI(ctx context.Context, tag quizTag, c *moodle.Client,
 		}
 		logx.Infof("uni", "quiz %s: слоты %v совпали с известными неверными ответами, повторяю запрос для них", tag, conf)
 		rn := rounds + 1
-		ans2, ask2, r2, err := s.askPage(ctx, tag, rn, chain, course, materials, again, pc)
+		ans2, ask2, r2, err := s.askPage(ctx, tag, rn, chain, course, materials, again, pc, opts)
 		pl.Attempts = append(pl.Attempts, r2.Attempts...)
 		s.noteConfidence(&pl, ask2)
 		if err != nil {
@@ -410,7 +422,7 @@ const quizSysPrompt = "Ты — отличник университета. Ре�
 
 // askPage — один раунд: промпт со всем, что известно, ответ модели,
 // разбор JSON (с одной попыткой починки) и приведение ключей.
-func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []llm.Target, course, materials string, qs []moodle.QuizQuestion, pc *pageCtx) (map[int]moodle.QuizAnswer, pageAsk, llm.Result, error) {
+func (s *Syncer) askPageDirect(ctx context.Context, tag quizTag, round int, chain []llm.Target, course, materials string, qs []moodle.QuizQuestion, pc *pageCtx) (map[int]moodle.QuizAnswer, pageAsk, llm.Result, error) {
 	var ask pageAsk
 	user := buildQuizPrompt(course, materials, qs, pc)
 	logx.Debugf("uni", "quiz %s: раунд %d: промпт %d симв. (вопросов %d, цепочка %d)", tag, round, len([]rune(user)), len(qs), len(chain))

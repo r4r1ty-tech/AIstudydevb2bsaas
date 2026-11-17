@@ -171,8 +171,8 @@
    - `describeQuestionImages` обрабатывает до `quizMaxImages = 4` изображений на вопрос пулом из `quizImageWorkers = 4` воркеров через `notes.DescribeImage` и раскладывает описания обратно в детерминированном порядке вопросов и слотов.
 
 5. **Ключи ИИ и материалы курса:**
-   - Цепочка строится через `access.QuizChainWithVault(st, vault, cfg, tgID)` — не-админ изолирован только своими ключами (личные из `llm_keys` и подписанные фамилией из `.env`), админ имеет свой выбор -> `cheaper` -> пул.
-   - `collectCourseMaterials` подтягивает свежие `notes.md` и `transcript.txt` из `ListPacks` по совпадающей дисциплине (до `32 000` символов).
+   - Тесты решаются из **общего пула** `access.QuizPoolChain`: ключи `.env`, расшаренные личные ключи из `llm_keys` и ключ админа `cheaper`. По умолчанию каждый вопрос решают минимум 3 модели на **разных** ключах; ответ выбирается при `>= 50%` голосов и строгом лидерстве, иначе берётся следующий ключ (`QUIZ_CONSENSUS`, `QUIZ_CONSENSUS_MAX`).
+   - `collectCourseMaterials` подтягивает свежие `notes.md` и `transcript.txt` из `ListPacks` по совпадающей дисциплине, затем из каталога записей, а если локальных файлов нет — текст секций курса и до трёх страниц-лекций Moodle (до `32 000` символов).
 
 6. **Защита от SSRF при чтении страниц из поиска (`internal/uni/quiz_agent.go`):**
    - `openPage` проверяет URL через `validatePageURL` (разрешены только `http:` и `https:`, запрещены `localhost`, `.localhost`, `.local`, `.internal`, `.arpa` и приватные/loopback/link-local/multicast/CGNAT `100.64.0.0/10` адреса).

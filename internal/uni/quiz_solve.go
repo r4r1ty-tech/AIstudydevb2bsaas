@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/PuerkitoBio/goquery"
 
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/access"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
@@ -403,7 +406,12 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 	cfg := s.getCfg()
 	var chain []llm.Target
 	if cfg != nil {
-		chain = access.QuizChainWithVault(cfg, s.Store, s.Vault, acc.TelegramID)
+		// Тесты решаем из общего пула: ключи .env + расшаренные личные ключи
+		// + ключ админа. Если пул пуст, остаётся личная цепочка пользователя.
+		chain = access.QuizPoolChain(cfg)
+		if len(chain) == 0 {
+			chain = access.QuizChainWithVault(cfg, s.Store, s.Vault, acc.TelegramID)
+		}
 	}
 	hasLLM := len(chain) > 0
 	open := info.InProgressAttemptID > 0
@@ -572,6 +580,11 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 	// и отправляются в Moodle по возрастанию индекса сразу по мере готовности, чтобы
 	// при сбое или нехватке времени уже решённый прогресс не пропал.
 	materials := s.collectCourseMaterials(tag, it.Course)
+	if materials == "" {
+		// Локальных конспектов нет (запись сорвалась/старая пара) — читаем
+		// текст курса и страниц-лекций прямо из Moodle.
+		materials = s.collectMoodleCourseText(ctx, tag, c, it.CourseID)
+	}
 	ws := s.webSearcher()
 
 	var (
@@ -694,19 +707,34 @@ type pageSolveResult struct {
 
 func pageOptsForWave(initialFast bool, deadline time.Time, remPages, workers int) solvePageOpts {
 	fast := initialFast
-	if !fast && !deadline.IsZero() {
+	budget := time.Duration(0)
+	if !deadline.IsZero() {
 		left := time.Until(deadline)
+		if left < 0 {
+			left = 0
+		}
 		if workers < 1 {
 			workers = 1
 		}
+		if remPages < 1 {
+			remPages = 1
+		}
 		wavesLeft := (remPages + workers - 1) / workers
-		if left < quizFastModeRemaining || left < time.Duration(wavesLeft)*quizWaveBudget {
+		// В одной волне страницы решаются параллельно, поэтому бюджет
+		// считается на волну, а не на каждую страницу отдельно.
+		if left <= 0 {
+			budget = -1 // дедлайн уже прошёл: время на ИИ не тратим
+		} else {
+			budget = left / time.Duration(wavesLeft)
+		}
+		if !fast && (left < quizFastModeRemaining || left < time.Duration(wavesLeft)*quizWaveBudget) {
 			fast = true
 		}
 	}
 	return solvePageOpts{
 		FastMode: fast,
 		Deadline: deadline,
+		Budget:   budget,
 	}
 }
 
@@ -951,6 +979,11 @@ func (s *Syncer) solveAndSubmitSeqNav(
 		pages = append(pages, cur)
 
 		opts := pageOptsForWave(initialFast, deadline, 1, 1)
+		if !deadline.IsZero() && (opts.Budget == 0 || opts.Budget > quizSeqPageBudget) {
+			// При последовательной навигации следующая страница идёт только
+			// после этой, поэтому одну страницу нельзя отдавать на весь остаток.
+			opts.Budget = quizSeqPageBudget
+		}
 		r := s.solveSinglePageSafe(solveCtx, tag, idx, cur, c, ws, chain, course, materials, opts)
 		run.Pages = append(run.Pages, r.pl)
 		if r.usedKey != "" {
@@ -982,66 +1015,211 @@ func (s *Syncer) solveAndSubmitSeqNav(
 }
 
 func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
-	if s.Store == nil {
-		return ""
-	}
-	packs, err := s.Store.ListPacks()
-	if err != nil {
-		logx.Warnf("uni", "quiz %s: список лекций: %v", tag, err)
-		return ""
-	}
-
 	recRoot := config.DefaultRecordings
 	if cfg := s.getCfg(); cfg != nil && cfg.RecordingsDir != "" {
 		recRoot = cfg.RecordingsDir
 	}
 
-	var b strings.Builder
 	const maxTotalChars = 32000
+	var b strings.Builder
 	var used []string
-	for _, p := range packs {
-		if !matchDiscipline(p.Discipline, course) {
-			logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d не относится к курсу %q, пропуск", tag, p.ID, p.Discipline, p.Number, course)
-			continue
+	written := 0
+	seen := map[string]bool{}
+	appendFile := func(path, label string) int {
+		if seen[path] || written >= maxTotalChars {
+			return 0
 		}
-		notesRunes, transRunes := 0, 0
-		if p.Dir != "" {
-			packDir := p.Dir
-			if !filepath.IsAbs(packDir) {
-				packDir = filepath.Join(recRoot, packDir)
+		//nolint:gosec // путь из контролируемого каталога записей
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) == 0 {
+			return 0
+		}
+		seen[path] = true
+		header := fmt.Sprintf("\n--- %s (%s) ---\n", label, filepath.Dir(path))
+		headerRunes := utf8.RuneCountInString(header)
+		remain := maxTotalChars - written - headerRunes - 1
+		if remain <= 0 {
+			return 0
+		}
+		runes := []rune(string(data))
+		if len(runes) > remain {
+			runes = runes[:remain]
+		}
+		b.WriteString(header)
+		b.WriteString(string(runes))
+		b.WriteString("\n")
+		written += headerRunes + len(runes) + 1
+		return len(runes)
+	}
+
+	if s.Store != nil {
+		packs, err := s.Store.ListPacks()
+		if err != nil {
+			logx.Warnf("uni", "quiz %s: список лекций: %v", tag, err)
+		}
+		for _, p := range packs {
+			if !matchDiscipline(p.Discipline, course) {
+				logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d не относится к курсу %q, пропуск", tag, p.ID, p.Discipline, p.Number, course)
+				continue
 			}
-			notesPath := filepath.Join(packDir, "notes.md")
-			if data, err := os.ReadFile(notesPath); err == nil && len(data) > 0 {
-				fmt.Fprintf(&b, "\n--- Конспект лекции %s №%d ---\n", p.Discipline, p.Number)
-				b.Write(data)
-				b.WriteString("\n")
-				notesRunes = utf8.RuneCount(data)
-			}
-			if utf8.RuneCountInString(b.String()) < maxTotalChars {
-				transPath := filepath.Join(packDir, "transcript.txt")
-				if data, err := os.ReadFile(transPath); err == nil && len(data) > 0 {
-					fmt.Fprintf(&b, "\n--- Транскрипт лекции %s №%d ---\n", p.Discipline, p.Number)
-					b.Write(data)
-					b.WriteString("\n")
-					transRunes = utf8.RuneCount(data)
+			notesRunes, transRunes := 0, 0
+			if p.Dir != "" {
+				packDir := p.Dir
+				if !filepath.IsAbs(packDir) {
+					packDir = filepath.Join(recRoot, packDir)
 				}
+				notesRunes = appendFile(filepath.Join(packDir, "notes.md"), fmt.Sprintf("Конспект лекции %s №%d", p.Discipline, p.Number))
+				transRunes = appendFile(filepath.Join(packDir, "transcript.txt"), fmt.Sprintf("Транскрипт лекции %s №%d", p.Discipline, p.Number))
 			}
-		}
-		logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d: конспект %d симв., транскрипт %d симв.",
-			tag, p.ID, p.Discipline, p.Number, notesRunes, transRunes)
-		if notesRunes+transRunes > 0 {
-			used = append(used, fmt.Sprintf("%s №%d", p.Discipline, p.Number))
-		}
-		if utf8.RuneCountInString(b.String()) >= maxTotalChars {
-			break
+			logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d: конспект %d симв., транскрипт %d симв.",
+				tag, p.ID, p.Discipline, p.Number, notesRunes, transRunes)
+			if notesRunes+transRunes > 0 {
+				used = append(used, fmt.Sprintf("%s №%d", p.Discipline, p.Number))
+			}
+			if written >= maxTotalChars {
+				break
+			}
 		}
 	}
+
+	// Даже если пакета нет в БД (запись сорвалась, старая папка, ручной конспект),
+	// читаем notes.md/transcript.txt из каталога записей по названию дисциплины.
+	if written < maxTotalChars && recRoot != "" {
+		_ = filepath.WalkDir(recRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if written >= maxTotalChars {
+				return fs.SkipAll
+			}
+			if d.IsDir() {
+				rel, _ := filepath.Rel(recRoot, path)
+				if rel != "." && strings.Count(rel, string(os.PathSeparator)) > 4 {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			name := d.Name()
+			if name != "notes.md" && name != "transcript.txt" {
+				return nil
+			}
+			if !pathMatchesCourse(path, course) {
+				return nil
+			}
+			label := "Конспект лекции (файл)"
+			if name == "transcript.txt" {
+				label = "Транскрипт лекции (файл)"
+			}
+			if n := appendFile(path, label); n > 0 {
+				used = append(used, filepath.Dir(path))
+			}
+			return nil
+		})
+	}
+
 	res := b.String()
 	if runes := []rune(res); len(runes) > maxTotalChars {
 		res = string(runes[:maxTotalChars])
 	}
-	logx.Infof("uni", "quiz %s: материалы курса: %d симв. из пакетов [%s]", tag, utf8.RuneCountInString(res), strings.Join(used, ", "))
+	if len(used) == 0 {
+		logx.Infof("uni", "quiz %s: материалы курса: 0 симв. — подходящих конспектов/транскриптов не нашлось", tag)
+	} else {
+		logx.Infof("uni", "quiz %s: материалы курса: %d симв. из [%s]", tag, utf8.RuneCountInString(res), strings.Join(used, ", "))
+	}
 	return res
+}
+
+// collectMoodleCourseText — лёгкий фолбэк, когда локальных конспектов нет:
+// читает текст секций курса и до трёх страниц-лекций (modtype_page) из Moodle.
+// Ошибки не валят решение теста — просто остаёмся без этого источника.
+func (s *Syncer) collectMoodleCourseText(ctx context.Context, tag quizTag, c *moodle.Client, courseID int64) string {
+	if c == nil || courseID == 0 {
+		return ""
+	}
+	doc, _, err := c.PageWithURL(ctx, fmt.Sprintf("/course/view.php?id=%d", courseID))
+	if err != nil {
+		logx.Debugf("uni", "quiz %s: материалы Moodle: курс %d не открылся: %v", tag, courseID, err)
+		return ""
+	}
+	const maxChars = 16000
+	var b strings.Builder
+	seen := map[string]bool{}
+	add := func(label, text string) bool {
+		text = strings.TrimSpace(text)
+		if text == "" || seen[text] {
+			return true
+		}
+		seen[text] = true
+		remaining := maxChars - utf8.RuneCountInString(b.String())
+		if remaining <= 0 {
+			return false
+		}
+		if r := []rune(text); len(r) > remaining {
+			text = string(r[:remaining]) + "\n…"
+		}
+		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", label, text)
+		return utf8.RuneCountInString(b.String()) < maxChars
+	}
+	doc.Find("li.section, li.course-section").EachWithBreak(func(_ int, sec *goquery.Selection) bool {
+		title := cleanStr(sec.Find(".sectionname, h3").First().Text())
+		if title == "" {
+			title = "секция курса"
+		}
+		sec.Find("script, style").Remove()
+		return add("Курс, "+title, sec.Text())
+	})
+	// Страницы-лекции: берём первые три, чтобы не раздувать промпт.
+	n := 0
+	doc.Find("li.activity.modtype_page a.activityname, li.activity.modtype_page a.activityinstance").EachWithBreak(func(_ int, a *goquery.Selection) bool {
+		if n >= 3 || utf8.RuneCountInString(b.String()) >= maxChars {
+			return false
+		}
+		href := strings.TrimSpace(a.AttrOr("href", ""))
+		if href == "" {
+			return true
+		}
+		n++
+		page, _, err := c.PageWithURL(ctx, href)
+		if err != nil {
+			logx.Debugf("uni", "quiz %s: материалы Moodle: страница %s: %v", tag, href, err)
+			return true
+		}
+		page.Find("script, style, nav, header, footer").Remove()
+		text := cleanStr(page.Find("#region-main, .course-content").First().Text())
+		add("Лекция Moodle: "+cleanStr(a.Text()), text)
+		return true
+	})
+	res := strings.TrimSpace(b.String())
+	if runes := []rune(res); len(runes) > maxChars {
+		res = string(runes[:maxChars])
+	}
+	if res != "" {
+		logx.Infof("uni", "quiz %s: материалы Moodle: %d симв.", tag, utf8.RuneCountInString(res))
+	}
+	return res
+}
+
+// pathMatchesCourse — грубая проверка, что путь записи относится к дисциплине:
+// два значимых слова из названия курса или название целиком.
+func pathMatchesCourse(path, course string) bool {
+	p := strings.ToLower(path)
+	c := strings.ToLower(cleanStr(course))
+	if c == "" {
+		return false
+	}
+	if strings.Contains(p, c) {
+		return true
+	}
+	words := strings.FieldsFunc(c, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	matched := 0
+	for _, w := range words {
+		if len([]rune(w)) >= 4 && strings.Contains(p, w) {
+			matched++
+		}
+	}
+	return matched >= 2
 }
 
 // usedModelList — модели, которые отвечали на тест, по алфавиту (для лога).

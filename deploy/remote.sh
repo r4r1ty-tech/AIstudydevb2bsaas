@@ -239,7 +239,10 @@ grep -q '^LOG_DIR=' "$APP/.env" || echo 'LOG_DIR=/opt/ssau-bot/logs' >> "$APP/.e
 set_env_vars \
   "LLM_API_KEY=${LLM_API_KEY:-}" \
   "LLM_API_URL=${LLM_API_URL:-}" \
-  "LLM_MODEL=${LLM_MODEL:-}"
+  "LLM_MODEL=${LLM_MODEL:-}" \
+  "ROUTERHUB_API_KEY=${ROUTERHUB_API_KEY:-}" \
+  "ROUTERHUB_API_URL=${ROUTERHUB_API_URL:-}" \
+  "ROUTERHUB_MODEL=${ROUTERHUB_MODEL:-}"
 
 github_token="${LECTURES_TOKEN:-}"
 if [[ -z "$github_token" ]] && command -v gh >/dev/null 2>&1; then

@@ -2,9 +2,12 @@ package bbb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,14 +49,22 @@ type Worker struct {
 	audioMiss    map[string]int       // пишущая сессия не в аудио, тиков подряд
 	joining      map[string]struct{}
 	seatedAt     map[string]time.Time // когда сессия села (лобби или комната) — для лога выхода
-	testPaused   bool
-	lectureNow   bool      // этот тик решил сидеть на паре — тяжёлые задачи ждут
-	testFailN    int       // неудачные тест-заходы подряд
-	testLastFail string    // последняя причина — не дублируем админу
-	testRetryAt  time.Time // бэкофф тест-захода
-	busy         bool
-	joinWG       sync.WaitGroup
-	jobWG        sync.WaitGroup
+	// Защита BBB от шквала заходов с одного IP: не больше N одновременных
+	// рукопожатий на хост, разнос стартов и общий cooldown после 403/429.
+	joinHostSem      map[string]chan struct{}
+	joinHostRecSem   map[string]chan struct{} // отдельный слот для пишущей сессии
+	joinHostNext     map[string]time.Time
+	joinHostCooldown map[string]time.Time
+	joinHostFailN    map[string]int
+	sessionHost      map[string]string // ключ сессии → хост BBB (для cooldown в watchLobby)
+	testPaused       bool
+	lectureNow       bool      // этот тик решил сидеть на паре — тяжёлые задачи ждут
+	testFailN        int       // неудачные тест-заходы подряд
+	testLastFail     string    // последняя причина — не дублируем админу
+	testRetryAt      time.Time // бэкофф тест-захода
+	busy             bool
+	joinWG           sync.WaitGroup
+	jobWG            sync.WaitGroup
 }
 
 func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker {
@@ -96,6 +107,13 @@ func NewWorker(cfg *config.Config, st *store.Store, loc *time.Location) *Worker 
 		audioMiss:    make(map[string]int),
 		joining:      make(map[string]struct{}),
 		seatedAt:     make(map[string]time.Time),
+
+		joinHostSem:      make(map[string]chan struct{}),
+		joinHostRecSem:   make(map[string]chan struct{}),
+		joinHostNext:     make(map[string]time.Time),
+		joinHostCooldown: make(map[string]time.Time),
+		joinHostFailN:    make(map[string]int),
+		sessionHost:      make(map[string]string),
 	}
 	logx.Debugf("bbb", "NewWorker: joiner=%T hogs=%T", j, hogs)
 	return w
@@ -364,6 +382,14 @@ const (
 	lobbyAlertGap  = 20 * time.Minute // повтор алерта админу
 	recRetryGap    = 2 * time.Minute  // запись не стартовала — новая попытка не раньше
 	maxRecFails    = 3                // столько неудач подряд — пара остаётся без записи
+
+	// BBB часто отдаёт 403, если с одного IP одновременно ломятся все студенты.
+	// Держим не больше двух рукопожатий на хост, разносим старты и при 403/429
+	// включаем общий cooldown хоста вместо трёх быстрых повторов каждого.
+	maxJoinsPerHost     = 2
+	joinHostStagger     = 1500 * time.Millisecond
+	joinHostCooldown    = 15 * time.Second
+	joinHostCooldownMax = 2 * time.Minute
 )
 
 type pending struct {
@@ -576,6 +602,204 @@ func (w *Worker) markDone(key string) {
 	w.mu.Unlock()
 }
 
+// bbbHost — хост комнаты BBB: общий ключ для ограничителя заходов.
+func bbbHost(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+func (w *Worker) hostCooldownWait(host string) time.Duration {
+	if host == "" {
+		return 0
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	until := w.joinHostCooldown[host]
+	if !until.After(time.Now()) {
+		return 0
+	}
+	return time.Until(until)
+}
+
+// beginHostJoin — семафор на хост + разнос стартов. Возвращает release,
+// оставшийся cooldown (если хост ещё остывает) и признак «можно заходить».
+func (w *Worker) beginHostJoin(ctx context.Context, host string, record bool) (func(), time.Duration, bool) {
+	if host == "" {
+		return func() {}, 0, true
+	}
+	w.mu.Lock()
+	if until := w.joinHostCooldown[host]; until.After(time.Now()) {
+		wait := time.Until(until)
+		w.mu.Unlock()
+		return nil, wait, false
+	}
+	var sem chan struct{}
+	if record {
+		// Рекордер не должен стоять за 30 студентами: у него отдельный слот
+		// и без искусственной задержки.
+		sem = w.joinHostRecSem[host]
+		if sem == nil {
+			sem = make(chan struct{}, 1)
+			w.joinHostRecSem[host] = sem
+		}
+	} else {
+		sem = w.joinHostSem[host]
+		if sem == nil {
+			sem = make(chan struct{}, maxJoinsPerHost)
+			w.joinHostSem[host] = sem
+		}
+	}
+	w.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return nil, 0, false
+	case sem <- struct{}{}:
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			<-sem
+		}
+	}
+
+	w.mu.Lock()
+	if until := w.joinHostCooldown[host]; until.After(time.Now()) {
+		wait := time.Until(until)
+		w.mu.Unlock()
+		release()
+		return nil, wait, false
+	}
+	var delay time.Duration
+	if !record {
+		now := time.Now()
+		next := w.joinHostNext[host]
+		if next.Before(now) {
+			next = now
+		}
+		delay = next.Sub(now)
+		w.joinHostNext[host] = next.Add(joinHostStagger + time.Duration(rand.Intn(400))*time.Millisecond) //nolint:gosec // jitter, not security
+	}
+	w.mu.Unlock()
+
+	if delay > 0 {
+		t := time.NewTimer(delay)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			release()
+			return nil, 0, false
+		case <-t.C:
+		}
+	}
+	logx.Debugf("bbb", "join guard: host=%s слот получен, задержка %s", host, delay.Round(time.Millisecond))
+	return release, 0, true
+}
+
+// deferHost не считает это неудачей пользователя: просто откладывает заход,
+// пока общий cooldown хоста не истечёт.
+func (w *Worker) deferHost(key, host string, wait time.Duration) {
+	if wait <= 0 {
+		wait = joinHostCooldown
+	}
+	until := time.Now().Add(wait)
+	w.mu.Lock()
+	if until.After(w.retryAt[key]) {
+		w.retryAt[key] = until
+	}
+	w.mu.Unlock()
+	logx.Warnf("bbb", "join guard: host=%s key=%s пауза %s — хост остывает после 403/429", host, key, wait.Round(time.Second))
+}
+
+// recordHostThrottle — отдельная ветка для 403/429: показать состояние,
+// отложить повтор, но не считать это неудачей пользователя.
+func (w *Worker) recordHostThrottle(u model.User, lesson model.Lesson, key, host string, err error) {
+	wait := w.hostCooldownWait(host)
+	if wait <= 0 {
+		wait = joinHostCooldown
+	}
+	w.deferHost(key, host, wait)
+	msg := "BBB временно ограничивает заходы (403/429), жду"
+	if w.Store != nil {
+		if serr := w.Store.SetPresence(model.Presence{
+			TelegramID: u.TelegramID, LessonID: lesson.ID,
+			State: model.PresenceError, Message: msg, UpdatedAt: time.Now(),
+		}); serr != nil {
+			logx.Errorf("bbb", "recordHostThrottle: set presence key=%s: %v", key, serr)
+		}
+		if serr := w.Store.AddEvent(model.Event{
+			At: time.Now(), Type: model.EventError,
+			TelegramID: u.TelegramID, LessonID: lesson.ID, Message: msg,
+		}); serr != nil {
+			logx.Errorf("bbb", "recordHostThrottle: add event key=%s: %v", key, serr)
+		}
+	}
+	logx.Warnf("bbb", "join throttled: %s key=%s tg=%d host=%s: %v — не считаю личной неудачей", lessonTag(lesson), key, u.TelegramID, host, err)
+}
+
+func isThrottleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var he *handshakeError
+	if errors.As(err, &he) {
+		return he.Status == 403 || he.Status == 429 || he.Status == 503
+	}
+	msg := err.Error()
+	for _, code := range []string{"403", "429", "503"} {
+		if strings.Contains(msg, "HTTP "+code) || strings.Contains(msg, "status "+code) || strings.Contains(msg, "bad status "+code) {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *Worker) noteHostFailure(host string, err error) {
+	if host == "" || !isThrottleError(err) {
+		return
+	}
+	code := 0
+	var he *handshakeError
+	if errors.As(err, &he) {
+		code = he.Status
+	}
+	w.mu.Lock()
+	w.joinHostFailN[host]++
+	n := w.joinHostFailN[host]
+	// 1<<(n-1) при больших n переполняет Duration; дальше 5-й попытки
+	// cooldown всё равно упирается в максимум.
+	shift := n - 1
+	if shift > 4 {
+		shift = 4
+	}
+	delay := joinHostCooldown * time.Duration(1<<shift)
+	if delay <= 0 || delay > joinHostCooldownMax {
+		delay = joinHostCooldownMax
+	}
+	delay += time.Duration(rand.Intn(500)) * time.Millisecond //nolint:gosec // jitter, not security
+	w.joinHostCooldown[host] = time.Now().Add(delay)
+	w.mu.Unlock()
+	codeText := "?"
+	if code > 0 {
+		codeText = strconv.Itoa(code)
+	}
+	logx.Warnf("bbb", "join guard: host=%s HTTP %s — общий cooldown %s (подряд %d)", host, codeText, delay.Round(time.Second), n)
+}
+
+func (w *Worker) resetHostFailure(host string) {
+	if host == "" {
+		return
+	}
+	w.mu.Lock()
+	delete(w.joinHostFailN, host)
+	delete(w.joinHostCooldown, host)
+	w.mu.Unlock()
+}
+
 func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson, url, key string, now time.Time, record bool) {
 	logx.Debugf("bbb", "ensureIn: key=%s tg=%d lesson=%d record=%v url=%s", key, u.TelegramID, lesson.ID, record, redactURL(url))
 	meetKey := meetingGroupKey(lesson, url)
@@ -585,7 +809,9 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		}
 		return
 	}
+	host := bbbHost(url)
 	w.mu.Lock()
+	w.sessionHost[key] = host
 	_, live := w.sessions[key]
 	_, blocked := w.blockedAt[key]
 	w.mu.Unlock()
@@ -615,6 +841,24 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 		w.watchLobby(ctx, u, lesson, key, now)
 		return
 	}
+	if wait := w.hostCooldownWait(host); wait > 0 {
+		if record {
+			w.clearRecJoiningIfIdle(meetingGroupKey(lesson, url), key)
+		}
+		w.deferHost(key, host, wait)
+		return
+	}
+	release, wait, ok := w.beginHostJoin(ctx, host, record)
+	if !ok {
+		if record {
+			w.clearRecJoiningIfIdle(meetingGroupKey(lesson, url), key)
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		w.deferHost(key, host, wait)
+		return
+	}
 	role := RolePresence
 	if record {
 		role = RoleRecord
@@ -622,6 +866,7 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 	logx.Infof("bbb", "join: %s key=%s tg=%d роль=%s гость=%q url=%s", lessonTag(lesson), key, u.TelegramID, role, u.FIO, redactURL(url))
 	joinStart := time.Now()
 	sess, err := w.Joiner.Join(ctx, JoinReq{URL: url, FIO: u.FIO, Role: role})
+	release()
 	if err != nil {
 		if ctx.Err() != nil {
 			// Остановка процесса посреди захода — не неудача захода.
@@ -629,9 +874,17 @@ func (w *Worker) ensureIn(ctx context.Context, u model.User, lesson model.Lesson
 			return
 		}
 		logx.Errorf("bbb", "ensureIn: join %s key=%s не вошёл за %s: %v", lessonTag(lesson), key, time.Since(joinStart).Round(time.Millisecond), err)
+		if isThrottleError(err) {
+			// Это не личная неудача студента: BBB/прокси отбивает шквал с
+			// одного IP. Не увеличиваем failN и не блокируем до JoinYes.
+			w.noteHostFailure(host, err)
+			w.recordHostThrottle(u, lesson, key, host, err)
+			return
+		}
 		w.joinFail(ctx, u, lesson, key, now, err.Error())
 		return
 	}
+	w.resetHostFailure(host)
 	closeWith := func(why string) {
 		if cerr := sess.Close(); cerr != nil {
 			logx.Debugf("bbb", "ensureIn: close after %s: %v", why, cerr)
@@ -788,7 +1041,11 @@ func (w *Worker) joinFail(ctx context.Context, u model.User, lesson model.Lesson
 		w.blockedAt[key] = time.Now()
 		delete(w.retryAt, key)
 	} else {
-		w.retryAt[key] = time.Now().Add(joinRetryBase * time.Duration(1<<(n-1)))
+		until := time.Now().Add(joinRetryBase * time.Duration(1<<(n-1)))
+		// Не сокращаем паузу, если хост уже остывает дольше.
+		if until.After(w.retryAt[key]) {
+			w.retryAt[key] = until
+		}
 	}
 	w.mu.Unlock()
 	msg := reason
@@ -827,10 +1084,18 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 	logx.Debugf("bbb", "watchLobby: key=%s tg=%d", key, u.TelegramID)
 	w.mu.Lock()
 	sess := w.sessions[key]
+	host := w.sessionHost[key]
 	since, wasLobby := w.lobbyAt[key]
 	w.mu.Unlock()
 	if sess == nil {
 		logx.Debugf("bbb", "watchLobby: key=%s no session", key)
+		return
+	}
+	if wait := w.hostCooldownWait(host); wait > 0 {
+		// Хост остывает после 403/429: не дёргаем сеть каждые 15 секунд,
+		// но перевод «лобби → комната» и алерт по лобби не теряем.
+		logx.Debugf("bbb", "watchLobby: key=%s host=%s cooldown %s — проверку пропускаю", key, host, wait.Round(time.Second))
+		w.handleLobbyWait(ctx, u, lesson, key, now, since, wasLobby)
 		return
 	}
 	lobby, err := sess.InLobby(ctx)
@@ -852,6 +1117,14 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		n := w.probeErr[key]
 		w.mu.Unlock()
 		logx.Warnf("bbb", "watchLobby: key=%s probe %d/%d: %s", key, n, maxProbeErrs, reason)
+		// Если BBB отвечает 403/429 на проверку лобби, это тот же шквал с
+		// одного IP: тормозим хост для всех, а не только эту сессию.
+		if isThrottleError(err) && w.hostCooldownWait(host) == 0 {
+			w.noteHostFailure(host, err)
+			// retryAt намеренно не ставим: сессия в лобби должна продолжать
+			// проверяться, иначе потеряем переход в комнату. Сеть тормозит
+			// hostCooldown, а не блокировка ключа.
+		}
 		if n >= maxProbeErrs {
 			w.dropDead(ctx, u, lesson, key, reason)
 		}
@@ -879,6 +1152,13 @@ func (w *Worker) watchLobby(ctx context.Context, u model.User, lesson model.Less
 		w.greet(ctx, sess)
 		return
 	}
+	w.handleLobbyWait(ctx, u, lesson, key, now, since, wasLobby)
+}
+
+// handleLobbyWait обновляет состояние «сидит в лобби» и алерты. Вынесено
+// отдельно, чтобы watchLobby мог вызывать это и во время cooldown хоста,
+// не дёргая сеть.
+func (w *Worker) handleLobbyWait(ctx context.Context, u model.User, lesson model.Lesson, key string, now time.Time, since time.Time, wasLobby bool) {
 	if !wasLobby {
 		w.mu.Lock()
 		w.lobbyAt[key] = now
@@ -1010,6 +1290,7 @@ func (w *Worker) closeSession(ctx context.Context, telegramID, lessonID int64, k
 	delete(w.lobbyAlertAt, key)
 	delete(w.probeErr, key)
 	delete(w.audioMiss, key)
+	delete(w.sessionHost, key)
 	for mk, rk := range w.recorder {
 		if rk == key {
 			delete(w.recorder, mk)
@@ -1060,6 +1341,11 @@ func (w *Worker) forget(ctx context.Context, valid map[int64]struct{}, validMeet
 				delete(m, key)
 				seen[key] = struct{}{}
 			}
+		}
+	}
+	for key := range w.sessionHost {
+		if key != testSessionKey && gone(key) {
+			delete(w.sessionHost, key)
 		}
 	}
 	for _, m := range []map[string]int{w.dropRetry, w.failN, w.probeErr, w.audioMiss} {
@@ -1128,6 +1414,7 @@ func (w *Worker) closeAll() {
 			logx.Debugf("bbb", "closeAll: close key=%s: %v", k, err)
 		}
 		delete(w.sessions, k)
+		delete(w.sessionHost, k)
 	}
 	if c, ok := w.Joiner.(io.Closer); ok {
 		if err := c.Close(); err != nil {
