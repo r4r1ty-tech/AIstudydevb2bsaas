@@ -51,7 +51,7 @@ const (
 	quizConsensusMinBudget   = 45 * time.Second
 	quizConsensusFastBudget  = 4 * time.Minute
 	quizConsensusEscalateMin = 45 * time.Second
-	quizConsensusCallCap     = 2 * time.Minute
+	quizConsensusCallCap     = 3 * time.Minute
 	quizConsensusShortCall   = 30 * time.Second
 	quizSeqPageBudget        = 90 * time.Second
 )
@@ -63,6 +63,23 @@ type solvePageOpts struct {
 	// Budget — сколько времени разумно потратить на эту страницу/волну.
 	// 0 — без отдельного ограничения (только общий solveCtx).
 	Budget time.Duration
+}
+
+// quizThinkMinBudget — ниже этого бюджета на страницу максимальные
+// размышления не включаются: модель не успеет, и попытка сорвётся по таймеру.
+const quizThinkMinBudget = 2 * time.Minute
+
+// quizEffort — глубина размышлений для страницы. По умолчанию максимум,
+// но в быстром режиме и при тесном бюджете она снижается.
+func quizEffort(opts solvePageOpts) string {
+	switch {
+	case opts.FastMode:
+		return "low"
+	case opts.Budget > 0 && opts.Budget < quizThinkMinBudget:
+		return "medium"
+	default:
+		return "max"
+	}
 }
 
 type llmAnswerItem struct {
@@ -413,6 +430,8 @@ const quizSysPrompt = "Ты — отличник университета. Ре�
 	"- \"search\" (по желанию) — запрос для поисковика (3–10 слов), если хочешь что-то проверить; результаты покажут в следующем раунде.\n" +
 	"- \"open\" (по желанию) — до 3 адресов ИЗ ПОКАЗАННЫХ результатов поиска, страницы которых надо прочитать целиком.\n" +
 	"Правила:\n" +
+	"- Думай столько, сколько нужно: разбери условие, реши задачу по шагам и проверь результат обратным действием (декодируй код обратно, подставь ответ в формулу, пересчитай биты). В JSON попадает только итог, без рассуждений.\n" +
+	"- \"confidence\" ставь честно: 0.9+ — только если проверил и сомнений не осталось; 0.5 — догадка; ниже — почти не уверен. Низкая уверенность лучше выдуманного ответа.\n" +
 	"- Отвечай на КАЖДЫЙ вопрос. Отказ, «невозможно решить», «нет данных» — запрещены: если данных мало, реши сам по своим знаниям и дай самый вероятный ответ с низкой confidence.\n" +
 	"- Задачи на коды (Шеннон-Фано, Хаффман, Элиас, декодирование) решай сам по шагам в уме и выдавай только результат.\n" +
 	"- Материалы лекций главнее интернета. В найденных банках ответов варианты бывают в другом порядке или от другого варианта теста — сверяй по тексту, а не по букве.\n" +
@@ -780,6 +799,10 @@ const quizImagePrompt = "Это рисунок из вопроса универ�
 func (s *Syncer) describeQuestionImages(ctx context.Context, tag quizTag, c *moodle.Client, qs []moodle.QuizQuestion, pl *quizlog.Page) []moodle.QuizQuestion {
 	out := make([]moodle.QuizQuestion, len(qs))
 	copy(out, qs)
+
+	// Распознавание рисунка — переписывание содержимого, а не рассуждение:
+	// глубокие размышления здесь только съедают таймер теста.
+	ctx = llm.WithGenOpts(ctx, llm.GenOpts{ReasoningEffort: "low"})
 
 	type imgJob struct {
 		qIdx   int

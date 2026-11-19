@@ -685,8 +685,9 @@ type Result struct {
 // ErrNoProviders — ни одного ключа не настроено.
 var ErrNoProviders = errors.New("llm: не настроено ни одного провайдера")
 
-// PerCallTimeout — сколько ждём один вызов; hydrogen думает до минуты.
-var PerCallTimeout = 4 * time.Minute
+// PerCallTimeout — сколько ждём один вызов; hydrogen в режиме максимальных
+// размышлений может думать несколько минут.
+var PerCallTimeout = 6 * time.Minute
 
 var httpClient = &http.Client{}
 
@@ -896,11 +897,25 @@ func call(ctx context.Context, t Target, sysPrompt, userPrompt string) (string, 
 		msgs = append(msgs, chatMessage{Role: "system", Content: sysPrompt})
 	}
 	msgs = append(msgs, chatMessage{Role: "user", Content: userPrompt})
-	payload, err := json.Marshal(chatReq{Model: t.Model, Messages: msgs})
+	payload, extra := buildChatPayload(t, msgs, GenOptsFromContext(ctx))
+	text, status, hdr, body, err := postJSON(ctx, t, payload)
+	if extra && genParamsRejected(status, body) {
+		// Провайдер не знает наших необязательных полей: повторяем без них
+		// и запоминаем адрес, чтобы больше не тратить запрос впустую.
+		markGenParamsUnsupported(t)
+		payload, _ = buildChatPayload(t, msgs, GenOpts{})
+		return postJSON(ctx, t, payload)
+	}
+	return text, status, hdr, body, err
+}
+
+// postJSON отправляет готовое тело chat/completions и разбирает ответ.
+func postJSON(ctx context.Context, t Target, payload map[string]any) (string, int, http.Header, []byte, error) {
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", 0, nil, nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ChatEndpoint(t.url), bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ChatEndpoint(t.url), bytes.NewReader(raw))
 	if err != nil {
 		return "", 0, nil, nil, err
 	}

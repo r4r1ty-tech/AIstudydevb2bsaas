@@ -66,8 +66,18 @@ func GlobalPoolChain(cfg *config.Config) []Target {
 		}
 	}
 	if len(out) > 1 {
-		//nolint:gosec // перемешивание ключей, не криптография
-		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+		// Перемешиваем только когда ключей больше одного: у одного ключа
+		// порядок моделей — это приоритет (сильная первой), его нельзя терять.
+		keys := map[[32]byte]bool{}
+		for _, t := range out {
+			if h, ok := t.SecretHash(); ok {
+				keys[h] = true
+			}
+		}
+		if len(keys) > 1 {
+			//nolint:gosec // перемешивание ключей, не криптография
+			rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+		}
 	}
 	return out
 }

@@ -51,6 +51,9 @@ func newConsensusVote() *consensusVote {
 // askPage — обёртка: если в общем пуле достаточно разных ключей, решает
 // консенсусом, иначе работает прежняя одиночная цепочка.
 func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []llm.Target, course, materials string, qs []moodle.QuizQuestion, pc *pageCtx, opts solvePageOpts) (map[int]moodle.QuizAnswer, pageAsk, llm.Result, error) {
+	// Глубина размышлений задаётся здесь: через эту функцию идут все запросы
+	// решателя (консенсус, обычная цепочка и аварийный добор).
+	ctx = llm.WithGenOpts(ctx, llm.GenOpts{ReasoningEffort: quizEffort(opts)})
 	cfg := s.getCfg()
 	minVotes, maxKeys := consensusLimits(cfg)
 	minVotes = consensusVotesForBudget(minVotes, opts.Budget)
@@ -455,8 +458,9 @@ type consensusSample struct {
 	err     error
 }
 
-// resolveConsensus фиксирует слоты, где лидер набрал >= 50% и строго больше
-// любого другого ответа. Уже выбранные слоты не переголосуются.
+// resolveConsensus фиксирует слоты, где лидер набрал долю не ниже
+// QUIZ_CONSENSUS_SHARE и строго больше любого другого ответа. Уже выбранные
+// слоты не переголосуются.
 func (s *Syncer) resolveConsensus(qs []moodle.QuizQuestion, votes map[int]*consensusVote, winners map[int]consensusWinner, minVotes int) {
 	for _, q := range qs {
 		if _, ok := winners[q.Slot]; ok {
@@ -470,14 +474,17 @@ func (s *Syncer) resolveConsensus(qs []moodle.QuizQuestion, votes map[int]*conse
 		if key == "" {
 			continue
 		}
-		// Обычный порог: минимум N голосов, >=50% и строгий лидер.
-		// Исключение: кто-то из моделей упал, но все ответившие (>=2)
-		// согласны — это тоже консенсус, а не потеря слота.
+		// Порог: минимум N голосов, доля не ниже QUIZ_CONSENSUS_SHARE (по
+		// умолчанию 2/3) и строгий лидер по числу голосов. Исключение: кто-то
+		// из моделей упал, но все ответившие (>=2) согласны — это тоже консенсус.
 		unanimous := v.total >= 2 && n == v.total
 		if v.total < minVotes && !unanimous {
 			continue
 		}
-		if n*2 < v.total || n == second {
+		if n*100 < s.consensusShare()*v.total || n == second {
+			continue
+		}
+		if !unanimous && !s.confidentEnough(v, key) {
 			continue
 		}
 		winners[q.Slot] = consensusWinner{
@@ -489,6 +496,32 @@ func (s *Syncer) resolveConsensus(qs []moodle.QuizQuestion, votes map[int]*conse
 			total:  v.total,
 		}
 	}
+}
+
+// consensusShare — какую долю голосов (в процентах) должен собрать ответ,
+// чтобы считаться принятым. 66 — две трети: 2 из 3 достаточно, 3 из 5 нет.
+func (s *Syncer) consensusShare() int {
+	cfg := s.getCfg()
+	if cfg == nil || cfg.QuizConsensusShare < 50 || cfg.QuizConsensusShare > 100 {
+		return 66
+	}
+	return cfg.QuizConsensusShare
+}
+
+// confidenceMin — минимальная уверенность модели в ответе (0..1).
+func (s *Syncer) confidenceMin() float64 {
+	cfg := s.getCfg()
+	if cfg == nil || cfg.QuizConfidenceMin <= 0 || cfg.QuizConfidenceMin > 1 {
+		return 0.5
+	}
+	return cfg.QuizConfidenceMin
+}
+
+// confidentEnough — модель сама оценила ответ не ниже порога. Нулевая
+// уверенность значит «модель не сообщила»: тогда решает только доля голосов.
+func (s *Syncer) confidentEnough(v *consensusVote, key string) bool {
+	c := v.conf[key]
+	return c <= 0 || c >= s.confidenceMin()
 }
 
 func leader(v *consensusVote) (key string, n, second int) {

@@ -95,6 +95,12 @@ type Config struct {
 	QuizConsensus int // QUIZ_CONSENSUS (по умолчанию 3)
 	// QuizConsensusMax — максимум ключей, которые перебираем, если консенсуса нет.
 	QuizConsensusMax int // QUIZ_CONSENSUS_MAX (по умолчанию 9)
+	// QuizConsensusShare — минимальная доля голосов за ответ в процентах
+	// (QUIZ_CONSENSUS_SHARE, по умолчанию 66): 2 из 3 да, 3 из 5 нет.
+	QuizConsensusShare int
+	// QuizConfidenceMin — минимальная уверенность модели в ответе, чтобы считать
+	// его принятым без единогласия (QUIZ_CONFIDENCE_MIN, по умолчанию 0.5).
+	QuizConfidenceMin float64
 }
 
 func Load() (*Config, error) {
@@ -103,64 +109,66 @@ func Load() (*Config, error) {
 
 	adminID := int64Env("ADMIN_TELEGRAM_ID", 0)
 	c := &Config{
-		BotToken:         strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		AdminID:          adminID,
-		WebAppURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
-		WebAppURLFile:    strings.TrimSpace(os.Getenv("WEBAPP_URL_FILE")),
-		DBPath:           strEnv("DATABASE_PATH", DefaultDBPath),
-		GroupID:          int64Env("GROUP_ID", 0),
-		GroupCode:        strEnv("GROUP_CODE", ""),
-		ListenAddr:       strEnv("LISTEN_ADDR", DefaultListen),
-		Timezone:         strEnv("TZ", DefaultTimezone),
-		RecordingsDir:    strEnv("RECORDINGS_DIR", DefaultRecordings),
-		ProxyFile:        strEnv("PROXY_FILE", "/opt/ssau-bot/proxies.txt"),
-		BBBDryRun:        os.Getenv("BBB_DRY_RUN") == "1",
-		LecturePause:     boolEnv("LECTURE_PAUSE", true),
-		PanelPassword:    strEnv("PANEL_PASSWORD", ""),
-		PanelAllowIPs:    strEnv("PANEL_ALLOW_IPS", ""),
-		PanelTrustProxy:  boolEnv("PANEL_TRUST_PROXY", false),
-		PanelDemo:        boolEnv("PANEL_DEMO", false),
-		LLMAPIKey:        legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
-		LLMAPIURL:        strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
-		LLMModel:         legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
-		RouterHubAPIKey:  strings.TrimSpace(os.Getenv("ROUTERHUB_API_KEY")),
-		RouterHubAPIURL:  strings.TrimRight(strEnv("ROUTERHUB_API_URL", "https://routerhub.si/v1"), "/"),
-		RouterHubModel:   strEnv("ROUTERHUB_MODEL", "glm-5.3"),
-		CheaperSTTModel:  strEnv("CHEAPER_STT_MODEL", "whisper-large-v3-turbo"),
-		DeepgramAPIKey:   strEnv("DEEPGRAM_API_KEY", ""),
-		DeepgramAPIURL:   strings.TrimRight(strEnv("DEEPGRAM_API_URL", "https://api.deepgram.com"), "/"),
-		DeepgramModel:    strEnv("DEEPGRAM_MODEL", "nova-3"),
-		GeminiAPIKeys:    listEnv("GEMINI_API_KEYS"),
-		OpenCodeAPIKey:   strEnv("OPENCODE_API_KEY", ""),
-		OpenCodeAPIKeys:  listEnv("OPENCODE_API_KEYS"),
-		AssemblyAPIKey:   strEnv("ASSEMBLYAI_API_KEY", ""),
-		AssemblyAPIURL:   strEnv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com"),
-		FishStudioAPIKey: strEnv("FISH_STUDIO_API_KEY", ""),
-		FishStudioAPIURL: strEnv("FISH_STUDIO_API_URL", "https://api.fish.audio"),
-		GrokAPIKey:       strEnv("GROK_API_KEY", ""),
-		GrokAPIURL:       strEnv("GROK_API_URL", "https://api.x.ai/v1"),
-		GrokModel:        strEnv("GROK_MODEL", "grok-2-vision-1212"),
-		GroqAPIKey:       strEnv("GROQ_API_KEY", ""),
-		TavilyAPIKey:     strEnv("TAVILY_API_KEY", ""),
-		ExaAPIKey:        strEnv("EXA_API_KEY", ""),
-		SearXNGURL:       strings.TrimRight(strEnv("SEARXNG_URL", ""), "/"),
-		WebSearch:        boolEnv("WEBSEARCH", true),
-		WebSearchDDG:     boolEnv("WEBSEARCH_DDG", true),
-		QuizConsensus:    int(int64Env("QUIZ_CONSENSUS", 3)),
-		QuizConsensusMax: int(int64Env("QUIZ_CONSENSUS_MAX", 9)),
-		GroqAPIURL:       strEnv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
-		GroqVisionModel:  strEnv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
-		GroqSTTModel:     strEnv("GROQ_STT_MODEL", "whisper-large-v3"),
-		VoskModel:        strEnv("VOSK_MODEL", "/opt/ssau-bot/vosk-model"),
-		VoskScript:       strEnv("VOSK_SCRIPT", "/opt/ssau-bot/wake.py"),
-		GitHubToken:      strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
-		GitHubOwner:      strEnv("GITHUB_OWNER", "r4r1ty-tech"),
-		GitHubRepo:       strEnv("GITHUB_REPO", "LectionsSSAU"),
-		GitHubBranch:     strEnv("GITHUB_BRANCH", "main"),
-		Whitelist:        withAdmin(whitelistEnv("WHITELIST"), adminID),
-		SecretKey:        strings.TrimSpace(os.Getenv("SECRET_KEY")),
-		LKBaseURL:        strings.TrimRight(strEnv("LK_BASE_URL", "https://lk.ssau.ru"), "/"),
-		MoodleBaseURL:    strings.TrimRight(strEnv("MOODLE_BASE_URL", "https://do.ssau.ru/moodle"), "/"),
+		BotToken:           strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		AdminID:            adminID,
+		WebAppURL:          strings.TrimRight(strings.TrimSpace(os.Getenv("WEBAPP_PUBLIC_URL")), "/"),
+		WebAppURLFile:      strings.TrimSpace(os.Getenv("WEBAPP_URL_FILE")),
+		DBPath:             strEnv("DATABASE_PATH", DefaultDBPath),
+		GroupID:            int64Env("GROUP_ID", 0),
+		GroupCode:          strEnv("GROUP_CODE", ""),
+		ListenAddr:         strEnv("LISTEN_ADDR", DefaultListen),
+		Timezone:           strEnv("TZ", DefaultTimezone),
+		RecordingsDir:      strEnv("RECORDINGS_DIR", DefaultRecordings),
+		ProxyFile:          strEnv("PROXY_FILE", "/opt/ssau-bot/proxies.txt"),
+		BBBDryRun:          os.Getenv("BBB_DRY_RUN") == "1",
+		LecturePause:       boolEnv("LECTURE_PAUSE", true),
+		PanelPassword:      strEnv("PANEL_PASSWORD", ""),
+		PanelAllowIPs:      strEnv("PANEL_ALLOW_IPS", ""),
+		PanelTrustProxy:    boolEnv("PANEL_TRUST_PROXY", false),
+		PanelDemo:          boolEnv("PANEL_DEMO", false),
+		LLMAPIKey:          legacyEnv("LLM_API_KEY", "DEEPSEEK_API_KEY"),
+		LLMAPIURL:          strings.TrimRight(legacyEnv("LLM_API_URL", "DEEPSEEK_API_URL"), "/"),
+		LLMModel:           legacyEnv("LLM_MODEL", "DEEPSEEK_MODEL"),
+		RouterHubAPIKey:    strings.TrimSpace(os.Getenv("ROUTERHUB_API_KEY")),
+		RouterHubAPIURL:    strings.TrimRight(strEnv("ROUTERHUB_API_URL", "https://routerhub.si/v1"), "/"),
+		RouterHubModel:     strEnv("ROUTERHUB_MODEL", "glm-5.3"),
+		CheaperSTTModel:    strEnv("CHEAPER_STT_MODEL", "whisper-large-v3-turbo"),
+		DeepgramAPIKey:     strEnv("DEEPGRAM_API_KEY", ""),
+		DeepgramAPIURL:     strings.TrimRight(strEnv("DEEPGRAM_API_URL", "https://api.deepgram.com"), "/"),
+		DeepgramModel:      strEnv("DEEPGRAM_MODEL", "nova-3"),
+		GeminiAPIKeys:      listEnv("GEMINI_API_KEYS"),
+		OpenCodeAPIKey:     strEnv("OPENCODE_API_KEY", ""),
+		OpenCodeAPIKeys:    listEnv("OPENCODE_API_KEYS"),
+		AssemblyAPIKey:     strEnv("ASSEMBLYAI_API_KEY", ""),
+		AssemblyAPIURL:     strEnv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com"),
+		FishStudioAPIKey:   strEnv("FISH_STUDIO_API_KEY", ""),
+		FishStudioAPIURL:   strEnv("FISH_STUDIO_API_URL", "https://api.fish.audio"),
+		GrokAPIKey:         strEnv("GROK_API_KEY", ""),
+		GrokAPIURL:         strEnv("GROK_API_URL", "https://api.x.ai/v1"),
+		GrokModel:          strEnv("GROK_MODEL", "grok-2-vision-1212"),
+		GroqAPIKey:         strEnv("GROQ_API_KEY", ""),
+		TavilyAPIKey:       strEnv("TAVILY_API_KEY", ""),
+		ExaAPIKey:          strEnv("EXA_API_KEY", ""),
+		SearXNGURL:         strings.TrimRight(strEnv("SEARXNG_URL", ""), "/"),
+		WebSearch:          boolEnv("WEBSEARCH", true),
+		WebSearchDDG:       boolEnv("WEBSEARCH_DDG", true),
+		QuizConsensus:      int(int64Env("QUIZ_CONSENSUS", 3)),
+		QuizConsensusMax:   int(int64Env("QUIZ_CONSENSUS_MAX", 9)),
+		QuizConsensusShare: int(int64Env("QUIZ_CONSENSUS_SHARE", 66)),
+		QuizConfidenceMin:  floatEnv("QUIZ_CONFIDENCE_MIN", 0.5),
+		GroqAPIURL:         strEnv("GROQ_API_URL", "https://api.groq.com/openai/v1"),
+		GroqVisionModel:    strEnv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b"),
+		GroqSTTModel:       strEnv("GROQ_STT_MODEL", "whisper-large-v3"),
+		VoskModel:          strEnv("VOSK_MODEL", "/opt/ssau-bot/vosk-model"),
+		VoskScript:         strEnv("VOSK_SCRIPT", "/opt/ssau-bot/wake.py"),
+		GitHubToken:        strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
+		GitHubOwner:        strEnv("GITHUB_OWNER", "r4r1ty-tech"),
+		GitHubRepo:         strEnv("GITHUB_REPO", "LectionsSSAU"),
+		GitHubBranch:       strEnv("GITHUB_BRANCH", "main"),
+		Whitelist:          withAdmin(whitelistEnv("WHITELIST"), adminID),
+		SecretKey:          strings.TrimSpace(os.Getenv("SECRET_KEY")),
+		LKBaseURL:          strings.TrimRight(strEnv("LK_BASE_URL", "https://lk.ssau.ru"), "/"),
+		MoodleBaseURL:      strings.TrimRight(strEnv("MOODLE_BASE_URL", "https://do.ssau.ru/moodle"), "/"),
 	}
 	c.SecretKeyFile = strEnv("SECRET_KEY_FILE", filepath.Join(filepath.Dir(c.DBPath), "secret.key"))
 	if c.QuizConsensus > 0 && c.QuizConsensus < 3 {
@@ -170,6 +178,14 @@ func Load() (*Config, error) {
 	if c.QuizConsensus > 0 && c.QuizConsensusMax < c.QuizConsensus {
 		logx.Warnf("config", "QUIZ_CONSENSUS_MAX=%d меньше QUIZ_CONSENSUS=%d — поднимаю до минимума", c.QuizConsensusMax, c.QuizConsensus)
 		c.QuizConsensusMax = c.QuizConsensus
+	}
+	if c.QuizConsensusShare < 50 || c.QuizConsensusShare > 100 {
+		logx.Warnf("config", "QUIZ_CONSENSUS_SHARE=%d вне 50..100 — беру 66", c.QuizConsensusShare)
+		c.QuizConsensusShare = 66
+	}
+	if c.QuizConfidenceMin < 0 || c.QuizConfidenceMin > 1 {
+		logx.Warnf("config", "QUIZ_CONFIDENCE_MIN=%v вне 0..1 — беру 0.5", c.QuizConfidenceMin)
+		c.QuizConfidenceMin = 0.5
 	}
 	if extra := strings.TrimSpace(os.Getenv("WHITELIST_EXTRA")); extra != "" {
 		for _, p := range strings.Split(extra, ",") {
@@ -331,6 +347,21 @@ func boolEnv(key string, fallback bool) bool {
 		logx.Warnf("config", "boolEnv: key=%s invalid=%q fallback=%v", key, v, fallback)
 		return fallback
 	}
+}
+
+func floatEnv(key string, fallback float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		logx.Debugf("config", "floatEnv: key=%s empty fallback=%v", key, fallback)
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		logx.Warnf("config", "floatEnv: key=%s parse %q: %v", key, v, err)
+		return fallback
+	}
+	logx.Debugf("config", "floatEnv: key=%s value=%v", key, f)
+	return f
 }
 
 func int64Env(key string, fallback int64) int64 {

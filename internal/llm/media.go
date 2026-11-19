@@ -364,11 +364,22 @@ func AskAudio(ctx context.Context, chain []Target, sysPrompt, prompt string, aud
 }
 
 func callMediaMessages(ctx context.Context, t Target, msgs []mediaMessage) (string, int, http.Header, []byte, error) {
-	payload, err := json.Marshal(mediaChatReq{Model: t.Model, Messages: msgs})
+	payload, extra := buildChatPayload(t, msgs, GenOptsFromContext(ctx))
+	text, status, hdr, body, err := postMediaJSON(ctx, t, payload)
+	if extra && genParamsRejected(status, body) {
+		markGenParamsUnsupported(t)
+		payload, _ = buildChatPayload(t, msgs, GenOpts{})
+		return postMediaJSON(ctx, t, payload)
+	}
+	return text, status, hdr, body, err
+}
+
+func postMediaJSON(ctx context.Context, t Target, payload map[string]any) (string, int, http.Header, []byte, error) {
+	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", 0, nil, nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ChatEndpoint(t.url), bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ChatEndpoint(t.url), bytes.NewReader(raw))
 	if err != nil {
 		return "", 0, nil, nil, err
 	}
