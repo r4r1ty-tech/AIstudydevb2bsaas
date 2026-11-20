@@ -23,6 +23,7 @@ import (
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/moodle"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/notes"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/quizlog"
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/quizsolver"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/websearch"
 )
 
@@ -172,13 +173,38 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 	}
 
 	known, rest := s.answersFromBase(tag, supported)
+	if known == nil {
+		known = map[int]moodle.QuizAnswer{}
+	}
 	if len(known) > 0 {
 		// Пометка для отчёта: какие слоты взяты из базы, а не от ИИ.
 		pl.FromBase = sortedSlots(known)
 		pl.Notes = append(pl.Notes, fmt.Sprintf("ответы из базы проверенных: слоты %v", pl.FromBase))
 	}
-	if len(rest) == 0 {
-		logx.Debugf("uni", "quiz %s: вся страница из базы, ИИ не вызываю", tag)
+
+	// Задачи по теории информации (LZ77/LZ78/LZSS, Хаффман) считаются кодом:
+	// модель на них ошибается даже единогласно, а расчёт проверяется обратным
+	// действием. Такие слоты в ИИ не уходят.
+	det := map[int]moodle.QuizAnswer{}
+	left := make([]moodle.QuizQuestion, 0, len(rest))
+	for _, q := range rest {
+		if r, ok := quizsolver.Solve(q.Text); ok {
+			if a, ok := detAnswer(q, r); ok {
+				det[q.Slot] = a
+				logx.Infof("uni", "quiz %s: слот %d решён расчётом (%s): %q", tag, q.Slot, r.Algorithm, r.Answer)
+				pl.Notes = append(pl.Notes, fmt.Sprintf("вопрос %d решён расчётом (%s)", q.Slot, r.Algorithm))
+				continue
+			}
+			logx.Debugf("uni", "quiz %s: слот %d: расчёт (%s) не совпал с вариантами ответа, отдаю ИИ", tag, q.Slot, r.Algorithm)
+		}
+		left = append(left, q)
+	}
+	rest = left
+	for slot, a := range det {
+		known[slot] = a
+	}
+	if len(rest) == 0 && len(known) > 0 {
+		logx.Debugf("uni", "quiz %s: вся страница из базы и расчёта, ИИ не вызываю", tag)
 		return known, res, pl, nil
 	}
 
@@ -195,6 +221,34 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 		return nil, res, aiPl, fmt.Errorf("ни один вопрос страницы не решён")
 	}
 	return answers, res, aiPl, err
+}
+
+// detAnswer переводит проверенный расчёт в формат вопроса Moodle: для
+// multichoice ищет вариант с тем же текстом, для shortanswer/numerical берёт
+// текст как есть, match расчётом не заполняется (там нужна пара «поле-вариант»).
+func detAnswer(q moodle.QuizQuestion, r quizsolver.Result) (moodle.QuizAnswer, bool) {
+	want := normAnswerText(r.Answer)
+	switch {
+	case len(q.Choices) > 0:
+		for _, ch := range q.Choices {
+			if normAnswerText(ch.Text) != want {
+				continue
+			}
+			if ch.IsMulti {
+				return moodle.QuizAnswer{Choices: []string{ch.Name}}, true
+			}
+			return moodle.QuizAnswer{Choice: ch.Value}, true
+		}
+		return moodle.QuizAnswer{}, false
+	case len(q.MatchOptions) > 0:
+		return moodle.QuizAnswer{}, false
+	default:
+		return moodle.QuizAnswer{Text: r.Answer}, true
+	}
+}
+
+func normAnswerText(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
 }
 
 // solvePageAI решает через ИИ вопросы, которых нет в базе: раунды, веб-поиск, проверка ответов.
