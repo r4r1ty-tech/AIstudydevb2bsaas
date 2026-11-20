@@ -7,6 +7,7 @@ toolchain go1.26.11
 require (
 	github.com/PaulSonOfLars/gotgbot/v2 v2.0.0-rc.36
 	github.com/PuerkitoBio/goquery v1.13.0
+	github.com/ledongthuc/pdf v0.0.0-20261020125853-5e46805f718e
 	github.com/pion/rtp v1.10.6
 	github.com/pion/webrtc/v4 v4.2.26
 	golang.org/x/net v0.62.0

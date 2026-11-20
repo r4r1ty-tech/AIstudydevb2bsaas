@@ -19,8 +19,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/PuerkitoBio/goquery"
-
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/access"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
@@ -1273,6 +1271,27 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 		return len(runes)
 	}
 
+	appendText := func(label, text string) int {
+		text = cleanStr(text)
+		if text == "" || written >= maxTotalChars {
+			return 0
+		}
+		header := fmt.Sprintf("\n--- %s ---\n", label)
+		headerRunes := utf8.RuneCountInString(header)
+		remain := maxTotalChars - written - headerRunes - 1
+		if remain <= 0 {
+			return 0
+		}
+		if r := []rune(text); len(r) > remain {
+			text = string(r[:remain])
+		}
+		b.WriteString(header)
+		b.WriteString(text)
+		b.WriteString("\n")
+		written += headerRunes + utf8.RuneCountInString(text) + 1
+		return utf8.RuneCountInString(text)
+	}
+
 	if s.Store != nil {
 		packs, err := s.Store.ListPacks()
 		if err != nil {
@@ -1291,6 +1310,15 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 				}
 				notesRunes = appendFile(filepath.Join(packDir, "notes.md"), fmt.Sprintf("Конспект лекции %s №%d", p.Discipline, p.Number))
 				transRunes = appendFile(filepath.Join(packDir, "transcript.txt"), fmt.Sprintf("Транскрипт лекции %s №%d", p.Discipline, p.Number))
+				if notesRunes+transRunes == 0 {
+					// Локального конспекта нет — берём текстовый слой слайдов.
+					if slides := slidesText(packDir); slides != "" {
+						if n := appendText(fmt.Sprintf("Слайды лекции %s №%d", p.Discipline, p.Number), slides); n > 0 {
+							notesRunes = n
+							logx.Debugf("uni", "quiz %s: материалы: пакет id=%d: слайды %d симв.", tag, p.ID, n)
+						}
+					}
+				}
 			}
 			logx.Debugf("uni", "quiz %s: материалы: пакет id=%d «%s» №%d: конспект %d симв., транскрипт %d симв.",
 				tag, p.ID, p.Discipline, p.Number, notesRunes, transRunes)
@@ -1346,76 +1374,6 @@ func (s *Syncer) collectCourseMaterials(tag quizTag, course string) string {
 		logx.Infof("uni", "quiz %s: материалы курса: 0 симв. — подходящих конспектов/транскриптов не нашлось", tag)
 	} else {
 		logx.Infof("uni", "quiz %s: материалы курса: %d симв. из [%s]", tag, utf8.RuneCountInString(res), strings.Join(used, ", "))
-	}
-	return res
-}
-
-// collectMoodleCourseText — лёгкий фолбэк, когда локальных конспектов нет:
-// читает текст секций курса и до трёх страниц-лекций (modtype_page) из Moodle.
-// Ошибки не валят решение теста — просто остаёмся без этого источника.
-func (s *Syncer) collectMoodleCourseText(ctx context.Context, tag quizTag, c *moodle.Client, courseID int64) string {
-	if c == nil || courseID == 0 {
-		return ""
-	}
-	doc, _, err := c.PageWithURL(ctx, fmt.Sprintf("/course/view.php?id=%d", courseID))
-	if err != nil {
-		logx.Debugf("uni", "quiz %s: материалы Moodle: курс %d не открылся: %v", tag, courseID, err)
-		return ""
-	}
-	const maxChars = 16000
-	var b strings.Builder
-	seen := map[string]bool{}
-	add := func(label, text string) bool {
-		text = strings.TrimSpace(text)
-		if text == "" || seen[text] {
-			return true
-		}
-		seen[text] = true
-		remaining := maxChars - utf8.RuneCountInString(b.String())
-		if remaining <= 0 {
-			return false
-		}
-		if r := []rune(text); len(r) > remaining {
-			text = string(r[:remaining]) + "\n…"
-		}
-		fmt.Fprintf(&b, "\n--- %s ---\n%s\n", label, text)
-		return utf8.RuneCountInString(b.String()) < maxChars
-	}
-	doc.Find("li.section, li.course-section").EachWithBreak(func(_ int, sec *goquery.Selection) bool {
-		title := cleanStr(sec.Find(".sectionname, h3").First().Text())
-		if title == "" {
-			title = "секция курса"
-		}
-		sec.Find("script, style").Remove()
-		return add("Курс, "+title, sec.Text())
-	})
-	// Страницы-лекции: берём первые три, чтобы не раздувать промпт.
-	n := 0
-	doc.Find("li.activity.modtype_page a.activityname, li.activity.modtype_page a.activityinstance").EachWithBreak(func(_ int, a *goquery.Selection) bool {
-		if n >= 3 || utf8.RuneCountInString(b.String()) >= maxChars {
-			return false
-		}
-		href := strings.TrimSpace(a.AttrOr("href", ""))
-		if href == "" {
-			return true
-		}
-		n++
-		page, _, err := c.PageWithURL(ctx, href)
-		if err != nil {
-			logx.Debugf("uni", "quiz %s: материалы Moodle: страница %s: %v", tag, href, err)
-			return true
-		}
-		page.Find("script, style, nav, header, footer").Remove()
-		text := cleanStr(page.Find("#region-main, .course-content").First().Text())
-		add("Лекция Moodle: "+cleanStr(a.Text()), text)
-		return true
-	})
-	res := strings.TrimSpace(b.String())
-	if runes := []rune(res); len(runes) > maxChars {
-		res = string(runes[:maxChars])
-	}
-	if res != "" {
-		logx.Infof("uni", "quiz %s: материалы Moodle: %d симв.", tag, utf8.RuneCountInString(res))
 	}
 	return res
 }
