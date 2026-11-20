@@ -2,6 +2,7 @@ package uni
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -37,6 +38,9 @@ type consensusVote struct {
 	answers map[string]moodle.QuizAnswer
 	targets map[string]llm.Target
 	conf    map[string]float64
+	// weights — сумма весов голосов за вариант: вес = max(conf, floor),
+	// при отсутствии confidence вес 1. Именно она решает победителя.
+	weights map[string]float64
 }
 
 func newConsensusVote() *consensusVote {
@@ -45,6 +49,7 @@ func newConsensusVote() *consensusVote {
 		answers: map[string]moodle.QuizAnswer{},
 		targets: map[string]llm.Target{},
 		conf:    map[string]float64{},
+		weights: map[string]float64{},
 	}
 }
 
@@ -107,6 +112,31 @@ func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []ll
 // собственного бюджета (тест без таймера). Без предела перебор 17 моделей
 // мог бы идти очень долго.
 const quizFallbackBudget = 3 * time.Minute
+
+// Взвешивание по уверенности и проверка спорных слотов.
+const (
+	// quizVoteWeightFloor — нижняя граница веса голоса: даже «не уверен»
+	// (confidence 0.05) не должен полностью исчезать из подсчёта.
+	quizVoteWeightFloor = 0.25
+	// quizVerifyMaxSlots — сколько спорных слотов за раунд отправляем
+	// верификатору. Больше — лишние вызовы и риск не успеть к дедлайну.
+	quizVerifyMaxSlots = 3
+	// quizVerifyMinMargin — если доля лидера минус доля второго меньше,
+	// слот считается спорным, даже когда формально победитель уже есть.
+	quizVerifyMinMargin = 0.2
+	// quizVerifyMinBudget — минимальный остаток бюджета страницы, чтобы
+	// вообще звать верификатора.
+	quizVerifyMinBudget = 45 * time.Second
+	// quizVerifyCallCap — предел одного вызова верификатора.
+	quizVerifyCallCap = 90 * time.Second
+)
+
+// verifySysPrompt — системная инструкция независимого проверяющего.
+const verifySysPrompt = "Ты — независимый проверяющий ответов на вопросы теста. Тебе дают вопрос и 2–3 кандидата, за которых уже проголосовали другие модели.\n" +
+	"Реши вопрос сам, затем выбери ОДИН кандидат, наиболее близкий к верному ответу. Учитывай текст вариантов, а не их номера.\n" +
+	"Отвечай СТРОГО одним JSON-объектом без текста до и после:\n" +
+	"{\"pick\": 1, \"confidence\": 0.8, \"why\": \"кратко, почему\"}\n" +
+	"\"pick\" — номер кандидата из списка (с 1), \"confidence\" — от 0 до 1, \"why\" — одно предложение."
 
 // askPageDirectBudget ограничивает обычную цепочку бюджетом страницы, чтобы
 // при откате от консенсуса одна страница не съела время остальных волн.
@@ -282,6 +312,7 @@ func (s *Syncer) askPageConsensus(ctx context.Context, tag quizTag, round int, c
 			v.counts[key]++
 			v.answers[key] = a
 			v.targets[key] = sample.target
+			v.weights[key] += sampleVoteWeight(sample, slot)
 			if c, ok := sample.conf[slot]; ok && c > v.conf[key] {
 				v.conf[key] = c
 			}
@@ -345,6 +376,11 @@ func (s *Syncer) askPageConsensus(ctx context.Context, tag quizTag, round int, c
 		used++
 		s.resolveConsensus(qs, votes, winners, minVotes)
 	}
+
+	// Пул кончился. Спорные слоты (нет победителя или слишком тонкий
+	// перевес) отдаём независимому верификатору другого семейства моделей:
+	// простое большинство на трудных вопросах часто ошибается одинаково.
+	s.verifyDisputed(ctx, tag, round, chain, qs, bySlot, votes, winners, &res, pageDeadline)
 
 	// Пул кончился, а порога нет — слот остаётся нерешённым. Это честнее,
 	// чем отправить ответ, за который не проголосовало большинство.
@@ -473,9 +509,9 @@ type consensusSample struct {
 	err     error
 }
 
-// resolveConsensus фиксирует слоты, где лидер набрал долю не ниже
-// QUIZ_CONSENSUS_SHARE и строго больше любого другого ответа. Уже выбранные
-// слоты не переголосуются.
+// resolveConsensus фиксирует слоты, где взвешенный по уверенности лидер
+// набрал долю не ниже QUIZ_CONSENSUS_SHARE и строго больше любого другого
+// ответа. Уже выбранные слоты не переголосуются.
 func (s *Syncer) resolveConsensus(qs []moodle.QuizQuestion, votes map[int]*consensusVote, winners map[int]consensusWinner, minVotes int) {
 	for _, q := range qs {
 		if _, ok := winners[q.Slot]; ok {
@@ -485,18 +521,20 @@ func (s *Syncer) resolveConsensus(qs []moodle.QuizQuestion, votes map[int]*conse
 		if v == nil || v.total == 0 {
 			continue
 		}
-		key, n, second := leader(v)
+		key, weight, second := leaderWeighted(v)
 		if key == "" {
 			continue
 		}
-		// Порог: минимум N голосов, доля не ниже QUIZ_CONSENSUS_SHARE (по
-		// умолчанию 2/3) и строгий лидер по числу голосов. Исключение: кто-то
-		// из моделей упал, но все ответившие (>=2) согласны — это тоже консенсус.
+		totalWeight := voteWeightTotal(v)
+		n := v.counts[key]
+		// Порог: минимум N голосов, доля веса не ниже QUIZ_CONSENSUS_SHARE
+		// (по умолчанию 2/3) и строгий лидер. Исключение: кто-то из моделей
+		// упал, но все ответившие (>=2) согласны — это тоже консенсус.
 		unanimous := v.total >= 2 && n == v.total
 		if v.total < minVotes && !unanimous {
 			continue
 		}
-		if n*100 < s.consensusShare()*v.total || n == second {
+		if totalWeight <= 0 || weight*100 < float64(s.consensusShare())*totalWeight || weight <= second {
 			continue
 		}
 		if !unanimous && !s.confidentEnough(v, key) {
@@ -511,6 +549,351 @@ func (s *Syncer) resolveConsensus(qs []moodle.QuizQuestion, votes map[int]*conse
 			total:  v.total,
 		}
 	}
+}
+
+// sampleVoteWeight — вес одного голоса: уверенность модели, но не ниже
+// floor. Модель не сообщила confidence — считаем голос полноценным (1).
+func sampleVoteWeight(sample consensusSample, slot int) float64 {
+	c, ok := sample.conf[slot]
+	if !ok {
+		return 1
+	}
+	return voteWeight(c)
+}
+
+func voteWeight(conf float64) float64 {
+	switch {
+	case conf > 1:
+		return 1
+	case conf < quizVoteWeightFloor:
+		return quizVoteWeightFloor
+	default:
+		return conf
+	}
+}
+
+// voteWeights — веса вариантов. Если их нет (тесты и старые данные задают
+// только counts), веса равны числу голосов.
+func voteWeights(v *consensusVote) map[string]float64 {
+	out := make(map[string]float64, len(v.counts))
+	for k := range v.counts {
+		out[k] = float64(v.counts[k])
+	}
+	var sum float64
+	for k, w := range v.weights {
+		if w <= 0 {
+			continue
+		}
+		out[k] = w
+		sum += w
+	}
+	if sum <= 0 {
+		out = make(map[string]float64, len(v.counts))
+		for k, c := range v.counts {
+			out[k] = float64(c)
+		}
+	}
+	return out
+}
+
+func voteWeightTotal(v *consensusVote) float64 {
+	var sum float64
+	for _, w := range voteWeights(v) {
+		sum += w
+	}
+	return sum
+}
+
+// leaderWeighted — вариант с максимальной суммой весов и вес второго места.
+// Обход по отсортированным ключам, чтобы логи и проверки были стабильны.
+func leaderWeighted(v *consensusVote) (key string, weight, second float64) {
+	ws := voteWeights(v)
+	keys := make([]string, 0, len(ws))
+	for k := range ws {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		c := ws[k]
+		if c > weight {
+			second = weight
+			key, weight = k, c
+			continue
+		}
+		if c > second {
+			second = c
+		}
+	}
+	return key, weight, second
+}
+
+// verifyCandidate — вариант ответа, предложенный верификатору.
+type verifyCandidate struct {
+	key    string
+	answer moodle.QuizAnswer
+	weight float64
+}
+
+// disputedSlot — слот, который стоит перепроверить: либо победителя нет,
+// либо перевес слишком тонкий.
+type disputedSlot struct {
+	q      moodle.QuizQuestion
+	v      *consensusVote
+	leader string
+	margin float64
+	cands  []verifyCandidate
+}
+
+// verifyDisputed отправляет до quizVerifyMaxSlots спорных слотов одному
+// верификатору из ДРУГОГО семейства моделей. Верификатор выбирает один из
+// 2–3 кандидатов; при ошибке или низкой уверенности остаётся взвешенный
+// победитель (или слот остаётся нерешённым, как раньше).
+func (s *Syncer) verifyDisputed(ctx context.Context, tag quizTag, round int, chain []llm.Target, qs []moodle.QuizQuestion, bySlot map[int]moodle.QuizQuestion, votes map[int]*consensusVote, winners map[int]consensusWinner, res *llm.Result, pageDeadline time.Time) {
+	slots := disputedSlots(qs, votes, winners)
+	if len(slots) == 0 {
+		return
+	}
+	if len(slots) > quizVerifyMaxSlots {
+		slots = slots[:quizVerifyMaxSlots]
+	}
+	minConf := s.confidenceMin()
+	verified := 0
+	for _, d := range slots {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		if !pageDeadline.IsZero() && time.Until(pageDeadline) < quizVerifyMinBudget {
+			logx.Warnf("uni", "quiz %s: раунд %d: слот %d: до дедлайна меньше %s — верификацию пропускаю",
+				tag, round, d.q.Slot, quizVerifyMinBudget)
+			return
+		}
+		verifier, ok := pickVerifier(chain, d.v.targets[d.leader].Provider)
+		if !ok {
+			logx.Warnf("uni", "quiz %s: раунд %d: слот %d: в цепочке нет модели другого провайдера — верификация невозможна", tag, round, d.q.Slot)
+			return
+		}
+		verified++
+		s.verifySlot(ctx, tag, round, verifier, d, bySlot[d.q.Slot], winners, res, pageDeadline, minConf)
+	}
+	if verified > 0 {
+		logx.Infof("uni", "quiz %s: раунд %d: верификатор вызван для %d спорных слотов", tag, round, verified)
+	}
+}
+
+// disputedSlots — нерешённые слоты (лидер не добрал долю/уверенность) и
+// решённые с тонким перевесом. Сначала самые спорные: меньший перевес.
+func disputedSlots(qs []moodle.QuizQuestion, votes map[int]*consensusVote, winners map[int]consensusWinner) []disputedSlot {
+	var out []disputedSlot
+	for _, q := range qs {
+		v := votes[q.Slot]
+		if v == nil || v.total == 0 {
+			continue
+		}
+		key, weight, second := leaderWeighted(v)
+		total := voteWeightTotal(v)
+		if key == "" || total <= 0 {
+			continue
+		}
+		cands := topCandidates(v, 3)
+		if len(cands) < 2 {
+			continue
+		}
+		_, resolved := winners[q.Slot]
+		margin := (weight - second) / total
+		if resolved && margin >= quizVerifyMinMargin {
+			continue
+		}
+		out = append(out, disputedSlot{
+			q:      q,
+			v:      v,
+			leader: key,
+			margin: margin,
+			cands:  cands,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].margin != out[j].margin {
+			return out[i].margin < out[j].margin
+		}
+		return out[i].q.Slot < out[j].q.Slot
+	})
+	return out
+}
+
+// topCandidates — до max вариантов с наибольшим весом.
+func topCandidates(v *consensusVote, max int) []verifyCandidate {
+	ws := voteWeights(v)
+	keys := make([]string, 0, len(ws))
+	for k := range ws {
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		if ws[keys[i]] != ws[keys[j]] {
+			return ws[keys[i]] > ws[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	if max > 0 && len(keys) > max {
+		keys = keys[:max]
+	}
+	out := make([]verifyCandidate, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, verifyCandidate{key: k, answer: v.answers[k], weight: ws[k]})
+	}
+	return out
+}
+
+// pickVerifier — самая быстрая модель цепочки, чей провайдер отличается от
+// провайдера лидера: независимость важнее скорости, но внутри неё берём
+// самую дешёвую по времени.
+func pickVerifier(chain []llm.Target, exclude string) (llm.Target, bool) {
+	var best llm.Target
+	found := false
+	for _, t := range chain {
+		if t.Provider == exclude || t.Model == "" {
+			continue
+		}
+		if !found || targetSpeed(t) < targetSpeed(best) {
+			best, found = t, true
+		}
+	}
+	return best, found
+}
+
+// verifySlot — один вызов верификатора на слот. Ошибка не роняет страницу:
+// остаётся прежний (взвешенный) победитель.
+func (s *Syncer) verifySlot(ctx context.Context, tag quizTag, round int, verifier llm.Target, d disputedSlot, q moodle.QuizQuestion, winners map[int]consensusWinner, res *llm.Result, pageDeadline time.Time, minConf float64) {
+	stage := fmt.Sprintf("-verify-%d", d.q.Slot)
+	user := buildVerifyPrompt(q, d.cands)
+	callCtx := ctx
+	if !pageDeadline.IsZero() {
+		dl := pageDeadline
+		if cap := time.Now().Add(quizVerifyCallCap); cap.Before(dl) {
+			dl = cap
+		}
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithDeadline(ctx, dl)
+		defer cancel()
+	}
+	dumpPrompt(tag, round, stage, user)
+	vres, err := llm.Ask(callCtx, []llm.Target{verifier}, verifySysPrompt, user)
+	logLLM(tag, round, stage, vres)
+	if res != nil {
+		res.Attempts = append(res.Attempts, vres.Attempts...)
+		res.InputTokens += vres.InputTokens
+		res.OutputTokens += vres.OutputTokens
+	}
+	names := make([]string, 0, len(d.cands))
+	for i, c := range d.cands {
+		names = append(names, fmt.Sprintf("%d:%s", i+1, formatAnswerText(q, c.answer)))
+	}
+	if err != nil {
+		logx.Warnf("uni", "quiz %s: раунд %d: слот %d: верификатор %s: ошибка (%v) — оставляю взвешенного лидера",
+			tag, round, d.q.Slot, verifier, err)
+		return
+	}
+	dumpReply(tag, round, stage, vres.Text)
+	reply, perr := extractVerifyReply(vres.Text)
+	if perr != nil || reply.Pick < 1 || reply.Pick > len(d.cands) {
+		logx.Warnf("uni", "quiz %s: раунд %d: слот %d: верификатор %s: негодный ответ (%v, pick=%d) — оставляю взвешенного лидера",
+			tag, round, d.q.Slot, verifier, perr, reply.Pick)
+		return
+	}
+	if res != nil && res.Text != "" {
+		res.Text += fmt.Sprintf("--- %s ---\n%s\n", verifier, vres.Text)
+	}
+	conf := 0.0
+	if reply.Confidence != nil {
+		conf = *reply.Confidence
+	}
+	pick := d.cands[reply.Pick-1]
+	accepted := conf >= minConf
+	old, hadWinner := winners[d.q.Slot]
+	if accepted {
+		winners[d.q.Slot] = consensusWinner{
+			target: verifier,
+			key:    pick.key,
+			answer: pick.answer,
+			conf:   conf,
+			n:      d.v.counts[pick.key],
+			total:  d.v.total,
+		}
+		if hadWinner && old.key == pick.key {
+			accepted = true
+		}
+	}
+	logx.Infof("uni", "quiz %s: раунд %d: слот %d: верификатор %s: кандидаты [%s], выбор %d (%s, уверенность %.2f), принят=%v: %s",
+		tag, round, d.q.Slot, verifier, strings.Join(names, " | "), reply.Pick,
+		formatAnswerText(q, pick.answer), conf, accepted, strings.TrimSpace(reply.Why))
+}
+
+// verifyReply — ответ верификатора.
+type verifyReply struct {
+	Pick       int      `json:"pick"`
+	Confidence *float64 `json:"confidence"`
+	Why        string   `json:"why"`
+}
+
+// extractVerifyReply достаёт первый корректный JSON верификатора: модели
+// любят обернуть его в ```json``` или дописать рассуждение.
+func extractVerifyReply(text string) (verifyReply, error) {
+	t := strings.TrimSpace(text)
+	var lastErr error
+	for start := 0; start < len(t); {
+		i := strings.IndexByte(t[start:], '{')
+		if i < 0 {
+			break
+		}
+		i += start
+		dec := json.NewDecoder(strings.NewReader(t[i:]))
+		var cand verifyReply
+		if err := dec.Decode(&cand); err == nil && (cand.Pick > 0 || cand.Confidence != nil) {
+			return cand, nil
+		} else if err != nil {
+			lastErr = err
+		}
+		start = i + 1
+	}
+	if lastErr == nil {
+		lastErr = errors.New("в ответе нет JSON-объекта")
+	}
+	return verifyReply{}, fmt.Errorf("ответ верификатора не JSON: %w", lastErr)
+}
+
+// buildVerifyPrompt — вопрос, его варианты и пронумерованные кандидаты.
+func buildVerifyPrompt(q moodle.QuizQuestion, cands []verifyCandidate) string {
+	var b strings.Builder
+	kind := q.QType
+	if len(q.Choices) > 0 && q.Choices[0].IsMulti {
+		kind += ", несколько ответов"
+	} else if len(q.Choices) > 0 {
+		kind += ", один ответ"
+	}
+	fmt.Fprintf(&b, "Вопрос %d (тип: %s):\n%s\n", q.Slot, kind, q.Text)
+	if q.Prompt != "" {
+		fmt.Fprintf(&b, "Подсказка: %s\n", q.Prompt)
+	}
+	if len(q.Choices) > 0 {
+		b.WriteString("Варианты ответа:\n")
+		for _, ch := range q.Choices {
+			fmt.Fprintf(&b, "- [%s] %s\n", choiceKey(ch), ch.Text)
+		}
+	}
+	if len(q.MatchOptions) > 0 {
+		b.WriteString("Соответствия:\n")
+		for _, mo := range q.MatchOptions {
+			fmt.Fprintf(&b, "- %s (поле: %s)\n", mo.Question, mo.Name)
+			for _, opt := range mo.Choices {
+				fmt.Fprintf(&b, "    [%s] %s\n", opt.Value, opt.Text)
+			}
+		}
+	}
+	b.WriteString("\nКандидаты (выбери один):\n")
+	for i, c := range cands {
+		fmt.Fprintf(&b, "%d) %s\n", i+1, formatAnswerText(q, c.answer))
+	}
+	b.WriteString("\nВерни только JSON: {\"pick\": <номер кандидата>, \"confidence\": <0..1>, \"why\": \"<кратко>\"}\n")
+	return b.String()
 }
 
 // consensusShare — какую долю голосов (в процентах) должен собрать ответ,
