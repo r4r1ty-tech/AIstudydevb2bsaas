@@ -153,20 +153,25 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 	if len(questions) == 0 {
 		return nil, res, pl, nil
 	}
-	// Тип, который решатель не умеет заполнять: сдавать без него нельзя,
-	// а спрашивать модель бессмысленно.
+	// Тип, который решатель не умеет заполнять, не валит всю страницу: вопрос
+	// остаётся без ответа (Moodle даст за него 0), остальные решаются и уходят.
 	var unsup []string
+	supported := make([]moodle.QuizQuestion, 0, len(questions))
 	for _, q := range questions {
 		if unsupportedQuestion(q) {
 			unsup = append(unsup, fmt.Sprintf("вопрос %d (тип %s)", q.Slot, q.QType))
+			continue
 		}
+		supported = append(supported, q)
 	}
 	if len(unsup) > 0 {
-		logx.Warnf("uni", "quiz %s: тип не поддерживается: %s", tag, strings.Join(unsup, ", "))
-		return nil, res, pl, fmt.Errorf("решатель не умеет заполнять %s — пройди его руками", strings.Join(unsup, ", "))
+		logx.Warnf("uni", "quiz %s: тип не поддерживается, оставляю без ответа: %s", tag, strings.Join(unsup, ", "))
+	}
+	if len(supported) == 0 {
+		return nil, res, pl, fmt.Errorf("не решён ни один вопрос страницы: решатель не заполняет %s", strings.Join(unsup, ", "))
 	}
 
-	known, rest := s.answersFromBase(tag, questions)
+	known, rest := s.answersFromBase(tag, supported)
 	if len(known) > 0 {
 		// Пометка для отчёта: какие слоты взяты из базы, а не от ИИ.
 		pl.FromBase = sortedSlots(known)
@@ -177,7 +182,7 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 		return known, res, pl, nil
 	}
 
-	answers, res, aiPl, err := s.solvePageAI(ctx, tag, c, ws, chain, course, materials, questions, rest, opts)
+	answers, res, aiPl, err := s.solvePageAI(ctx, tag, c, ws, chain, course, materials, supported, rest, opts)
 	aiPl.FromBase = pl.FromBase
 	aiPl.Notes = append(pl.Notes, aiPl.Notes...)
 	if answers == nil {
@@ -185,6 +190,9 @@ func (s *Syncer) solvePageWithOpts(ctx context.Context, tag quizTag, c *moodle.C
 	}
 	for slot, a := range known {
 		answers[slot] = a
+	}
+	if err == nil && len(answers) == 0 {
+		return nil, res, aiPl, fmt.Errorf("ни один вопрос страницы не решён")
 	}
 	return answers, res, aiPl, err
 }

@@ -505,3 +505,84 @@ func TestFetchFileClearsSesskeyOnLoginRedirect(t *testing.T) {
 		t.Fatalf("sesskey = %q, want empty after login redirect", sk)
 	}
 }
+
+// parseTestQuestion разбирает один блок .que из фрагмента HTML страницы попытки.
+func parseTestQuestion(t *testing.T, html string) QuizQuestion {
+	t.Helper()
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		t.Fatal(err)
+	}
+	que := doc.Find(".que").First()
+	if que.Length() == 0 {
+		t.Fatal("в разметке нет .que")
+	}
+	return parseQuestion(que)
+}
+
+// Тема Adaptable: у shortanswer поле ввода лежит прямо в .qtext, без div.answer.
+func TestParseShortAnswerInputInQText(t *testing.T) {
+	q := parseTestQuestion(t, `<div class="que shortanswer adaptive notyetanswered" id="question-612939-2">
+  <div class="info"><input type="hidden" name="q612939:2_:sequencecheck" value="1"></div>
+  <div class="content">
+    <div class="qtext">Назовите <input type="text" name="q612939:2_answer" id="q612939:2_answer" size="23" class="form-control d-inline"/> - это мельчайший элемент.</div>
+  </div>
+</div>`)
+	if q.QType != "shortanswer" || q.Slot != 2 {
+		t.Fatalf("вопрос разобран неверно: %+v", q)
+	}
+	if q.InputName != "q612939:2_answer" {
+		t.Errorf("InputName = %q, ожидали q612939:2_answer", q.InputName)
+	}
+	if q.InputValue != "" {
+		t.Errorf("InputValue = %q, ожидали пусто", q.InputValue)
+	}
+}
+
+// Тема Adaptable: у match таблица сама имеет class="answer", div.answer нет.
+func TestParseMatchTableWithAnswerClass(t *testing.T) {
+	q := parseTestQuestion(t, `<div class="que match adaptive notyetanswered" id="question-612939-8">
+  <div class="info"><input type="hidden" name="q612939:8_:sequencecheck" value="1"></div>
+  <div class="content">
+    <div class="qtext"><p>Установите соответствие</p></div>
+    <table class="answer" role="presentation">
+      <tr class="r0">
+        <td class="text">формат файлов</td>
+        <td class="control"><select name="q612939:8_sub0"><option value="0"></option><option value="1">JPEG</option></select></td>
+      </tr>
+      <tr class="r1">
+        <td class="text">протокол передачи</td>
+        <td class="control"><select name="q612939:8_sub1"><option value="0"></option><option value="2">TCP</option></select></td>
+      </tr>
+    </table>
+  </div>
+</div>`)
+	if q.QType != "match" {
+		t.Fatalf("QType = %q, ожидали match", q.QType)
+	}
+	if len(q.MatchOptions) != 2 {
+		t.Fatalf("строк соответствия = %d, ожидали 2: %+v", len(q.MatchOptions), q.MatchOptions)
+	}
+	first := q.MatchOptions[0]
+	if first.Name != "q612939:8_sub0" || first.Question != "формат файлов" {
+		t.Errorf("первая строка: %+v", first)
+	}
+	if len(first.Choices) != 1 || first.Choices[0].Value != "1" || first.Choices[0].Text != "JPEG" {
+		t.Errorf("варианты первой строки: %+v", first.Choices)
+	}
+	if q.MatchOptions[1].Name != "q612939:8_sub1" || q.MatchOptions[1].Question != "протокол передачи" {
+		t.Errorf("вторая строка: %+v", q.MatchOptions[1])
+	}
+}
+
+// Поле ввода в .qtext не делает поддерживаемым вопрос чужого типа (например, ddwtos).
+func TestParseQTextInputIgnoredForOtherTypes(t *testing.T) {
+	q := parseTestQuestion(t, `<div class="que ddwtos adaptive notyetanswered" id="question-612939-5">
+  <div class="content">
+    <div class="qtext">Перетащите <input type="text" name="q612939:5_answer" value=""/> в пропуск</div>
+  </div>
+</div>`)
+	if q.InputName != "" {
+		t.Errorf("InputName = %q, у ddwtos его быть не должно", q.InputName)
+	}
+}

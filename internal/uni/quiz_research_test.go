@@ -159,6 +159,31 @@ func TestSolvePageUnsupported(t *testing.T) {
 	}
 }
 
+// Неизвестный тип не валит страницу: вопрос остаётся без ответа, остальные решаются.
+func TestSolvePageUnsupportedQuestionDoesNotBlockPage(t *testing.T) {
+	supported := moodle.QuizQuestion{Slot: 1, QType: "multichoice", Text: "Сколько пакетов в рукопожатии TCP?",
+		Choices: []moodle.QuizChoice{{Name: "q1:1_answer", Value: "0", Text: "3"}, {Name: "q1:1_answer", Value: "1", Text: "2"}}}
+	unsupported := moodle.QuizQuestion{Slot: 2, QType: "ddwtos", Text: "Перетащите термины"}
+	srv, prompts := fakeLLM(t, `{"answers":[{"slot":1,"choice":"0"}]}`)
+	sy := &Syncer{}
+	ans, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, nil, chainFor(srv), "", "", []moodle.QuizQuestion{supported, unsupported})
+	if err != nil {
+		t.Fatalf("страница с одним поддерживаемым вопросом должна решиться: %v", err)
+	}
+	if ans[1].Choice != "0" {
+		t.Errorf("ответ слота 1 = %+v, ожидали вариант 0", ans[1])
+	}
+	if _, ok := ans[2]; ok {
+		t.Error("на неподдерживаемый вопрос ответа быть не должно")
+	}
+	if len(*prompts) == 0 {
+		t.Fatal("модель не вызывалась")
+	}
+	if strings.Contains((*prompts)[0], "Перетащите термины") {
+		t.Error("неподдерживаемый вопрос попал в промпт модели")
+	}
+}
+
 // У checkbox value у всех «1»: в промпте ключ — имя поля, ответ по тексту тоже принимается.
 func TestSolvePageMultiKeys(t *testing.T) {
 	q := moodle.QuizQuestion{Slot: 1, QType: "multichoice", Text: "Какие коды префиксные?", Choices: []moodle.QuizChoice{

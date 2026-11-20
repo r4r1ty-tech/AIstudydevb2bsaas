@@ -254,6 +254,27 @@ func TestPartialGradeRetriesWhileHighestMethodAttemptsLeft(t *testing.T) {
 	}
 }
 
+// Оценка не разобрана (пустая строка): попытка завершена, но решённым тест не считаем.
+func TestUnparsedGradeNotMarkedSolved(t *testing.T) {
+	m := newRetryMoodle(t, "2", "Высшая оценка", "")
+	sc := newRetryScenario(t, m, true)
+	if solved := sc.run(t); solved {
+		t.Fatal("неразобранная оценка не должна считаться решённой")
+	}
+	if started, finished := m.counts(); started != 1 || finished != 1 {
+		t.Errorf("начато=%d завершено=%d, ожидали 1 и 1 (без автоповтора)", started, finished)
+	}
+	if sc.solvedMark(t) {
+		t.Error("тест помечен решённым при неразобранной оценке")
+	}
+	if v, _, _ := sc.st.GetSetting(quizFailKey(10, 777)); v != "" {
+		t.Errorf("счётчик неудач = %q: автоповтор при неразобранной оценке не нужен", v)
+	}
+	if rep := sc.reports(); !strings.Contains(rep, "оценку Moodle разобрать не удалось") {
+		t.Errorf("в отчёте нет предупреждения о неразобранной оценке:\n%s", rep)
+	}
+}
+
 // Последняя попытка с ненулевой оценкой — повтора нет, в отчёте «Пройти» и остаток попыток.
 func TestPartialGradeLastAttemptMethodNoRetry(t *testing.T) {
 	m := newRetryMoodle(t, "3", "Последняя попытка", "1,00 из 2,00")

@@ -639,9 +639,10 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 	learned := newRight+newWrong > 0
 	rin := newQuizReportInput(it, pages, allAnswers, run.Pages, result, usedModels, materials != "", !hasLLM)
 
-	// Полная оценка «X из Y» — тест решён. Оценка не разобрана — как раньше, решён.
+	// Полная оценка «X из Y» — тест решён. Неразобранную оценку за решённую
+	// не выдаём: иначе непройденный тест молча считается решённым.
 	n, d, graded := moodle.GradeFraction(result.Grade)
-	if !graded || n >= d {
+	if graded && n >= d {
 		_ = s.Store.SetSetting(quizFailKey(acc.TelegramID, it.CMID), "")
 		run.Status = quizlog.Solved
 		run.Grade, run.Feedback = result.Grade, result.Feedback
@@ -654,6 +655,20 @@ func (s *Syncer) processQuizErr(ctx context.Context, acc model.Account, c *moodl
 		rin.Solved = true
 		s.notify(ctx, acc.TelegramID, buildQuizReport(rin))
 		return true, nil
+	}
+
+	// Оценку Moodle не разобрали: попытка завершена, но результат неизвестен,
+	// поэтому решённым тест не помечаем и автоповтор не запускаем (сожжёт попытки).
+	if !graded {
+		run.Status = quizlog.Partial
+		run.Grade, run.Feedback = result.Grade, result.Feedback
+		run.Error = "оценка не разобрана"
+		saveRun()
+		_ = s.Store.SetSetting(quizFailKey(acc.TelegramID, it.CMID), "")
+		logx.Warnf("uni", "quiz %s: оценка не разобрана (%q), тест не помечаю решённым, попытка завершена", tag, result.Grade)
+		rin.GradeUnparsed = true
+		s.notify(ctx, acc.TelegramID, buildQuizReport(rin))
+		return false, nil
 	}
 
 	// Оценка неполная: попытка завершена, тест НЕ помечается решённым. Повтор новой попыткой —
@@ -1402,6 +1417,7 @@ type quizReportInput struct {
 	Grade              string
 	Method             string
 	Solved             bool
+	GradeUnparsed      bool // оценку Moodle разобрать не удалось: решённым не считаем
 	Retry              bool
 	Note               string
 	// AttemptsLeft: -1 — без ограничений, -2 — не прочитано, иначе сколько осталось.
@@ -1556,6 +1572,9 @@ func buildQuizReport(in quizReportInput) string {
 	}
 	fmt.Fprintf(&b, "<b>Курс:</b> %s\n", esc(in.Course))
 	fmt.Fprintf(&b, "<b>Тест:</b> %s\n", esc(in.Title))
+	if in.GradeUnparsed {
+		b.WriteString("<b>Внимание:</b> оценку Moodle разобрать не удалось — тест не помечен решённым, проверь его в Moodle.\n")
+	}
 	if in.Method != "" {
 		fmt.Fprintf(&b, "<b>Оценка:</b> %s (метод: %s)\n", esc(grade), esc(in.Method))
 	} else {

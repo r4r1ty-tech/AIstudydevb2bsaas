@@ -521,14 +521,22 @@ func parseQuestion(que *goquery.Selection) QuizQuestion {
 		})
 	}
 
-	// Поля ввода для shortanswer / numerical
+	// Поля ввода для shortanswer / numerical. В теме Adaptable поле стоит прямо
+	// в .qtext, без div.answer, поэтому селектор .answer его не находит.
 	if textInput := que.Find(".answer input[type=text], .answer input[type=number]").First(); textInput.Length() > 0 {
 		q.InputName = textInput.AttrOr("name", "")
 		q.InputValue = textInput.AttrOr("value", "")
+	} else if q.QType == "shortanswer" || q.QType == "numerical" {
+		in := que.Find(".qtext input[type=text], .qtext input[type=number], input[type=text][name$='_answer'], input[type=number][name$='_answer']").First()
+		if in.Length() > 0 {
+			q.InputName = in.AttrOr("name", "")
+			q.InputValue = in.AttrOr("value", "")
+		}
 	}
 
-	// Вопросы на соответствие match
-	que.Find(".answer table tr").Each(func(_ int, tr *goquery.Selection) {
+	// Вопросы на соответствие match: таблица может сама иметь class="answer"
+	// (тема Adaptable), поэтому строки ищем в любом .answer, включая саму таблицу.
+	que.Find(".answer tr").Each(func(_ int, tr *goquery.Selection) {
 		subQ := clean(tr.Find("td.text").First().Text())
 		sel := tr.Find("select").First()
 		if sel.Length() == 0 {
