@@ -385,7 +385,7 @@ func postMediaJSON(ctx context.Context, t Target, payload map[string]any) (strin
 	}
 	req.Header.Set("Authorization", "Bearer "+t.key)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", userAgent)
+	setCommonHeaders(req, t.Provider)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

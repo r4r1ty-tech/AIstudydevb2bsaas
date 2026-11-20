@@ -59,30 +59,35 @@ type Config struct {
 	// OpenCodeAPIKey / OpenCodeAPIKeys — ключи OpenCode Zen (OPENCODE_API_KEY,
 	// OPENCODE_API_KEYS через запятую), запасной провайдер. Ключ можно подписать
 	// владельцем: «Зуев:oc_sk_…» (то же для GEMINI_API_KEYS).
-	OpenCodeAPIKey   string
-	OpenCodeAPIKeys  []string
-	AssemblyAPIKey   string
-	AssemblyAPIURL   string
-	FishStudioAPIKey string
-	FishStudioAPIURL string
-	GrokAPIKey       string
-	GrokAPIURL       string
-	GrokModel        string
-	GroqAPIKey       string
-	GroqAPIURL       string
-	GroqVisionModel  string
-	GroqSTTModel     string
-	VoskModel        string
-	VoskScript       string
-	GitHubToken      string
-	GitHubOwner      string
-	GitHubRepo       string
-	GitHubBranch     string
-	Whitelist        []int64
-	SecretKey        string // SECRET_KEY: base64 32 байта для шифрования паролей универа
-	SecretKeyFile    string // SECRET_KEY_FILE: иначе ключ в файле (создаётся сам, 0600)
-	LKBaseURL        string // LK_BASE_URL: https://lk.ssau.ru
-	MoodleBaseURL    string // MOODLE_BASE_URL: https://do.ssau.ru/moodle
+	OpenCodeAPIKey  string
+	OpenCodeAPIKeys []string
+	// OpenCodeGoAPIKey / OpenCodeGoAPIKeys — ключи OpenCode Go (OPENCODE_GO_API_KEY,
+	// OPENCODE_GO_API_KEYS через запятую): платный OpenAI-совместимый шлюз
+	// https://opencode.ai/zen/go/v1 с моделями deepseek/glm.
+	OpenCodeGoAPIKey  string
+	OpenCodeGoAPIKeys []string
+	AssemblyAPIKey    string
+	AssemblyAPIURL    string
+	FishStudioAPIKey  string
+	FishStudioAPIURL  string
+	GrokAPIKey        string
+	GrokAPIURL        string
+	GrokModel         string
+	GroqAPIKey        string
+	GroqAPIURL        string
+	GroqVisionModel   string
+	GroqSTTModel      string
+	VoskModel         string
+	VoskScript        string
+	GitHubToken       string
+	GitHubOwner       string
+	GitHubRepo        string
+	GitHubBranch      string
+	Whitelist         []int64
+	SecretKey         string // SECRET_KEY: base64 32 байта для шифрования паролей универа
+	SecretKeyFile     string // SECRET_KEY_FILE: иначе ключ в файле (создаётся сам, 0600)
+	LKBaseURL         string // LK_BASE_URL: https://lk.ssau.ru
+	MoodleBaseURL     string // MOODLE_BASE_URL: https://do.ssau.ru/moodle
 	// Веб-поиск для решателя тестов (internal/websearch). Ключи/адрес
 	// включают поставщика; без них работает только DuckDuckGo lite.
 	TavilyAPIKey string // TAVILY_API_KEY
@@ -139,6 +144,8 @@ func Load() (*Config, error) {
 		GeminiAPIKeys:      listEnv("GEMINI_API_KEYS"),
 		OpenCodeAPIKey:     strEnv("OPENCODE_API_KEY", ""),
 		OpenCodeAPIKeys:    listEnv("OPENCODE_API_KEYS"),
+		OpenCodeGoAPIKey:   strEnv("OPENCODE_GO_API_KEY", ""),
+		OpenCodeGoAPIKeys:  listEnv("OPENCODE_GO_API_KEYS"),
 		AssemblyAPIKey:     strEnv("ASSEMBLYAI_API_KEY", ""),
 		AssemblyAPIURL:     strEnv("ASSEMBLYAI_API_URL", "https://api.assemblyai.com"),
 		FishStudioAPIKey:   strEnv("FISH_STUDIO_API_KEY", ""),

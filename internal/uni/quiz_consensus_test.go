@@ -6,9 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/config"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/llm"
 	"github.com/r4r1ty-tech/AIstudydevb2bsaas/internal/moodle"
 )
@@ -109,6 +111,58 @@ func TestAnswerVoteKeyNormalizesText(t *testing.T) {
 	b := answerVoteKey(q, moodle.QuizAnswer{Text: "бит"})
 	if a == "" || a != b {
 		t.Fatalf("текстовые ответы должны нормализоваться одинаково: %q vs %q", a, b)
+	}
+}
+
+func TestNormQuizTextKeepsAngleBracketAnswers(t *testing.T) {
+	for _, in := range []string{"<0,0,У><0,0,К><2,1,С>", "[1<4,3>]", "x<0,0>y"} {
+		if got := normQuizText(in); got == "" || !strings.Contains(got, "<") {
+			t.Fatalf("normQuizText(%q) = %q: значимые угловые скобки потеряны", in, got)
+		}
+	}
+	if got := normQuizText("<b>Бит</b>"); got != "бит" {
+		t.Fatalf("HTML-теги должны вырезаться: %q", got)
+	}
+	if got := normQuizText(`<a href="x">текст</a>`); got != "текст" {
+		t.Fatalf("HTML с атрибутами должен вырезаться: %q", got)
+	}
+}
+
+func TestAnswerVoteKeyDistinguishesLZSSTokens(t *testing.T) {
+	q := moodle.QuizQuestion{Slot: 1, QType: "shortanswer"}
+	a := answerVoteKey(q, moodle.QuizAnswer{Text: "[1<4,3>]"})
+	b := answerVoteKey(q, moodle.QuizAnswer{Text: "[1<9,3>]"})
+	if a == "" || b == "" {
+		t.Fatalf("ответы LZSS не должны становиться пустыми: %q vs %q", a, b)
+	}
+	if a == b {
+		t.Fatalf("разные LZSS-токены склеились в один голос: %q", a)
+	}
+	if got := answerVoteKey(q, moodle.QuizAnswer{Text: "<0,0,У><0,0,К>"}); got == "" {
+		t.Fatal("ответ LZ77 не должен теряться при голосовании")
+	}
+}
+
+func TestQuizQuestionHashKeepsLZ77Choices(t *testing.T) {
+	q1 := moodle.QuizQuestion{
+		QType: "shortanswer",
+		Text:  "Декодируйте LZ77",
+		Choices: []moodle.QuizChoice{
+			{Text: "<0,0,У><0,0,К><2,1,С>"},
+			{Text: "<0,0,А><1,2,Б>"},
+		},
+	}
+	q2 := q1
+	q2.Choices = []moodle.QuizChoice{
+		{Text: "<0,0,У><0,0,К><2,1,С>"},
+		{Text: "<0,0,А><1,3,Б>"},
+	}
+	h1, h2 := quizQuestionHash(q1), quizQuestionHash(q2)
+	if h1 == "" || h1 == h2 {
+		t.Fatalf("хэш должен различать LZ77-варианты: %q vs %q", h1, h2)
+	}
+	if normQuizText(q1.Choices[0].Text) == "" {
+		t.Fatal("LZ77-вариант потерялся при нормализации для хэша")
 	}
 }
 
@@ -233,5 +287,90 @@ func TestAskPageConsensusMajorityOfThreeKeys(t *testing.T) {
 	}
 	if res.Used == nil {
 		t.Fatal("в результате должен быть Used")
+	}
+}
+
+// Консенсус упал целиком, бюджета у страницы нет (тест без таймера): страница
+// всё равно должна получить ответ одной обычной цепочкой.
+func TestAskPageFallsBackWithoutBudgetWhenConsensusFails(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= 3 {
+			http.Error(w, "upstream down", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{
+				"message": map[string]string{"content": `{"answers":[{"slot":1,"choice":"0","confidence":0.9}]}`},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	old := llm.GeminiURL
+	llm.GeminiURL = srv.URL
+	defer func() { llm.GeminiURL = old }()
+
+	chain := make([]llm.Target, 0, 3)
+	for _, key := range []string{"k1", "k2", "k3"} {
+		tg, ok := llm.ProviderWithUserKey(nil, llm.Gemini, key, 0)
+		if !ok {
+			t.Fatalf("не собрался target для ключа %s", key)
+		}
+		chain = append(chain, tg)
+	}
+	qs := []moodle.QuizQuestion{{
+		Slot:    1,
+		QType:   "truefalse",
+		Choices: []moodle.QuizChoice{{Name: "q1:1_answer", Value: "0", Text: "Да"}, {Name: "q1:1_answer", Value: "1", Text: "Нет"}},
+	}}
+	sy := &Syncer{Cfg: &config.Config{QuizConsensus: 3, QuizConsensusMax: 9, QuizConsensusShare: 66, QuizConfidenceMin: 0.5}}
+	answers, _, _, err := sy.askPage(context.Background(), quizTag{TG: 1, CMID: 3}, 0, chain, "Курс", "", qs, nil, solvePageOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := answers[1].Choice; got != "0" {
+		t.Fatalf("без бюджета страница должна получить ответ цепочкой, получили %q", got)
+	}
+}
+
+// В пуле только два ключа, а для консенсуса нужно три: askPage сразу решает
+// одной цепочкой, а не оставляет страницу пустой.
+func TestAskPageTwoKeysUsesSingleChain(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{
+				"message": map[string]string{"content": `{"answers":[{"slot":1,"choice":"1","confidence":0.8}]}`},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	old := llm.GeminiURL
+	llm.GeminiURL = srv.URL
+	defer func() { llm.GeminiURL = old }()
+
+	chain := make([]llm.Target, 0, 2)
+	for _, key := range []string{"k1", "k2"} {
+		tg, ok := llm.ProviderWithUserKey(nil, llm.Gemini, key, 0)
+		if !ok {
+			t.Fatalf("не собрался target для ключа %s", key)
+		}
+		chain = append(chain, tg)
+	}
+	qs := []moodle.QuizQuestion{{
+		Slot:    1,
+		QType:   "truefalse",
+		Choices: []moodle.QuizChoice{{Name: "q1:1_answer", Value: "0", Text: "Да"}, {Name: "q1:1_answer", Value: "1", Text: "Нет"}},
+	}}
+	sy := &Syncer{Cfg: &config.Config{QuizConsensus: 3, QuizConsensusMax: 9, QuizConsensusShare: 66, QuizConfidenceMin: 0.5}}
+	answers, _, _, err := sy.askPage(context.Background(), quizTag{TG: 1, CMID: 4}, 0, chain, "Курс", "", qs, nil, solvePageOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := answers[1].Choice; got != "1" {
+		t.Fatalf("два ключа должны давать ответ одной цепочкой, получили %q", got)
 	}
 }

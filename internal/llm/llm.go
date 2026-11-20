@@ -4,19 +4,22 @@
 //
 // Провайдеры:
 //   - gemini — Google AI Studio (GEMINI_API_KEYS), бесплатный тариф: основная цепочка всех;
-//   - opencode — OpenCode Zen (OPENCODE_API_KEY), бесплатные модели: запасной вариант;
+//   - opencode-go — OpenCode Go (OPENCODE_GO_API_KEY): deepseek/glm, платный шлюз;
+//   - opencode — OpenCode Zen (OPENCODE_API_KEY): бесплатная модель недоступна, в цепочках не участвует;
 //   - cheaper — LLM_API_* (cheaperinference: muse-spark-1.3-contributor → glm-5.3-flash): только админ.
 package llm
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
+	mathrand "math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -28,10 +31,11 @@ import (
 )
 
 const (
-	Gemini    = "gemini"
-	OpenCode  = "opencode"
-	Cheaper   = "cheaper"
-	RouterHub = "routerhub"
+	Gemini     = "gemini"
+	OpenCode   = "opencode"
+	OpenCodeGo = "opencode-go"
+	Cheaper    = "cheaper"
+	RouterHub  = "routerhub"
 
 	// userAgent: Zen за Cloudflare режет пустой/скриптовый UA (ошибка 1010).
 	userAgent = "ssau-bot/1.0 (+https://github.com/r4r1ty-tech/AIstudydevb2bsaas)"
@@ -40,20 +44,47 @@ const (
 var (
 	// GeminiURL и OpenCodeURL — базовые адреса API провайдеров пула.
 	// Переменные пакета позволяют перенаправлять запросы на тестовый сервер в тестах.
-	GeminiURL    = "https://generativelanguage.googleapis.com/v1beta/openai"
-	OpenCodeURL  = "https://opencode.ai/zen/v1"
-	RouterHubURL = "https://routerhub.si/v1"
+	GeminiURL     = "https://generativelanguage.googleapis.com/v1beta/openai"
+	OpenCodeURL   = "https://opencode.ai/zen/v1"
+	OpenCodeGoURL = "https://opencode.ai/zen/go/v1"
+	RouterHubURL  = "https://routerhub.si/v1"
 )
+
+// openCodeSession — UUID сессии для x-opencode-session: OpenCode Go без него
+// отвечает 400 {"type":"MissingSessionID"}. Один на процесс, значение любое.
+var openCodeSession = newOpenCodeSession()
+
+func newOpenCodeSession() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%08x-0000-4000-8000-%012x", time.Now().Unix(), time.Now().UnixNano()&0xffffffffffff)
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // версия 4
+	b[8] = (b[8] & 0x3f) | 0x80 // вариант RFC 4122
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// setCommonHeaders — заголовки, общие для chat/completions и /models.
+func setCommonHeaders(req *http.Request, provider string) {
+	req.Header.Set("User-Agent", userAgent)
+	if provider == OpenCodeGo {
+		req.Header.Set("x-opencode-session", openCodeSession)
+	}
+}
 
 // Модели по умолчанию, от лучшей к самой быстрой. Проверено 2026-11-14 на
 // бесплатном тарифе: hydrogen решает лучше всех (~1 мин), 3.6-flash ~7 с,
 // 3.5-flash-lite ~2 с; argon/carbon/pro на бесплатном тарифе отвечают 429.
 var (
 	GeminiModels = []string{"gemini-4-hydrogen", "gemini-3.6-flash", "gemini-3.5-flash-lite"}
-	// Лимит бесплатных моделей Zen общий на аккаунт (FreeUsageLimitError,
-	// Retry-After ~9 ч), а не на модель: запасные модели после 429 только
-	// жгут запросы. Одна модель — та, что обычно отвечает.
-	OpenCodeModels = []string{"glm-5.3-flash-free"}
+	// Бесплатная модель OpenCode Zen (glm-5.3-flash-free) отдаёт HTTP 400
+	// «Model is unavailable» на всех ключах, поэтому её в пуле нет: провайдер
+	// Zen остаётся в панели, но цепочки он не пополняет.
+	OpenCodeModels = []string{}
+	// OpenCode Go — OpenAI-совместимый шлюз (x-opencode-session обязателен).
+	// Модели проверены с прода 2026-11-20: все три отвечают 200.
+	OpenCodeGoModels = []string{"deepseek-v4.1-flash", "glm-5.3", "glm-5.3-flash"}
 	// CheaperModels — cheaperinference (только админ): обе дешёвые, умные и
 	// видят картинки. Проверено 2026-11-14 на Шенноне-Фано и таблице кода с
 	// картинки — обе верно. muse-spark-1.3-contributor ($0.085/$0.17 за 1M)
@@ -197,6 +228,9 @@ func Providers(cfg *config.Config) []Provider {
 	if keys := ParseKeys(append(append([]string{}, cfg.OpenCodeAPIKeys...), cfg.OpenCodeAPIKey)...); len(keys) > 0 {
 		out = append(out, Provider{ID: OpenCode, Name: "OpenCode Zen (бесплатные модели)", URL: OpenCodeURL, Keys: keys, Models: OpenCodeModels})
 	}
+	if keys := ParseKeys(append(append([]string{}, cfg.OpenCodeGoAPIKeys...), cfg.OpenCodeGoAPIKey)...); len(keys) > 0 {
+		out = append(out, Provider{ID: OpenCodeGo, Name: "OpenCode Go", URL: OpenCodeGoURL, Keys: keys, Models: OpenCodeGoModels})
+	}
 	if k := strings.TrimSpace(cfg.LLMAPIKey); k != "" && strings.TrimSpace(cfg.LLMAPIURL) != "" {
 		models := cheaperModels(cfg.LLMModel, cfg.LLMAPIURL)
 		out = append(out, Provider{ID: Cheaper, Name: "Ключ админа LLM_API_* (только админ)", URL: cfg.LLMAPIURL,
@@ -237,6 +271,8 @@ func BuiltinProvider(id string) (Provider, bool) {
 		return Provider{ID: Gemini, Name: "Google AI Studio (бесплатно)", URL: GeminiURL, Models: GeminiModels}, true
 	case OpenCode:
 		return Provider{ID: OpenCode, Name: "OpenCode Zen (бесплатные модели)", URL: OpenCodeURL, Models: OpenCodeModels}, true
+	case OpenCodeGo:
+		return Provider{ID: OpenCodeGo, Name: "OpenCode Go", URL: OpenCodeGoURL, Models: OpenCodeGoModels}, true
 	default:
 		return Provider{}, false
 	}
@@ -361,6 +397,13 @@ func PoolChain(cfg *config.Config) []Target {
 			Keys:   mergePoolKeys(ParseKeys(append(append([]string{}, cfg.OpenCodeAPIKeys...), cfg.OpenCodeAPIKey)...), sharedKeysFor(OpenCode)),
 			Models: OpenCodeModels,
 		},
+		{
+			ID:     OpenCodeGo,
+			Name:   "OpenCode Go",
+			URL:    OpenCodeGoURL,
+			Keys:   mergePoolKeys(ParseKeys(append(append([]string{}, cfg.OpenCodeGoAPIKeys...), cfg.OpenCodeGoAPIKey)...), sharedKeysFor(OpenCodeGo)),
+			Models: OpenCodeGoModels,
+		},
 	}
 	var out []Target
 	for _, p := range poolProviders {
@@ -373,7 +416,7 @@ func PoolChain(cfg *config.Config) []Target {
 				indices[i] = i
 			}
 			if len(indices) > 1 {
-				rand.Shuffle(len(indices), func(i, j int) {
+				mathrand.Shuffle(len(indices), func(i, j int) {
 					indices[i], indices[j] = indices[j], indices[i]
 				})
 			}
@@ -921,7 +964,7 @@ func postJSON(ctx context.Context, t Target, payload map[string]any) (string, in
 	}
 	req.Header.Set("Authorization", "Bearer "+t.key)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", userAgent)
+	setCommonHeaders(req, t.Provider)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", 0, nil, nil, scrub(err.Error(), t.key)
@@ -968,7 +1011,7 @@ func ListModelsWithKey(ctx context.Context, p Provider, secret string) ([]string
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+secret)
-	req.Header.Set("User-Agent", userAgent)
+	setCommonHeaders(req, p.ID)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, scrub(err.Error(), secret)

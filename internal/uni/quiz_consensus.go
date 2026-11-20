@@ -77,12 +77,22 @@ func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []ll
 	}
 	start := time.Now()
 	answers, ask, res, err := s.askPageConsensus(ctx, tag, round, chain, course, materials, qs, pc, minVotes, maxKeys, opts)
-	if opts.Budget > 0 {
-		left := opts.Budget - time.Since(start)
-		if left > 15*time.Second && (err != nil || len(answers) < len(qs)) {
-			logx.Warnf("uni", "quiz %s: раунд %d: консенсус дал %d/%d ответов за %s (осталось %s) — добираю одной быстрой цепочкой",
-				tag, round, len(answers), len(qs), time.Since(start).Round(time.Second), left.Round(time.Second))
-			dAns, dAsk, dRes, derr := s.askPageDirectBudget(ctx, tag, round, directChain, course, materials, qs, pc, left)
+	// Консенсус не дал ответов на все слоты — добираем одной обычной цепочкой.
+	// При Budget == 0 (тест без таймера) отката раньше не было вовсе: страница
+	// оставалась без ответа и не сдавалась. Ограничиваем такой добор по времени,
+	// чтобы одна страница не заняла весь прогон.
+	if err != nil || len(answers) < len(qs) {
+		fallback := quizFallbackBudget
+		if opts.Budget > 0 {
+			fallback = opts.Budget - time.Since(start)
+			if fallback <= 15*time.Second {
+				fallback = 0
+			}
+		}
+		if fallback != 0 || opts.Budget == 0 {
+			logx.Warnf("uni", "quiz %s: раунд %d: консенсус дал %d/%d ответов за %s — добираю одной цепочкой (бюджет %s)",
+				tag, round, len(answers), len(qs), time.Since(start).Round(time.Second), fallback.Round(time.Second))
+			dAns, dAsk, dRes, derr := s.askPageDirectBudget(ctx, tag, round, directChain, course, materials, qs, pc, fallback)
 			merged := mergeFallbackAnswers(answers, dAns)
 			if len(merged) > len(answers) || (derr == nil && len(dAns) > 0) {
 				return merged, dAsk, dRes, nil
@@ -92,6 +102,11 @@ func (s *Syncer) askPage(ctx context.Context, tag quizTag, round int, chain []ll
 	}
 	return answers, ask, res, err
 }
+
+// quizFallbackBudget — предел добора одной цепочкой, когда у страницы нет
+// собственного бюджета (тест без таймера). Без предела перебор 17 моделей
+// мог бы идти очень долго.
+const quizFallbackBudget = 3 * time.Minute
 
 // askPageDirectBudget ограничивает обычную цепочку бюджетом страницы, чтобы
 // при откате от консенсуса одна страница не съела время остальных волн.

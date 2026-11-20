@@ -20,7 +20,7 @@ func GlobalPoolChain(cfg *config.Config) []Target {
 		return nil
 	}
 	provs := Providers(cfg)
-	for _, id := range []string{Gemini, OpenCode} {
+	for _, id := range []string{Gemini, OpenCode, OpenCodeGo} {
 		shared := sharedKeysFor(id)
 		idx := -1
 		for i := range provs {

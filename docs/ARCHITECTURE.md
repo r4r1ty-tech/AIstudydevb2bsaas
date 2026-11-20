@@ -99,7 +99,8 @@ Moodle: курсы (`core_course_get_enrolled_courses_by_timeline_classification
 | Провайдер | Ключи | Модели (от лучшей к быстрой) | Кому |
 | --- | --- | --- | --- |
 | `gemini` (Google AI Studio, бесплатный тариф) | `GEMINI_API_KEYS` + личные (`share_pool=1`) | `gemini-4-hydrogen`, `gemini-3.6-flash`, `gemini-3.5-flash-lite` | всем |
-| `opencode` (OpenCode Zen, бесплатные модели) | `OPENCODE_API_KEYS`, `OPENCODE_API_KEY` + личные (`share_pool=1`) | `glm-5.3-flash-free` | всем |
+| `opencode` (OpenCode Zen, бесплатные модели) | `OPENCODE_API_KEYS`, `OPENCODE_API_KEY` + личные (`share_pool=1`) | — (модель `glm-5.3-flash-free` недоступна, HTTP 400) | всем |
+| `opencode-go` (OpenCode Go) | `OPENCODE_GO_API_KEYS`, `OPENCODE_GO_API_KEY` | `deepseek-v4.1-flash`, `glm-5.3`, `glm-5.3-flash` | всем |
 | `cheaper` (`LLM_API_*`) | один | `muse-spark-1.3-contributor`, `glm-5.3-flash` (+ `LLM_MODEL`) | только админ |
 
 - **Ключи и пул:** ключи из `.env` подписываются владельцем (`Зуев:ключ`), личные ключи пользователей хранятся зашифрованными в `llm_keys` (`vault` + `MaskKey`, проверка изолированной пробой `TestProviderKey`). Во всех процессах (`cmd/bbb`, `cmd/rasp`, `webapp.New`) регистрируется `access.InitLLMBridge(st, v)`: отдаёт в пул расшаренные ключи (`share_pool=1` для `gemini`/`opencode`) и пишет статистику/кулдауны в `llm_usage` за UTC-день (ФИО владельца кэшируется на 5 мин в `ownerLookupCache`). Секреты в панель и логи не попадают (`Provider.Public`, `scrub`), маски/хвосты своих ключей видит владелец, всё остальное — только админ.

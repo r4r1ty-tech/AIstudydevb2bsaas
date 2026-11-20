@@ -383,7 +383,7 @@ func TestPoolChainSharedKeysDeduplication(t *testing.T) {
 				{Label: "личный", Secret: "g1", OwnerID: 101}, // дубль с .env ключом Медведев:g1
 				{Label: "личный", Secret: "g-shared", OwnerID: 202},
 			}
-		case OpenCode:
+		case OpenCodeGo:
 			return []Key{
 				{Label: "личный", Secret: "oc-shared", OwnerID: 303},
 			}
@@ -392,8 +392,10 @@ func TestPoolChainSharedKeysDeduplication(t *testing.T) {
 		}
 	})
 
-	chain := PoolChain(cfgAll())
-	wantLen := len(GeminiModels)*3 + len(OpenCodeModels)*2
+	cfg := cfgAll()
+	cfg.OpenCodeGoAPIKey = "go-env"
+	chain := PoolChain(cfg)
+	wantLen := len(GeminiModels)*3 + len(OpenCodeGoModels)*2
 	if len(chain) != wantLen {
 		t.Fatalf("PoolChain длина = %d, ждали %d", len(chain), wantLen)
 	}

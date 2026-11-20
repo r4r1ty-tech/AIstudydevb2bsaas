@@ -51,12 +51,12 @@ func TestSummarizeOpenAICompatible(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	oldURL := llm.OpenCodeURL
-	llm.OpenCodeURL = srv.URL
-	t.Cleanup(func() { llm.OpenCodeURL = oldURL })
+	oldURL := llm.OpenCodeGoURL
+	llm.OpenCodeGoURL = srv.URL
+	t.Cleanup(func() { llm.OpenCodeGoURL = oldURL })
 
 	cfg := &config.Config{
-		OpenCodeAPIKey: "oc_live_x",
+		OpenCodeGoAPIKey: "oc_live_x",
 	}
 	got, err := Summarize(context.Background(), cfg, "Матан", 2, "расшифровка", "")
 	if err != nil {
@@ -71,8 +71,8 @@ func TestSummarizeOpenAICompatible(t *testing.T) {
 	if gotAuth != "Bearer oc_live_x" {
 		t.Fatalf("auth = %q", gotAuth)
 	}
-	if gotModel != llm.OpenCodeModels[0] {
-		t.Fatalf("model = %q, want %q", gotModel, llm.OpenCodeModels[0])
+	if gotModel != llm.OpenCodeGoModels[0] {
+		t.Fatalf("model = %q, want %q", gotModel, llm.OpenCodeGoModels[0])
 	}
 	if !strings.Contains(gotSys, "Организационное") {
 		t.Fatalf("system prompt must ask for the operational block first: %q", gotSys)
@@ -104,11 +104,11 @@ func TestSummarizeEmptyAnswer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	oldURL := llm.OpenCodeURL
-	llm.OpenCodeURL = srv.URL
-	t.Cleanup(func() { llm.OpenCodeURL = oldURL })
+	oldURL := llm.OpenCodeGoURL
+	llm.OpenCodeGoURL = srv.URL
+	t.Cleanup(func() { llm.OpenCodeGoURL = oldURL })
 
-	cfg := &config.Config{OpenCodeAPIKey: "k"}
+	cfg := &config.Config{OpenCodeGoAPIKey: "k"}
 	if _, err := Summarize(context.Background(), cfg, "x", 1, "t", ""); err == nil || !strings.Contains(err.Error(), "пустой") {
 		t.Fatalf("err = %v", err)
 	}
