@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -45,6 +46,135 @@ func TestQuizQuery(t *testing.T) {
 	long := strings.Repeat("слово ", 100)
 	if r := []rune(quizQuery(moodle.QuizQuestion{Text: long})); len(r) > quizQueryRunes {
 		t.Fatalf("не обрезан: %d", len(r))
+	}
+}
+
+// Дословный запрос — очищенный текст вопроса в кавычках; короткие фразы
+// (меньше quizExactMinRunes) в поиск не идут, длинные обрезаются по слову.
+func TestQuizExactQuery(t *testing.T) {
+	q := moodle.QuizQuestion{Text: "Вопрос 1 Пока нет ответа Балл: 1,00 Отметить вопрос Какие три пакета участвуют в установлении TCP-соединения между узлами сети?"}
+	want := `"Какие три пакета участвуют в установлении TCP-соединения между узлами сети?"`
+	if got := quizExactQuery(q); got != want {
+		t.Fatalf("exact=%q, ждал %q", got, want)
+	}
+	if quizExactQuery(moodle.QuizQuestion{Text: "Что такое DNS?"}) != "" {
+		t.Fatal("короткая фраза не должна идти в поиск")
+	}
+	long := `"` + strings.Repeat("слово ", 100) + `"`
+	got := []rune(quizExactQuery(moodle.QuizQuestion{Text: long}))
+	if got[0] != '"' || got[len(got)-1] != '"' || len(got) > quizExactRunes+2 {
+		t.Fatalf("длинная фраза: %q (%d рун)", string(got), len(got))
+	}
+	if strings.Contains(string(got), `""`) {
+		t.Fatalf("двойные кавычки внутри фразы: %q", string(got))
+	}
+}
+
+// На странице сначала ищутся дословные фразы, потом ключевые слова;
+// одинаковые запросы не повторяются.
+func TestPageSearchReqsExactFirst(t *testing.T) {
+	pc := &pageCtx{queried: map[string]bool{}}
+	const long = "Какие три пакета участвуют в установлении TCP-соединения между узлами сети?"
+	qs := []moodle.QuizQuestion{
+		{Slot: 1, Text: long},
+		{Slot: 2, Text: "Какой флаг у первого пакета TCP?"},
+		{Slot: 3, Text: long},
+	}
+	reqs := pageSearchReqs(pc, qs)
+	if len(reqs) != 3 {
+		t.Fatalf("запросов %d: %+v", len(reqs), reqs)
+	}
+	if !reqs[0].Exact || reqs[0].Slot != 1 {
+		t.Fatalf("первым должен быть дословный запрос слота 1: %+v", reqs[0])
+	}
+	seen := map[string]bool{}
+	for _, r := range reqs {
+		if seen[r.Query] {
+			t.Fatalf("повтор запроса %q", r.Query)
+		}
+		seen[r.Query] = true
+	}
+	// Повторный вызов по той же странице новых запросов не даёт.
+	if again := pageSearchReqs(pc, qs); len(again) != 0 {
+		t.Fatalf("повторные запросы: %+v", again)
+	}
+}
+
+// Полный текст страницы показывается вместо сниппета, но с выдержкой.
+func TestWriteFindingsContentInsteadOfSnippet(t *testing.T) {
+	content := "дословный текст вопроса: " + strings.Repeat("а", 3000)
+	f := webFinding{Hits: []websearch.Hit{
+		{Title: "studfile", URL: "https://s/1", Snippet: "обрезанный сниппет", Content: content},
+		{Title: "other", URL: "https://s/2", Snippet: "короткий сниппет"},
+	}}
+	var b strings.Builder
+	writeFindings(&b, f)
+	out := b.String()
+	for _, want := range []string{"https://s/1", "studfile", "дословный текст вопроса", "[текст страницы, выдержка]", "https://s/2", "короткий сниппет"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("в промпте нет %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, strings.Repeat("а", quizContentRunes+1)) {
+		t.Error("content не обрезан до quizContentRunes")
+	}
+	if strings.Contains(out, "обрезанный сниппет") {
+		t.Error("при наличии content сниппет показывать не нужно")
+	}
+}
+
+// Лимит поисков на страницу: лишние запросы не уходят поставщику.
+func TestResearchLimit(t *testing.T) {
+	fw := &fakeWeb{}
+	sy := &Syncer{}
+	var reqs []searchReq
+	for i := 1; i <= 10; i++ {
+		reqs = append(reqs, searchReq{Slot: i, Query: fmt.Sprintf("q%d", i)})
+	}
+	ws := &websearch.Searcher{Providers: []websearch.Provider{fw}}
+	found, logs := sy.research(context.Background(), quizTag{TG: 1, CMID: 2}, ws, reqs, quizMaxSearchesPage)
+	if len(logs) != quizMaxSearchesPage || len(fw.queries) != quizMaxSearchesPage {
+		t.Fatalf("логов %d, запросов %d; ждал %d", len(logs), len(fw.queries), quizMaxSearchesPage)
+	}
+	if len(found) != quizMaxSearchesPage {
+		t.Fatalf("находок %d", len(found))
+	}
+	if _, logs2 := sy.research(context.Background(), quizTag{TG: 1, CMID: 2}, ws, reqs, 0); len(logs2) != 0 {
+		t.Fatalf("при исчерпанном бюджете ушло %d запросов", len(logs2))
+	}
+	if len(fw.queries) != quizMaxSearchesPage {
+		t.Fatalf("после исчерпания бюджета запросов %d", len(fw.queries))
+	}
+}
+
+// Страница из пяти вопросов: дословные фразы идут первыми, всего не больше
+// quizMaxSearchesPage поисков, один и тот же запрос дважды не ищется.
+func TestSolvePageSearchBudget(t *testing.T) {
+	var qs []moodle.QuizQuestion
+	subjects := []string{"TCP", "UDP", "IP", "HTTP", "DNS"}
+	for i, s := range subjects {
+		qs = append(qs, moodle.QuizQuestion{Slot: i + 1, QType: "shortanswer", InputName: fmt.Sprintf("q%d", i+1),
+			Text: fmt.Sprintf("%s: какой протокол обеспечивает надёжную доставку сегментов между узлами сети?", s)})
+	}
+	var ans []string
+	for i := range qs {
+		ans = append(ans, fmt.Sprintf(`{"slot":%d,"text":"TCP","confidence":0.9}`, i+1))
+	}
+	srv, _ := fakeLLM(t, `{"answers":[`+strings.Join(ans, ",")+`]}`)
+	fw := &fakeWeb{}
+	sy := &Syncer{Web: &websearch.Searcher{Providers: []websearch.Provider{fw}}}
+	if _, _, _, err := sy.solvePage(context.Background(), quizTag{TG: 1, CMID: 2}, nil, sy.webSearcher(), chainFor(srv), "", "", qs); err != nil {
+		t.Fatal(err)
+	}
+	exact := 0
+	for _, q := range fw.queries {
+		if strings.HasPrefix(q, `"`) {
+			exact++
+		}
+	}
+	if len(fw.queries) != quizMaxSearchesPage || exact != len(qs) {
+		t.Fatalf("запросов %d (дословных %d); ждал %d, из них %d дословных: %v",
+			len(fw.queries), exact, quizMaxSearchesPage, len(qs), fw.queries)
 	}
 }
 

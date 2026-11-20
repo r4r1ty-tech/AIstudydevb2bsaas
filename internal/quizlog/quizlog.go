@@ -38,6 +38,7 @@ type Search struct {
 	Hits     int    `json:"hits"`
 	Error    string `json:"error,omitempty"`
 	Refine   bool   `json:"refine,omitempty"` // второй проход: запрос придумала модель
+	Exact    bool   `json:"exact,omitempty"`  // дословная фраза вопроса в кавычках
 }
 
 type Page struct {

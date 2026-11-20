@@ -23,6 +23,9 @@ type Hit struct {
 	Title   string `json:"title"`
 	URL     string `json:"url"`
 	Snippet string `json:"snippet"`
+	// Content — текст страницы от поставщика целиком (raw_content Tavily,
+	// text Exa), если он пришёл. Пусто — в промпт идёт только Snippet.
+	Content string `json:"content,omitempty"`
 }
 
 // Provider — один поисковик.
@@ -153,19 +156,31 @@ func (t *Tavily) Search(ctx context.Context, q string, n int) ([]Hit, error) {
 	}
 	var out struct {
 		Results []struct {
-			Title   string `json:"title"`
-			URL     string `json:"url"`
-			Content string `json:"content"`
+			Title      string `json:"title"`
+			URL        string `json:"url"`
+			Content    string `json:"content"`
+			RawContent string `json:"raw_content"`
 		} `json:"results"`
 	}
-	body := map[string]any{"query": q, "max_results": n, "search_depth": "basic"}
+	// advanced + raw_content отдают текст страницы, а не только сниппет: по нему
+	// модель находит нужный фрагмент дословно. Меньше 5 результатов не просим,
+	// больше 10 Tavily не отдаёт.
+	n = min(max(n, 5), 10)
+	body := map[string]any{
+		"query": q, "max_results": n, "search_depth": "advanced",
+		"include_raw_content": true, "include_answer": false,
+	}
 	if err := doJSON(ctx, t.HTTP, http.MethodPost, base+"/search",
 		map[string]string{"Authorization": "Bearer " + t.Key}, body, &out); err != nil {
 		return nil, err
 	}
 	hits := make([]Hit, 0, len(out.Results))
 	for _, r := range out.Results {
-		hits = append(hits, Hit{Title: r.Title, URL: r.URL, Snippet: r.Content})
+		h := Hit{Title: r.Title, URL: r.URL, Snippet: r.Content}
+		if raw := strings.TrimSpace(r.RawContent); raw != "" {
+			h.Content = raw
+		}
+		hits = append(hits, h)
 	}
 	return hits, nil
 }
@@ -194,7 +209,12 @@ func (e *Exa) Search(ctx context.Context, q string, n int) ([]Hit, error) {
 	}
 	body := map[string]any{
 		"query": q, "numResults": n, "type": "auto",
-		"contents": map[string]any{"highlights": map[string]any{"numSentences": 3}},
+		"contents": map[string]any{
+			// text — сама страница (до 2000 символов), highlights — короткие
+			// фрагменты: из них получается сниппет, если текста нет.
+			"text":       map[string]any{"maxCharacters": 2000},
+			"highlights": map[string]any{"numSentences": 3},
+		},
 	}
 	if err := doJSON(ctx, e.HTTP, http.MethodPost, base+"/search",
 		map[string]string{"x-api-key": e.Key}, body, &out); err != nil {
@@ -206,7 +226,11 @@ func (e *Exa) Search(ctx context.Context, q string, n int) ([]Hit, error) {
 		if sn == "" {
 			sn = r.Text
 		}
-		hits = append(hits, Hit{Title: r.Title, URL: r.URL, Snippet: sn})
+		h := Hit{Title: r.Title, URL: r.URL, Snippet: sn}
+		if txt := strings.TrimSpace(r.Text); txt != "" {
+			h.Content = txt
+		}
+		hits = append(hits, h)
 	}
 	return hits, nil
 }

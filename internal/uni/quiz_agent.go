@@ -109,6 +109,9 @@ type pageCtx struct {
 	feedback map[int]string    // slot → почему прошлый ответ не принят
 	queried  map[string]bool
 	wrong    map[int][]string // slot → ранее проверенные неверные ответы (текстом)
+	// searchLeft — сколько поисков ещё можно сделать по этой странице
+	// (quizMaxSearchesPage на страницу, дословные и ключевые вместе).
+	searchLeft int
 }
 
 func (pc *pageCtx) addFindings(f map[int]webFinding) {
@@ -268,7 +271,7 @@ func (s *Syncer) solvePageAI(ctx context.Context, tag quizTag, c *moodle.Client,
 	qs := s.describeQuestionImages(ctx, tag, c, questions, &pl)
 	logx.Debugf("uni", "quiz %s: вопросов %d, цепочка ИИ %d, материалы %d симв.", tag, len(qs), len(chain), len([]rune(materials)))
 
-	pc := &pageCtx{web: map[int]webFinding{}, opened: map[string]string{}, allowed: map[string]bool{}, queried: map[string]bool{}, feedback: map[int]string{}, wrong: map[int][]string{}}
+	pc := &pageCtx{web: map[int]webFinding{}, opened: map[string]string{}, allowed: map[string]bool{}, queried: map[string]bool{}, feedback: map[int]string{}, wrong: map[int][]string{}, searchLeft: quizMaxSearchesPage}
 	wrongAll := s.wrongAnswersFor(tag, all)
 	for slot, list := range wrongAll {
 		for _, w := range list {
@@ -276,14 +279,9 @@ func (s *Syncer) solvePageAI(ctx context.Context, tag quizTag, c *moodle.Client,
 		}
 	}
 	if ws != nil {
-		queries := map[int]string{}
-		for _, q := range qs {
-			if qq := quizQuery(q); qq != "" {
-				queries[q.Slot] = qq
-				pc.queried[qq] = true
-			}
-		}
-		found, logs := s.research(ctx, tag, ws, queries)
+		reqs := pageSearchReqs(pc, qs)
+		found, logs := s.research(ctx, tag, ws, reqs, pc.searchLeft)
+		pc.searchLeft -= len(logs)
 		pc.addFindings(found)
 		pl.Search = append(pl.Search, logs...)
 	} else {
@@ -425,17 +423,18 @@ func logValidation(tag quizTag, round int, qs []moodle.QuizQuestion, bad map[int
 // true — появилось что-то новое.
 func (s *Syncer) followUp(ctx context.Context, tag quizTag, ws *websearch.Searcher, pc *pageCtx, ask pageAsk, pl *quizlog.Page) bool {
 	got := false
-	queries := map[int]string{}
+	var reqs []searchReq
 	for slot, q := range ask.search {
-		if !pc.queried[q] {
-			queries[slot] = q
-			pc.queried[q] = true
-		} else {
+		if pc.queried[q] {
 			logx.Debugf("uni", "quiz %s: поиск slot=%d запрос=%q уже был, пропуск", tag, slot, q)
+			continue
 		}
+		pc.queried[q] = true
+		reqs = append(reqs, searchReq{Slot: slot, Query: q})
 	}
-	if len(queries) > 0 {
-		found, logs := s.research(ctx, tag, ws, queries)
+	if len(reqs) > 0 {
+		found, logs := s.research(ctx, tag, ws, reqs, pc.searchLeft)
+		pc.searchLeft -= len(logs)
 		for i := range logs {
 			logs[i].Refine = true
 		}

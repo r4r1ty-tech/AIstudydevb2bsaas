@@ -61,6 +61,79 @@ func TestTavily(t *testing.T) {
 	}
 }
 
+// Tavily просит advanced + raw_content, а не только сниппеты, и разбирает
+// полный текст страницы в Hit.Content. max_results держится в 5..10.
+func TestTavilyAdvancedRawContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Query             string `json:"query"`
+			MaxResults        int    `json:"max_results"`
+			SearchDepth       string `json:"search_depth"`
+			IncludeRawContent bool   `json:"include_raw_content"`
+			IncludeAnswer     *bool  `json:"include_answer"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("тело не JSON: %v", err)
+			w.WriteHeader(400)
+			return
+		}
+		if body.SearchDepth != "advanced" || !body.IncludeRawContent {
+			t.Errorf("тело запроса: %+v, ждал search_depth=advanced и include_raw_content=true", body)
+		}
+		if body.MaxResults < 5 || body.MaxResults > 10 {
+			t.Errorf("max_results=%d, ждал 5..10", body.MaxResults)
+		}
+		if body.IncludeAnswer != nil && *body.IncludeAnswer {
+			t.Error("include_answer должен быть false")
+		}
+		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://u/t","content":"C","raw_content":"Полный текст страницы"}]}`))
+	}))
+	defer srv.Close()
+	tv := &Tavily{Key: "k", HTTP: srv.Client(), Base: srv.URL}
+	hits, err := tv.Search(context.Background(), "q", 3)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("hits=%+v err=%v", hits, err)
+	}
+	if hits[0].Snippet != "C" || hits[0].Content != "Полный текст страницы" {
+		t.Fatalf("hit=%+v", hits[0])
+	}
+}
+
+// Exa просит text до 2000 символов и кладёт его в Hit.Content.
+func TestExaTextContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "k" {
+			w.WriteHeader(401)
+			return
+		}
+		var body struct {
+			Contents struct {
+				Text struct {
+					MaxCharacters int `json:"maxCharacters"`
+				} `json:"text"`
+			} `json:"contents"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("тело не JSON: %v", err)
+			w.WriteHeader(400)
+			return
+		}
+		if body.Contents.Text.MaxCharacters != 2000 {
+			t.Errorf("maxCharacters=%d, ждал 2000", body.Contents.Text.MaxCharacters)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://u","text":"Текст страницы","highlights":["фрагмент"]}]}`))
+	}))
+	defer srv.Close()
+	ex := &Exa{Key: "k", HTTP: srv.Client(), Base: srv.URL}
+	hits, err := ex.Search(context.Background(), "q", 3)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("hits=%+v err=%v", hits, err)
+	}
+	if hits[0].Snippet != "фрагмент" || hits[0].Content != "Текст страницы" {
+		t.Fatalf("hit=%+v", hits[0])
+	}
+}
+
 type fake struct {
 	name string
 	hits []Hit
