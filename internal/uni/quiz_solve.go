@@ -833,6 +833,204 @@ func submitPageAnswers(ctx context.Context, tag quizTag, c *moodle.Client, page 
 	return updated, nil
 }
 
+const (
+	// quizCheckRounds — сколько раз за страницу нажимаем кнопки проверки:
+	// первый вердикт и проверка исправленных ответов.
+	quizCheckRounds = 2
+	// quizCheckMaxSlots — сколько слотов за страницу вообще можно исправлять.
+	quizCheckMaxSlots = 4
+	// quizCheckMinLeft — при меньшем бюджете страницы или меньшем остатке
+	// до дедлайна переспрашивать ИИ уже не стоит.
+	quizCheckMinLeft = 45 * time.Second
+)
+
+// submitPageVerified отправляет страницу и, если у вопросов есть кнопка проверки
+// (behaviour adaptive/interactive), использует мгновенный вердикт Moodle: ответы
+// неверных слотов переспрашиваются у ИИ с обратной связью и проверяются повторно,
+// пока попытка не завершена и правка бесплатна. Без кнопок проверки работает как
+// submitPageAnswers. Возвращает страницу после финальной отправки и итоговые ответы.
+func (s *Syncer) submitPageVerified(
+	ctx, solveCtx context.Context,
+	tag quizTag,
+	c *moodle.Client,
+	ws *websearch.Searcher,
+	chain []llm.Target,
+	course, materials string,
+	page *moodle.AttemptPage,
+	answers map[int]moodle.QuizAnswer,
+	opts solvePageOpts,
+) (*moodle.AttemptPage, map[int]moodle.QuizAnswer, error) {
+	var checkable []int
+	for _, q := range page.Questions {
+		if q.HasSubmitButton {
+			checkable = append(checkable, q.Slot)
+		}
+	}
+	if len(checkable) == 0 {
+		updated, err := submitPageAnswers(ctx, tag, c, page, answers)
+		return updated, answers, err
+	}
+
+	cur := page
+	correct := make(map[int]bool, len(checkable))
+	fixed := 0
+	rounds := 0
+	for round := 1; round <= quizCheckRounds; round++ {
+		todo := make([]int, 0, len(checkable))
+		for _, slot := range checkable {
+			if !correct[slot] {
+				todo = append(todo, slot)
+			}
+		}
+		if len(todo) == 0 {
+			break
+		}
+		rounds = round
+		wrong, err := s.checkPageSlots(ctx, tag, c, &cur, answers, todo)
+		if err != nil {
+			// Проверка сорвалась — уже полученные ответы не теряем, отправляем как есть.
+			logx.Warnf("uni", "quiz %s: раунд проверки %d: %v; отправляю без правки", tag, round, err)
+			break
+		}
+		for _, slot := range todo {
+			if !containsInt(wrong, slot) {
+				correct[slot] = true
+			}
+		}
+		logx.Infof("uni", "quiz %s: раунд проверки %d: проверено слотов %d, неверных %d",
+			tag, round, len(todo), len(wrong))
+		if len(wrong) == 0 {
+			break
+		}
+		if round >= quizCheckRounds {
+			break
+		}
+		if fixed >= quizCheckMaxSlots || !quizRetryAllowed(solveCtx, opts) {
+			logx.Infof("uni", "quiz %s: неверные слоты %v не исправляю: исправлено %d, мало времени до конца попытки",
+				tag, wrong, fixed)
+			break
+		}
+		if free := quizCheckMaxSlots - fixed; len(wrong) > free {
+			wrong = wrong[:free]
+		}
+		if _, err := s.retryWrongSlots(solveCtx, tag, c, ws, chain, course, materials, cur, answers, wrong, opts); err != nil {
+			logx.Warnf("uni", "quiz %s: переспрос неверных слотов %v: %v; отправляю как есть", tag, wrong, err)
+			break
+		}
+		fixed += len(wrong)
+		logx.Infof("uni", "quiz %s: исправлено ответов во втором раунде: %d (слоты %v)", tag, fixed, wrong)
+	}
+
+	updated, err := c.SubmitAnswers(ctx, cur, answers, 0)
+	if err != nil {
+		return nil, answers, fmt.Errorf("отправка страницы: %w", err)
+	}
+	logx.Infof("uni", "quiz %s: проверка adaptive: слотов %d, раундов %d, исправлено %d, в итоге верных %d",
+		tag, len(checkable), rounds, fixed, len(correct))
+	return updated, answers, nil
+}
+
+// checkPageSlots нажимает кнопку проверки каждого слота и читает вердикт Moodle.
+// Возвращает слоты в состоянии incorrect/partiallycorrect; page сдвигается на
+// последнюю полученную страницу.
+func (s *Syncer) checkPageSlots(ctx context.Context, tag quizTag, c *moodle.Client, page **moodle.AttemptPage, answers map[int]moodle.QuizAnswer, slots []int) ([]int, error) {
+	var wrong []int
+	for _, slot := range slots {
+		updated, err := c.SubmitAnswers(ctx, *page, answers, slot)
+		if err != nil {
+			return wrong, fmt.Errorf("проверка вопроса %d: %w", slot, err)
+		}
+		if updated == nil || len(updated.Questions) == 0 {
+			logx.Warnf("uni", "quiz %s: проверка вопроса %d не вернула страницу, вердикт неизвестен", tag, slot)
+			continue
+		}
+		*page = updated
+		if st := questionState(updated, slot); st == "incorrect" || st == "partiallycorrect" {
+			wrong = append(wrong, slot)
+		}
+	}
+	return wrong, nil
+}
+
+// retryWrongSlots переспрашивает ИИ ответы для слотов, которые Moodle отметил
+// неверными, и заменяет их в answers.
+func (s *Syncer) retryWrongSlots(
+	ctx context.Context,
+	tag quizTag,
+	c *moodle.Client,
+	ws *websearch.Searcher,
+	chain []llm.Target,
+	course, materials string,
+	page *moodle.AttemptPage,
+	answers map[int]moodle.QuizAnswer,
+	wrong []int,
+	opts solvePageOpts,
+) (map[int]moodle.QuizAnswer, error) {
+	want := make(map[int]bool, len(wrong))
+	opts.Feedback = make(map[int]string, len(wrong))
+	for _, slot := range wrong {
+		want[slot] = true
+		opts.Feedback[slot] = "Moodle отметил его неверным"
+	}
+	var qs []moodle.QuizQuestion
+	for _, q := range page.Questions {
+		if want[q.Slot] {
+			qs = append(qs, q)
+		}
+	}
+	if len(qs) == 0 {
+		return answers, fmt.Errorf("на странице нет вопросов слотов %v", wrong)
+	}
+	fixed, _, _, err := s.solvePageWithOpts(ctx, tag, c, ws, chain, course, materials, qs, opts)
+	if err != nil && len(fixed) == 0 {
+		return answers, err
+	}
+	for slot, a := range fixed {
+		answers[slot] = a
+	}
+	if len(fixed) == 0 {
+		return answers, fmt.Errorf("ИИ не дал новых ответов")
+	}
+	return answers, nil
+}
+
+// quizRetryAllowed — стоит ли ещё переспрашивать ИИ: есть время и не поздно.
+// Budget 0 без дедлайна — ограничения нет, правка разрешена.
+func quizRetryAllowed(solveCtx context.Context, opts solvePageOpts) bool {
+	if solveCtx.Err() != nil {
+		return false
+	}
+	if opts.Budget < 0 {
+		return false
+	}
+	if opts.Budget > 0 && opts.Budget < quizCheckMinLeft {
+		return false
+	}
+	if !opts.Deadline.IsZero() && time.Until(opts.Deadline) < quizCheckMinLeft {
+		return false
+	}
+	return true
+}
+
+// questionState — состояние вопроса по слоту на странице попытки.
+func questionState(page *moodle.AttemptPage, slot int) string {
+	for _, q := range page.Questions {
+		if q.Slot == slot {
+			return q.State
+		}
+	}
+	return ""
+}
+
+func containsInt(list []int, v int) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func collectRunPages(run *quizlog.Run, results []*pageSolveResult) {
 	for _, r := range results {
 		if r != nil {
@@ -932,7 +1130,9 @@ func (s *Syncer) solveAndSubmitFreeNav(
 			}
 			continue
 		}
-		if _, subErr := submitPageAnswers(ctx, ptag, c, pages[next], r.answers); subErr != nil {
+		opts := pageOptsForWave(initialFast, deadline, n-next, workers)
+		finalAnswers := r.answers
+		if _, _, subErr := s.submitPageVerified(ctx, solveCtx, ptag, c, ws, chain, course, materials, pages[next], finalAnswers, opts); subErr != nil {
 			logx.Warnf("uni", "quiz %s: страница %d не сохранилась в Moodle, пропущена, остальные идут дальше: %v", ptag, next+1, subErr)
 			r.pl.Error = "ответы не сохранились в Moodle: " + subErr.Error()
 			skipped = append(skipped, next+1)
@@ -940,6 +1140,9 @@ func (s *Syncer) solveAndSubmitFreeNav(
 				firstErr = fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", next+1, subErr)
 			}
 			continue
+		}
+		for slot, ans := range finalAnswers {
+			allAnswers[slot] = ans
 		}
 		sent++
 		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, pages[next].Page)
@@ -1013,10 +1216,13 @@ func (s *Syncer) solveAndSubmitSeqNav(
 
 		ptag := tag
 		ptag.Page = cur.Page
-		updated, subErr := submitPageAnswers(ctx, ptag, c, cur, r.answers)
+		updated, _, subErr := s.submitPageVerified(ctx, solveCtx, ptag, c, ws, chain, course, materials, cur, r.answers, opts)
 		if subErr != nil {
 			logx.Warnf("uni", "quiz %s: сохранение ответов страницы: %v", ptag, subErr)
 			return pages, allAnswers, usedModels, sentCount, fmt.Errorf("ответы страницы %d не сохранились в Moodle: %w", idx+1, subErr)
+		}
+		for slot, ans := range r.answers {
+			allAnswers[slot] = ans
 		}
 		sentCount++
 		logx.Debugf("uni", "quiz %s: ответы страницы %d отправлены в Moodle", tag, cur.Page)

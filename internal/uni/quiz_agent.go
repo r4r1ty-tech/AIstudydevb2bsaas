@@ -64,6 +64,9 @@ type solvePageOpts struct {
 	// Budget — сколько времени разумно потратить на эту страницу/волну.
 	// 0 — без отдельного ограничения (только общий solveCtx).
 	Budget time.Duration
+	// Feedback — slot → почему прошлый ответ не принят (вердикт Moodle
+	// в adaptive-тестах); попадает в промпт как обратная связь.
+	Feedback map[int]string
 }
 
 // quizThinkMinBudget — ниже этого бюджета на страницу максимальные
@@ -272,6 +275,11 @@ func (s *Syncer) solvePageAI(ctx context.Context, tag quizTag, c *moodle.Client,
 	logx.Debugf("uni", "quiz %s: вопросов %d, цепочка ИИ %d, материалы %d симв.", tag, len(qs), len(chain), len([]rune(materials)))
 
 	pc := &pageCtx{web: map[int]webFinding{}, opened: map[string]string{}, allowed: map[string]bool{}, queried: map[string]bool{}, feedback: map[int]string{}, wrong: map[int][]string{}, searchLeft: quizMaxSearchesPage}
+	for slot, why := range opts.Feedback {
+		if why != "" {
+			pc.feedback[slot] = why
+		}
+	}
 	wrongAll := s.wrongAnswersFor(tag, all)
 	for slot, list := range wrongAll {
 		for _, w := range list {
