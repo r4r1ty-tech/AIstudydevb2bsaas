@@ -128,6 +128,72 @@ func (s *Session) Do(req *http.Request) (*http.Response, []byte, error) {
 	return resp, body, nil
 }
 
+// ErrBodyTooLarge — тело ответа больше разрешённого потолка.
+var ErrBodyTooLarge = errors.New("websess: body too large")
+
+// DoWithLimit выполняет запрос и читает тело не больше maxBytes. checkURL
+// вызывается для исходного адреса и для каждого редиректа: он решает, можно ли
+// идти по этому адресу (схема, хост и т.п.). Ошибка checkURL прерывает запрос
+// (для редиректа — до перехода). maxBytes <= 0 — обычный потолок maxBody.
+func (s *Session) DoWithLimit(req *http.Request, maxBytes int64, checkURL func(*url.URL) error) (*http.Response, []byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxBody
+	}
+	verbose := logx.Verbose()
+	start := time.Now()
+	comp := s.name()
+	if checkURL != nil {
+		if err := checkURL(req.URL); err != nil {
+			return nil, nil, fmt.Errorf("websess: %s %s: %w", req.Method, MaskURL(req.URL), err)
+		}
+	}
+	redirects := 0
+	client := *s.Client
+	prev := client.CheckRedirect
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		redirects = len(via)
+		if checkURL != nil {
+			if err := checkURL(r.URL); err != nil {
+				return err
+			}
+		}
+		if prev != nil {
+			return prev(r, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		logx.Warnf(comp, "%s %s → ошибка за %s: %v", req.Method, MaskURL(req.URL), time.Since(start).Round(time.Millisecond), err)
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.ContentLength > maxBytes {
+		logx.Warnf(comp, "%s %s → тело %dБ больше потолка %dБ", req.Method, MaskURL(req.URL), resp.ContentLength, maxBytes)
+		return resp, nil, fmt.Errorf("%w: %d > %d", ErrBodyTooLarge, resp.ContentLength, maxBytes)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return resp, nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		logx.Warnf(comp, "%s %s → тело больше потолка %dБ", req.Method, MaskURL(req.URL), maxBytes)
+		return resp, nil, fmt.Errorf("%w: > %d", ErrBodyTooLarge, maxBytes)
+	}
+	if verbose {
+		final := ""
+		if resp.Request != nil && resp.Request.URL.String() != req.URL.String() {
+			final = " → " + MaskURL(resp.Request.URL)
+		}
+		logx.Debugf(comp, "%s %s → %d%s редиректов=%d %s %dБ за %s", req.Method, MaskURL(req.URL), resp.StatusCode, final,
+			redirects, resp.Header.Get("Content-Type"), len(body), time.Since(start).Round(time.Millisecond))
+	}
+	return resp, body, nil
+}
+
 // Name — подпись в логе: «moodle», «lk».
 func (s *Session) name() string {
 	if s.Name != "" {
@@ -163,6 +229,15 @@ func secretKey(k string) bool {
 		}
 	}
 	return false
+}
+
+// quizAnswerFieldRe — поля ответов Moodle: q<qubaid>:<slot>_answer,
+// q<qubaid>:<slot>_choice0, q<qubaid>:<slot>_-submit и т.п.
+var quizAnswerFieldRe = regexp.MustCompile(`^q\d+:\d+_`)
+
+// quizAnswerField — значение поля вопроса теста: в debug-лог оно не попадает.
+func quizAnswerField(k string) bool {
+	return quizAnswerFieldRe.MatchString(k)
 }
 
 // MaskURL — адрес для лога без секретов в query.
@@ -206,7 +281,7 @@ func formForLog(req *http.Request) string {
 		}
 		for k, vs := range vals {
 			for _, v := range vs {
-				if secretKey(k) {
+				if secretKey(k) || quizAnswerField(k) {
 					v = "***"
 				}
 				parts = append(parts, k+"="+clip(v, 200))
@@ -226,7 +301,7 @@ func formForLog(req *http.Request) string {
 			v, _ := io.ReadAll(io.LimitReader(part, 4096))
 			k := part.FormName()
 			val := string(v)
-			if secretKey(k) {
+			if secretKey(k) || quizAnswerField(k) {
 				val = "***"
 			}
 			parts = append(parts, k+"="+clip(val, 200))

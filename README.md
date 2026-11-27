@@ -223,6 +223,8 @@ flowchart TD
 │   ├── quiz/          сервис ssau-quiz: решение тестов из очереди
 │   ├── panel/         веб-панель: Mini App и JSON API
 │   ├── bbb/           воркер BBB: заход, запись, слайды, конспекты
+│   ├── mcp/           MCP-сервер Moodle: stdio и Streamable HTTP
+│   ├── mcpeval/       клиент MCP: read-only evals и JSON-отчёт
 │   ├── ssau-keys/     утилита: смена ключа ИИ и токена бота на проде
 │   └── unicheck/      разовая проверка клиентов ЛК и Moodle
 ├── internal/
@@ -254,7 +256,8 @@ flowchart TD
 │   ├── websearch/     веб-поиск для решателя
 │   └── websess/       HTTP-клиент «как браузер» с куками
 ├── deploy/            systemd-юниты, ssau.target, remote.sh, tunnel.sh, wake.py, reset-data.sh
-├── docs/              ARCHITECTURE, OPERATIONS, MOODLE_QUIZ, TESTING
+├── docs/              ARCHITECTURE, OPERATIONS, MOODLE_QUIZ, MCP, TESTING
+├── evals/             read-only задачи Moodle для cmd/mcpeval
 ├── .github/workflows/ deploy.yml, codeql.yml, reset-data.yml
 ├── env.example        шаблон .env со всеми переменными
 ├── PLAN.md            замысел и история решений
@@ -421,6 +424,7 @@ sqlite3 -header -column "$DB" "SELECT id, telegram_id, cmid, last_error, updated
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): процессы, пакеты, схема данных, ключевые сценарии, API панели
 - [docs/OPERATIONS.md](docs/OPERATIONS.md): конфиг, вход в панель, ИИ и ключи, STT, логи, systemd, деплой, диагностика
 - [docs/MOODLE_QUIZ.md](docs/MOODLE_QUIZ.md): жизненный цикл попытки в `mod/quiz`, типы вопросов, база проверенных ответов
+- [docs/MCP.md](docs/MCP.md): MCP-сервер Moodle: инструменты, ресурсы, промпты, stdio/HTTP, безопасность и evals
 - [docs/TESTING.md](docs/TESTING.md): runbook ручной проверки всех функций
 - [env.example](env.example): все переменные окружения
 

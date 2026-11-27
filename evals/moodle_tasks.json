@@ -1,0 +1,327 @@
+{
+  "version": 1,
+  "description": "Read-only проверки MCP-сервера Moodle do.ssau.ru. Задачи не запускают тесты и не отправляют ответы: только чтение курсов, материалов, сроков, файлов и локальных конспектов.",
+  "required_tools": [
+    "moodle_status",
+    "moodle_courses",
+    "moodle_course_outline",
+    "moodle_material_read",
+    "moodle_search",
+    "moodle_deadlines",
+    "moodle_file_get",
+    "moodle_notes"
+  ],
+  "required_prompts": [
+    "moodle_prepare_lecture",
+    "moodle_make_notes",
+    "moodle_exam_review"
+  ],
+  "required_resources": [
+    "moodle://courses",
+    "moodle://deadlines"
+  ],
+  "required_templates": [
+    "moodle://course/{id}/outline",
+    "moodle://material/{cmid}",
+    "moodle://notes/{id}/markdown",
+    "moodle://notes/{id}/pdf"
+  ],
+  "tasks": [
+    {
+      "id": "status",
+      "title": "Сессия Moodle авторизована",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_status",
+          "checks": [
+            {"path": "authenticated", "equals": true},
+            {"path": "login", "non_empty": true},
+            {"path": "base_url", "contains": "do.ssau.ru"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "courses",
+      "title": "Список курсов студента",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_courses",
+          "arguments": {"limit": 100},
+          "checks": [
+            {"path": "total", "min": 3},
+            {"path": "courses", "min_count": 3},
+            {"path": "courses", "contains": "Теория информации"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "search_course",
+      "title": "Поиск курса по названию",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_search",
+          "arguments": {"query": "грамматик"},
+          "checks": [
+            {"path": "total", "min": 1},
+            {"path": "results.0.course_id", "equals": 1742},
+            {"path": "results", "contains": "грамматик"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "outlines",
+      "title": "Структура курсов 1515, 1742 и 1807",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_course_outline",
+          "arguments": {"course_id": 1515},
+          "checks": [
+            {"path": "course_id", "equals": 1515},
+            {"path": "sections", "min_count": 1},
+            {"path": "total_modules", "min": 1}
+          ]
+        },
+        {
+          "kind": "tool",
+          "tool": "moodle_course_outline",
+          "arguments": {"course_id": 1742},
+          "checks": [
+            {"path": "course_id", "equals": 1742},
+            {"path": "sections", "min_count": 1},
+            {"path": "total_modules", "min": 1}
+          ]
+        },
+        {
+          "kind": "tool",
+          "tool": "moodle_course_outline",
+          "arguments": {"course_id": 1807},
+          "checks": [
+            {"path": "course_id", "equals": 1807},
+            {"path": "sections", "min_count": 1},
+            {"path": "total_modules", "min": 1}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "page_62991",
+      "title": "Страница 62991: варианты заданий",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_material_read",
+          "arguments": {"cmid": 62991, "kind": "page", "course_id": 1742},
+          "checks": [
+            {"path": "cmid", "equals": 62991},
+            {"path": "kind", "equals": "page"},
+            {"path": "text", "non_empty": true},
+            {"path": "files", "min_count": 1}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "resource_63209",
+      "title": "Ресурс 63209: лекции PDF",
+      "timeout_seconds": 180,
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_material_read",
+          "arguments": {"cmid": 63209, "kind": "resource", "course_id": 1742, "max_chars": 8000},
+          "checks": [
+            {"path": "cmid", "equals": 63209},
+            {"path": "text", "min_count": 2000},
+            {"path": "truncated", "equals": true}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "folder_62002",
+      "title": "Папка 62002: линии связи",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_material_read",
+          "arguments": {"cmid": 62002, "kind": "folder", "course_id": 1515},
+          "checks": [
+            {"path": "cmid", "equals": 62002},
+            {"path": "files", "min_count": 2},
+            {"path": "text", "non_empty": true}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lesson_60904",
+      "title": "Урок 60904: введение в Python",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_material_read",
+          "arguments": {"cmid": 60904, "kind": "lesson", "course_id": 1807},
+          "checks": [
+            {"path": "cmid", "equals": 60904},
+            {"path": "text", "min_count": 100}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "url_59646",
+      "title": "Ссылка 59646: видеолекция BBB",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_material_read",
+          "arguments": {"cmid": 59646, "kind": "url", "course_id": 1776},
+          "checks": [
+            {"path": "cmid", "equals": 59646},
+            {"path": "kind", "equals": "url"},
+            {"path": "text", "contains": "bbb.ssau.ru"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "search_entropy",
+      "title": "Поиск «энтропия» по всем курсам",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_search",
+          "arguments": {"query": "энтропия"},
+          "checks": [
+            {"path": "total", "min": 1},
+            {"path": "results", "contains": "энтропия"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "search_python",
+      "title": "Поиск «Python» в курсе 1807",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_search",
+          "arguments": {"query": "Python", "course_id": 1807},
+          "checks": [
+            {"path": "total", "min": 1},
+            {"path": "results", "contains": "python"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "deadlines",
+      "title": "Сроки на 7 и 30 дней",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_deadlines",
+          "arguments": {"days_ahead": 7, "include_overdue": true},
+          "checks": [
+            {"path": "days_ahead", "equals": 7},
+            {"path": "timezone", "equals": "Europe/Samara"},
+            {"path": "items", "exists": true}
+          ]
+        },
+        {
+          "kind": "tool",
+          "tool": "moodle_deadlines",
+          "arguments": {"days_ahead": 30, "include_overdue": true},
+          "checks": [
+            {"path": "days_ahead", "equals": 30},
+            {"path": "timezone", "equals": "Europe/Samara"},
+            {"path": "items", "exists": true}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "file_pdf_63209",
+      "title": "Файл 63209: извлечение текста PDF",
+      "timeout_seconds": 180,
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_file_get",
+          "arguments": {"cmid": 63209, "course_id": 1742, "extract_text": true, "max_chars": 5000},
+          "checks": [
+            {"path": "content_type", "equals": "application/pdf"},
+            {"path": "extracted", "equals": true},
+            {"path": "size", "min": 1000},
+            {"path": "text", "min_count": 500},
+            {"path": "filename", "contains": ".pdf"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "notes_list",
+      "title": "Локальные конспекты: список",
+      "steps": [
+        {
+          "kind": "tool",
+          "tool": "moodle_notes",
+          "arguments": {"action": "list", "limit": 5},
+          "checks": [
+            {"path": "action", "equals": "list"},
+            {"path": "packs", "exists": true},
+            {"path": "total", "min": 0}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "contracts",
+      "title": "Промпты и ресурсы MCP",
+      "steps": [
+        {
+          "kind": "resource",
+          "uri": "moodle://courses",
+          "checks": [
+            {"path": "total", "min": 1},
+            {"path": "courses", "min_count": 1}
+          ]
+        },
+        {
+          "kind": "prompts",
+          "checks": [
+            {"path": "count", "min": 3},
+            {"path": "names", "contains": "moodle_prepare_lecture"},
+            {"path": "names", "contains": "moodle_make_notes"},
+            {"path": "names", "contains": "moodle_exam_review"}
+          ]
+        },
+        {
+          "kind": "resources",
+          "checks": [
+            {"path": "count", "min": 2},
+            {"path": "uris", "contains": "moodle://courses"},
+            {"path": "uris", "contains": "moodle://deadlines"}
+          ]
+        },
+        {
+          "kind": "resource_templates",
+          "checks": [
+            {"path": "count", "min": 4},
+            {"path": "uris", "contains": "moodle://course/{id}/outline"},
+            {"path": "uris", "contains": "moodle://material/{cmid}"},
+            {"path": "uris", "contains": "moodle://notes/{id}/markdown"},
+            {"path": "uris", "contains": "moodle://notes/{id}/pdf"}
+          ]
+        }
+      ]
+    }
+  ]
+}

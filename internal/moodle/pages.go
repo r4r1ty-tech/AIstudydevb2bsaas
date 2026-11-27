@@ -269,6 +269,9 @@ func parseDetail(doc *goquery.Document, kind string, loc *time.Location) Detail 
 		if !canStart && (d.Status == model.MoodleTodo || d.Status == model.MoodleDraft) {
 			d.Todo = append(d.Todo, "Тест сейчас не открыт для попыток")
 		}
+	case model.MoodleLesson:
+		d.Status = lessonStatus(doc)
+		d.Todo = append(d.Todo, lessonInfoLines(doc)...)
 	}
 	if seen && allDone && d.Status != model.MoodleDraft {
 		d.Status = model.MoodleDone

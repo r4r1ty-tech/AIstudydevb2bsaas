@@ -2,7 +2,6 @@ package moodle
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -891,9 +890,9 @@ func (c *Client) SubmitAnswers(ctx context.Context, page *AttemptPage, answers m
 		slots = append(slots, s)
 	}
 	sort.Ints(slots)
-	for _, s := range slots {
-		b, _ := json.Marshal(answers[s])
-		logx.Debugf(logComponent, "отправляю ответ attempt=%d page=%d slot=%d: %s", page.AttemptID, page.Page, s, b)
+	if len(slots) > 0 {
+		// Содержимое ответов не логируем: это личные данные студента.
+		logx.Debugf(logComponent, "отправляю ответы attempt=%d page=%d: слоты %v", page.AttemptID, page.Page, slots)
 	}
 	logx.Debugf(logComponent, "отправка attempt=%d page=%d: checkSlot=%d nextpage=%d полей=%d",
 		page.AttemptID, page.Page, checkSlot, nextPage, len(fields))
